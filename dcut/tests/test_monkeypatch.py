@@ -123,3 +123,25 @@ def test_acl_graph_capture_check_treats_missing_forward_context_as_not_capturing
     monkeypatch.setitem(sys.modules, "vllm.forward_context", forward_context_module)
 
     assert not dcut_monkeypatch._in_acl_graph_capture()
+
+
+def test_apply_dcut_draft_lens_observe_only_leaves_scheduler_output(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    scheduler_output = types.SimpleNamespace(
+        scheduled_spec_decode_tokens={"req-0": [1, 2, 3, 4]},
+    )
+    runner = types.SimpleNamespace(
+        dcut_next_draft_lens={"req-0": 2},
+        dcut_config=types.SimpleNamespace(apply_truncation=False),
+        dcut_logged_observe_only=False,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    result = dcut_monkeypatch._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert result is scheduler_output
+    assert scheduler_output.scheduled_spec_decode_tokens["req-0"] == [1, 2, 3, 4]
+    assert runner.dcut_next_draft_lens == {}
+    assert runner.dcut_logged_observe_only

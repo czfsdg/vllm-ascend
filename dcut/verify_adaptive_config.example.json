@@ -1,5 +1,6 @@
 {
   "enabled": true,
+  "apply_truncation": false,
   "warmup_batch_sizes": [],
   "min_warmup_batch_size": 2,
   "max_warmup_batch_size": null,

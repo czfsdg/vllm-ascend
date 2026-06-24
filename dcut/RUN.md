@@ -22,6 +22,11 @@ export VLLM_PLUGINS=ascend,dcut_adaptive_verify
 `VLLM_DCUT_CONFIG`. If neither config env var is set, the plugin loads but stays
 dormant.
 
+By default the example config runs in observe-only mode with
+`"apply_truncation": false`, so it records probabilities and computes adaptive
+plans without changing verifier inputs. Set `"apply_truncation": true` only after
+validating correctness against vanilla DFlash on your workload.
+
 ## Scope
 
 - Active only for DFlash, or `method=draft_model` with `parallel_drafting=true`.
@@ -53,14 +58,18 @@ D-Cut adaptive-verify patched NPUModelRunner.
 D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.
 D-Cut adaptive verify ENABLED (config=...)
 D-Cut adaptive verify ACTIVE: computed first adaptive draft-length plan (...)
+D-Cut adaptive verify observe-only mode: computed plans are not applied.
+# If apply_truncation=true:
 D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
 ```
 
 The install-hook lines prove vLLM discovered the plugin without eagerly importing
 Ascend runner modules during CLI setup. The `patched ...` lines appear once the
 Ascend modules load normally. The `ENABLED` line proves the runner accepted the
-config and speculative method. The `ACTIVE` lines appear after traffic starts and
-prove D-Cut is actually computing and applying adaptive verifier lengths.
+config and speculative method. In the default observe-only mode, the observe-only
+line proves D-Cut computed a plan but intentionally did not change verifier
+inputs. If `apply_truncation=true`, the `ACTIVE` truncation line proves D-Cut is
+actually applying adaptive verifier lengths.
 
 Useful log checks:
 

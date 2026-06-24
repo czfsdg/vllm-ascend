@@ -11,6 +11,7 @@ from typing import Any
 @dataclass(slots=True)
 class VerifyAdaptiveConfig:
     enabled: bool = True
+    apply_truncation: bool = False
     min_query_len_per_req: int = 2
     max_query_len_per_req: int | None = None
     query_len_step_per_req: int = 2
@@ -42,6 +43,7 @@ class VerifyAdaptiveConfig:
     def to_log_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "apply_truncation": self.apply_truncation,
             "min_query_len_per_req": self.min_query_len_per_req,
             "max_query_len_per_req": self.max_query_len_per_req,
             "query_len_step_per_req": self.query_len_step_per_req,

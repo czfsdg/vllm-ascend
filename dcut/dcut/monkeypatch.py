@@ -70,6 +70,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_logged_first_plan = False
     runner.dcut_logged_first_truncation = False
     runner.dcut_logged_skip_capture = False
+    runner.dcut_logged_observe_only = False
 
     config = _load_config()
     if config is None:
@@ -93,6 +94,12 @@ def _ensure_runner_state(runner: Any) -> bool:
 
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
+        return scheduler_output
+    if not runner.dcut_config.apply_truncation:
+        if not getattr(runner, "dcut_logged_observe_only", False):
+            logger.info("D-Cut adaptive verify observe-only mode: computed plans are not applied.")
+            runner.dcut_logged_observe_only = True
+        runner.dcut_next_draft_lens = {}
         return scheduler_output
     scheduled = scheduler_output.scheduled_spec_decode_tokens
     if not scheduled:
