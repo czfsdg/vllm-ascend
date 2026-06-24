@@ -89,7 +89,8 @@ def test_record_probs_skips_acl_graph_capture(monkeypatch):
         capturing = True
 
     forward_context_module = types.ModuleType("vllm.forward_context")
-    forward_context_module.get_forward_context = lambda: FakeForwardContext()
+    forward_context_module._forward_context = FakeForwardContext()
+    forward_context_module.get_forward_context = lambda: forward_context_module._forward_context
     monkeypatch.setitem(sys.modules, "vllm.forward_context", forward_context_module)
 
     class FakeRunner:
@@ -106,3 +107,19 @@ def test_record_probs_skips_acl_graph_capture(monkeypatch):
 
     assert not hasattr(FakeProposer, "latest_draft_token_probs")
     assert FakeProposer.runner.dcut_logged_skip_capture
+
+
+def test_acl_graph_capture_check_treats_missing_forward_context_as_not_capturing(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    def raise_if_called():
+        msg = "Forward context is not set"
+        raise AssertionError(msg)
+
+    forward_context_module = types.ModuleType("vllm.forward_context")
+    forward_context_module._forward_context = None
+    forward_context_module.get_forward_context = raise_if_called
+    monkeypatch.setitem(sys.modules, "vllm.forward_context", forward_context_module)
+
+    assert not dcut_monkeypatch._in_acl_graph_capture()

@@ -125,7 +125,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
 def _in_acl_graph_capture() -> bool:
     forward_context_module = sys.modules.get("vllm.forward_context")
     get_forward_context = getattr(forward_context_module, "get_forward_context", None)
-    if get_forward_context is None:
+    if get_forward_context is None or getattr(forward_context_module, "_forward_context", None) is None:
         return False
     forward_context = get_forward_context()
     return bool(getattr(forward_context, "capturing", False))
