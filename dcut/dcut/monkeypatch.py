@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import builtins
 import os
+import sys
 from dataclasses import replace
 from functools import wraps
 from typing import Any
@@ -14,6 +16,10 @@ from dcut.verify_adaptive_controller import choose_query_lens_discrete
 
 logger = init_logger(__name__)
 _INSTALLED = False
+_IMPORT_HOOK_INSTALLED = False
+_ORIGINAL_IMPORT = builtins.__import__
+_MODEL_RUNNER_MODULE = "vllm_ascend.worker.model_runner_v1"
+_PROPOSER_MODULE = "vllm_ascend.spec_decode.llm_base_proposer"
 _CONFIG_ENV_NAMES = ("VLLM_DCUT_CONFIG", "VLLM_ASCEND_DCUT_CONFIG")
 
 
@@ -28,6 +34,10 @@ def _get_config_path() -> str | None:
 def _load_config() -> VerifyAdaptiveConfig | None:
     config_path = _get_config_path()
     if not config_path:
+        logger.info(
+            "D-Cut adaptive verify dormant: set one of %s to a config JSON to enable.",
+            ", ".join(_CONFIG_ENV_NAMES),
+        )
         return None
     try:
         config = VerifyAdaptiveConfig.from_file(config_path)
@@ -57,6 +67,8 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_adaptive_enabled = False
     runner.dcut_config = None
     runner.dcut_next_draft_lens = {}
+    runner.dcut_logged_first_plan = False
+    runner.dcut_logged_first_truncation = False
 
     config = _load_config()
     if config is None:
@@ -98,6 +110,13 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     runner.dcut_next_draft_lens = {}
     if not changed:
         return scheduler_output
+    if not getattr(runner, "dcut_logged_first_truncation", False):
+        logger.info(
+            "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens "
+            "for the first time (requests=%d).",
+            len(updated),
+        )
+        runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
     return replace(scheduler_output, scheduled_spec_decode_tokens=updated)
 
@@ -161,14 +180,22 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         req_id: int(draft_len)
         for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
     }
+    if not getattr(runner, "dcut_logged_first_plan", False):
+        logger.info(
+            "D-Cut adaptive verify ACTIVE: computed first adaptive draft-length "
+            "plan (batch=%d, best_Q=%s, max_draft_len=%d).",
+            len(req_ids),
+            result["best_Q"],
+            max_draft_len,
+        )
+        runner.dcut_logged_first_plan = True
     logger.debug("D-Cut: selected best_Q=%s draft_lens=%s", result["best_Q"], runner.dcut_next_draft_lens)
 
 
-def _patch_runner() -> None:
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-    if getattr(NPUModelRunner, "_dcut_patched", False):
-        return
+def _patch_runner_module(module: Any) -> bool:
+    NPUModelRunner = getattr(module, "NPUModelRunner", None)
+    if NPUModelRunner is None or getattr(NPUModelRunner, "_dcut_patched", False):
+        return False
 
     original_execute_model = NPUModelRunner.execute_model
     original_propose_draft_token_ids = NPUModelRunner.propose_draft_token_ids
@@ -187,13 +214,14 @@ def _patch_runner() -> None:
     NPUModelRunner.execute_model = execute_model
     NPUModelRunner.propose_draft_token_ids = propose_draft_token_ids
     NPUModelRunner._dcut_patched = True
+    logger.info("D-Cut adaptive-verify patched NPUModelRunner.")
+    return True
 
 
-def _patch_proposer() -> None:
-    from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
-
-    if getattr(AscendSpecDecodeBaseProposer, "_dcut_patched", False):
-        return
+def _patch_proposer_module(module: Any) -> bool:
+    AscendSpecDecodeBaseProposer = getattr(module, "AscendSpecDecodeBaseProposer", None)
+    if AscendSpecDecodeBaseProposer is None or getattr(AscendSpecDecodeBaseProposer, "_dcut_patched", False):
+        return False
 
     original_run_merged_draft = AscendSpecDecodeBaseProposer._run_merged_draft
 
@@ -236,13 +264,54 @@ def _patch_proposer() -> None:
 
     AscendSpecDecodeBaseProposer._run_merged_draft = _run_merged_draft
     AscendSpecDecodeBaseProposer._dcut_patched = True
+    logger.info("D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.")
+    return True
+
+
+def _try_patch_loaded_modules() -> None:
+    runner_module = sys.modules.get(_MODEL_RUNNER_MODULE)
+    if runner_module is not None:
+        _patch_runner_module(runner_module)
+
+    proposer_module = sys.modules.get(_PROPOSER_MODULE)
+    if proposer_module is not None:
+        _patch_proposer_module(proposer_module)
+
+
+def _install_import_hook() -> None:
+    global _IMPORT_HOOK_INSTALLED
+    if _IMPORT_HOOK_INSTALLED:
+        return
+
+    def dcut_import(name: str, globals: Any = None, locals: Any = None, fromlist: Any = (), level: int = 0) -> Any:
+        module = _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+        if name in (_MODEL_RUNNER_MODULE, _PROPOSER_MODULE) or name.startswith("vllm_ascend."):
+            try:
+                _try_patch_loaded_modules()
+            except Exception:
+                logger.exception("D-Cut adaptive-verify delayed patch failed; plugin remains dormant.")
+        return module
+
+    builtins.__import__ = dcut_import
+    _IMPORT_HOOK_INSTALLED = True
+    logger.info("D-Cut adaptive-verify delayed import hook installed.")
 
 
 def install() -> None:
     global _INSTALLED
     if _INSTALLED:
+        logger.info("D-Cut adaptive-verify plugin already installed; skipping duplicate install.")
         return
-    _patch_runner()
-    _patch_proposer()
+    logger.info(
+        "D-Cut adaptive-verify plugin install requested "
+        "(VLLM_PLUGINS=%s, config_env=%s).",
+        os.getenv("VLLM_PLUGINS", "<unset>"),
+        _get_config_path() or "<unset>",
+    )
+    _install_import_hook()
+    _try_patch_loaded_modules()
     _INSTALLED = True
-    logger.info("D-Cut adaptive-verify monkey patch installed for vLLM Ascend.")
+    logger.info(
+        "D-Cut adaptive-verify plugin installed for vLLM Ascend "
+        "(patches are applied lazily after Ascend runner modules load)."
+    )
