@@ -217,6 +217,42 @@ def test_apply_dcut_draft_lens_removes_zero_length_spec_entries(monkeypatch):
     assert result.total_num_scheduled_tokens == 1
 
 
+def test_apply_dcut_draft_lens_preserves_accepted_token_segment(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    @dataclass(frozen=True)
+    class SchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = SchedulerOutput(
+        scheduled_spec_decode_tokens={"req-0": [11, 12, 13, 14]},
+        num_scheduled_tokens={"req-0": 5},
+        total_num_scheduled_tokens=5,
+    )
+    runner = types.SimpleNamespace(
+        dcut_next_draft_lens={"req-0": 1},
+        dcut_config=types.SimpleNamespace(apply_truncation=True),
+        dcut_logged_first_truncation=False,
+        dcut_logged_acceptance_floor=False,
+        input_batch=types.SimpleNamespace(
+            req_ids=["req-0"],
+            req_id_to_index={"req-0": 0},
+            num_accepted_tokens_cpu=[3],
+        ),
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    result = dcut_monkeypatch._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert result.scheduled_spec_decode_tokens == {"req-0": [11, 12]}
+    assert result.num_scheduled_tokens == {"req-0": 3}
+    assert result.total_num_scheduled_tokens == 3
+    assert runner.dcut_logged_acceptance_floor
+
+
 def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
     _install_fake_vllm_logger()
     dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")

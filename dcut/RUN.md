@@ -68,6 +68,7 @@ D-Cut adaptive verify PLAN: count=... batch=... verifier_tokens=... draft_lens=.
 D-Cut adaptive verify observe-only mode: computed plans are not applied.
 # If apply_truncation=true:
 D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
+D-Cut adaptive verify raised a truncation plan to keep scheduled tokens >= previously accepted tokens.
 ```
 
 The install-hook lines prove vLLM discovered the plugin without eagerly importing

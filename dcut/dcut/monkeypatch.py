@@ -89,6 +89,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_logged_first_truncation = False
     runner.dcut_logged_skip_capture = False
     runner.dcut_logged_observe_only = False
+    runner.dcut_logged_acceptance_floor = False
     runner.dcut_plan_count = 0
 
     config = _load_config()
@@ -109,6 +110,29 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_adaptive_enabled = True
     _log_info("D-Cut adaptive verify ENABLED (config=%s)", config.to_log_dict())
     return True
+
+
+def _min_draft_len_for_accepted_tokens(
+    runner: Any,
+    req_id: Any,
+    num_valid_tokens: int,
+    original_draft_len: int,
+) -> int:
+    """Keep target segment length compatible with previous accepted tokens."""
+    input_batch = getattr(runner, "input_batch", None)
+    if input_batch is None:
+        return 0
+    try:
+        req_id_to_index = getattr(input_batch, "req_id_to_index", None)
+        if req_id_to_index is not None:
+            req_idx = req_id_to_index[req_id]
+        else:
+            req_idx = list(input_batch.req_ids).index(req_id)
+        accepted_tokens = int(input_batch.num_accepted_tokens_cpu[req_idx])
+    except Exception:
+        return 0
+    min_draft_len = max(0, accepted_tokens - num_valid_tokens)
+    return min(original_draft_len, min_draft_len)
 
 
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
@@ -145,15 +169,32 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             continue
         original_len = len(draft_token_ids)
         target_len = max(0, min(int(target_len), original_len))
+        num_valid_tokens = None
+        if isinstance(updated_num_scheduled_tokens, dict) and req_id in updated_num_scheduled_tokens:
+            num_valid_tokens = max(
+                0, int(updated_num_scheduled_tokens[req_id]) - original_len
+            )
+        min_target_len = _min_draft_len_for_accepted_tokens(
+            runner, req_id, num_valid_tokens or 0, original_len
+        )
+        if target_len < min_target_len:
+            target_len = min_target_len
+            if not getattr(runner, "dcut_logged_acceptance_floor", False):
+                _log_info(
+                    "D-Cut adaptive verify raised a truncation plan to keep "
+                    "scheduled tokens >= previously accepted tokens."
+                )
+                runner.dcut_logged_acceptance_floor = True
         if target_len:
             updated[req_id] = draft_token_ids[:target_len]
         changed = changed or target_len != original_len
         if target_len == original_len:
             continue
         if isinstance(updated_num_scheduled_tokens, dict) and req_id in updated_num_scheduled_tokens:
-            num_valid_tokens = max(
-                0, int(updated_num_scheduled_tokens[req_id]) - original_len
-            )
+            if num_valid_tokens is None:
+                num_valid_tokens = max(
+                    0, int(updated_num_scheduled_tokens[req_id]) - original_len
+                )
             updated_num_scheduled_tokens[req_id] = num_valid_tokens + target_len
         if updated_total_num_scheduled_tokens is not None:
             updated_total_num_scheduled_tokens -= original_len - target_len
