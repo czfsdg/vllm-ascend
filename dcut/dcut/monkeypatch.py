@@ -23,6 +23,24 @@ _PROPOSER_MODULE = "vllm_ascend.spec_decode.llm_base_proposer"
 _CONFIG_ENV_NAMES = ("VLLM_DCUT_CONFIG", "VLLM_ASCEND_DCUT_CONFIG")
 
 
+def _format_log_message(message: str, *args: Any) -> str:
+    if not args:
+        return message
+    return message % args
+
+
+def _log_info(message: str, *args: Any, also_print: bool = True) -> None:
+    logger.info(message, *args)
+    if also_print:
+        print(_format_log_message(message, *args), flush=True)
+
+
+def _log_warning(message: str, *args: Any, also_print: bool = True) -> None:
+    logger.warning(message, *args)
+    if also_print:
+        print(_format_log_message(message, *args), flush=True)
+
+
 def _get_config_path() -> str | None:
     for env_name in _CONFIG_ENV_NAMES:
         value = os.getenv(env_name)
@@ -34,7 +52,7 @@ def _get_config_path() -> str | None:
 def _load_config() -> VerifyAdaptiveConfig | None:
     config_path = _get_config_path()
     if not config_path:
-        logger.info(
+        _log_info(
             "D-Cut adaptive verify dormant: set one of %s to a config JSON to enable.",
             ", ".join(_CONFIG_ENV_NAMES),
         )
@@ -45,7 +63,7 @@ def _load_config() -> VerifyAdaptiveConfig | None:
         logger.exception("Failed to load D-Cut config from %s; adaptive verify is disabled.", config_path)
         return None
     if not config.enabled:
-        logger.info("D-Cut adaptive verify dormant: config disables it.")
+        _log_info("D-Cut adaptive verify dormant: config disables it.")
         return None
     return config
 
@@ -77,18 +95,18 @@ def _ensure_runner_state(runner: Any) -> bool:
         return False
     if not _is_supported_runner(runner):
         speculative_config = getattr(runner, "speculative_config", None)
-        logger.info(
+        _log_info(
             "D-Cut adaptive verify dormant: method=%s parallel_drafting=%s is unsupported.",
             getattr(speculative_config, "method", None),
             bool(getattr(speculative_config, "parallel_drafting", False)),
         )
         return False
     if getattr(runner, "use_async_scheduling", False):
-        logger.warning("D-Cut adaptive verify is enabled with async scheduling; probs bookkeeping may be skipped.")
+        _log_warning("D-Cut adaptive verify is enabled with async scheduling; probs bookkeeping may be skipped.")
 
     runner.dcut_config = config
     runner.dcut_adaptive_enabled = True
-    logger.info("D-Cut adaptive verify ENABLED (config=%s)", config.to_log_dict())
+    _log_info("D-Cut adaptive verify ENABLED (config=%s)", config.to_log_dict())
     return True
 
 
@@ -97,7 +115,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         return scheduler_output
     if not runner.dcut_config.apply_truncation:
         if not getattr(runner, "dcut_logged_observe_only", False):
-            logger.info("D-Cut adaptive verify observe-only mode: computed plans are not applied.")
+            _log_info("D-Cut adaptive verify observe-only mode: computed plans are not applied.")
             runner.dcut_logged_observe_only = True
         runner.dcut_next_draft_lens = {}
         return scheduler_output
@@ -119,7 +137,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not changed:
         return scheduler_output
     if not getattr(runner, "dcut_logged_first_truncation", False):
-        logger.info(
+        _log_info(
             "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens "
             "for the first time (requests=%d).",
             len(updated),
@@ -146,7 +164,7 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
         return
     if _in_acl_graph_capture():
         if not getattr(runner, "dcut_logged_skip_capture", False):
-            logger.info("D-Cut adaptive verify skips probability capture during ACL graph capture.")
+            _log_info("D-Cut adaptive verify skips probability capture during ACL graph capture.")
             runner.dcut_logged_skip_capture = True
         return
     try:
@@ -203,7 +221,7 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
     }
     if not getattr(runner, "dcut_logged_first_plan", False):
-        logger.info(
+        _log_info(
             "D-Cut adaptive verify ACTIVE: computed first adaptive draft-length "
             "plan (batch=%d, best_Q=%s, max_draft_len=%d).",
             len(req_ids),
@@ -236,7 +254,7 @@ def _patch_runner_module(module: Any) -> bool:
     NPUModelRunner.execute_model = execute_model
     NPUModelRunner.propose_draft_token_ids = propose_draft_token_ids
     NPUModelRunner._dcut_patched = True
-    logger.info("D-Cut adaptive-verify patched NPUModelRunner.")
+    _log_info("D-Cut adaptive-verify patched NPUModelRunner.")
     return True
 
 
@@ -287,7 +305,7 @@ def _patch_proposer_module(module: Any) -> bool:
 
     AscendSpecDecodeBaseProposer._run_merged_draft = _run_merged_draft
     AscendSpecDecodeBaseProposer._dcut_patched = True
-    logger.info("D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.")
+    _log_info("D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.")
     return True
 
 
@@ -317,15 +335,15 @@ def _install_import_hook() -> None:
 
     builtins.__import__ = dcut_import
     _IMPORT_HOOK_INSTALLED = True
-    logger.info("D-Cut adaptive-verify delayed import hook installed.")
+    _log_info("D-Cut adaptive-verify delayed import hook installed.")
 
 
 def install() -> None:
     global _INSTALLED
     if _INSTALLED:
-        logger.info("D-Cut adaptive-verify plugin already installed; skipping duplicate install.")
+        _log_info("D-Cut adaptive-verify plugin already installed; skipping duplicate install.")
         return
-    logger.info(
+    _log_info(
         "D-Cut adaptive-verify plugin install requested "
         "(VLLM_PLUGINS=%s, config_env=%s).",
         os.getenv("VLLM_PLUGINS", "<unset>"),
@@ -334,7 +352,7 @@ def install() -> None:
     _install_import_hook()
     _try_patch_loaded_modules()
     _INSTALLED = True
-    logger.info(
+    _log_info(
         "D-Cut adaptive-verify plugin installed for vLLM Ascend "
         "(patches are applied lazily after Ascend runner modules load)."
     )
