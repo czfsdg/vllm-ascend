@@ -3,6 +3,7 @@
 import importlib
 import sys
 import types
+from dataclasses import dataclass
 
 
 class _Logger:
@@ -13,6 +14,9 @@ class _Logger:
         pass
 
     def exception(self, *args, **kwargs):
+        pass
+
+    def debug(self, *args, **kwargs):
         pass
 
 
@@ -145,3 +149,67 @@ def test_apply_dcut_draft_lens_observe_only_leaves_scheduler_output(monkeypatch)
     assert scheduler_output.scheduled_spec_decode_tokens["req-0"] == [1, 2, 3, 4]
     assert runner.dcut_next_draft_lens == {}
     assert runner.dcut_logged_observe_only
+
+
+def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    @dataclass(frozen=True)
+    class SchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = SchedulerOutput(
+        scheduled_spec_decode_tokens={"req-0": [11, 12, 13, 14], "req-1": [21, 22]},
+        num_scheduled_tokens={"req-0": 5, "req-1": 3},
+        total_num_scheduled_tokens=8,
+    )
+    runner = types.SimpleNamespace(
+        dcut_next_draft_lens={"req-0": 2},
+        dcut_config=types.SimpleNamespace(apply_truncation=True),
+        dcut_logged_first_truncation=False,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    result = dcut_monkeypatch._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert result.scheduled_spec_decode_tokens == {
+        "req-0": [11, 12],
+        "req-1": [21, 22],
+    }
+    assert result.num_scheduled_tokens == {"req-0": 3, "req-1": 3}
+    assert result.total_num_scheduled_tokens == 6
+    assert scheduler_output.num_scheduled_tokens == {"req-0": 5, "req-1": 3}
+    assert runner.dcut_next_draft_lens == {}
+    assert runner.dcut_logged_first_truncation
+
+
+def test_apply_dcut_draft_lens_removes_zero_length_spec_entries(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    @dataclass(frozen=True)
+    class SchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = SchedulerOutput(
+        scheduled_spec_decode_tokens={"req-0": [11, 12, 13]},
+        num_scheduled_tokens={"req-0": 4},
+        total_num_scheduled_tokens=4,
+    )
+    runner = types.SimpleNamespace(
+        dcut_next_draft_lens={"req-0": 0},
+        dcut_config=types.SimpleNamespace(apply_truncation=True),
+        dcut_logged_first_truncation=False,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    result = dcut_monkeypatch._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert result.scheduled_spec_decode_tokens == {}
+    assert result.num_scheduled_tokens == {"req-0": 1}
+    assert result.total_num_scheduled_tokens == 1

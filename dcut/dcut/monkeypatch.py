@@ -124,15 +124,38 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         return scheduler_output
 
     updated = {}
+    has_num_scheduled_tokens = hasattr(scheduler_output, "num_scheduled_tokens")
+    num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", None)
+    updated_num_scheduled_tokens = (
+        num_scheduled_tokens.copy()
+        if hasattr(num_scheduled_tokens, "copy")
+        else num_scheduled_tokens
+    )
+    has_total_num_scheduled_tokens = hasattr(
+        scheduler_output, "total_num_scheduled_tokens"
+    )
+    total_num_scheduled_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", None)
+    updated_total_num_scheduled_tokens = total_num_scheduled_tokens
     changed = False
     for req_id, draft_token_ids in scheduled.items():
         target_len = runner.dcut_next_draft_lens.get(req_id)
         if target_len is None:
             updated[req_id] = draft_token_ids
             continue
-        target_len = max(0, min(int(target_len), len(draft_token_ids)))
-        updated[req_id] = draft_token_ids[:target_len]
-        changed = changed or target_len != len(draft_token_ids)
+        original_len = len(draft_token_ids)
+        target_len = max(0, min(int(target_len), original_len))
+        if target_len:
+            updated[req_id] = draft_token_ids[:target_len]
+        changed = changed or target_len != original_len
+        if target_len == original_len:
+            continue
+        if isinstance(updated_num_scheduled_tokens, dict) and req_id in updated_num_scheduled_tokens:
+            num_valid_tokens = max(
+                0, int(updated_num_scheduled_tokens[req_id]) - original_len
+            )
+            updated_num_scheduled_tokens[req_id] = num_valid_tokens + target_len
+        if updated_total_num_scheduled_tokens is not None:
+            updated_total_num_scheduled_tokens -= original_len - target_len
     runner.dcut_next_draft_lens = {}
     if not changed:
         return scheduler_output
@@ -144,7 +167,12 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         )
         runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
-    return replace(scheduler_output, scheduled_spec_decode_tokens=updated)
+    replace_kwargs = {"scheduled_spec_decode_tokens": updated}
+    if has_num_scheduled_tokens:
+        replace_kwargs["num_scheduled_tokens"] = updated_num_scheduled_tokens
+    if has_total_num_scheduled_tokens:
+        replace_kwargs["total_num_scheduled_tokens"] = updated_total_num_scheduled_tokens
+    return replace(scheduler_output, **replace_kwargs)
 
 
 def _in_acl_graph_capture() -> bool:
