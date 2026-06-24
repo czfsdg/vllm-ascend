@@ -89,6 +89,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_logged_first_truncation = False
     runner.dcut_logged_skip_capture = False
     runner.dcut_logged_observe_only = False
+    runner.dcut_plan_count = 0
 
     config = _load_config()
     if config is None:
@@ -248,6 +249,7 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         req_id: int(draft_len)
         for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
     }
+    runner.dcut_plan_count += 1
     if not getattr(runner, "dcut_logged_first_plan", False):
         _log_info(
             "D-Cut adaptive verify ACTIVE: computed first adaptive draft-length "
@@ -257,6 +259,18 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
             max_draft_len,
         )
         runner.dcut_logged_first_plan = True
+    log_every_n_plans = max(0, int(runner.dcut_config.log_every_n_plans))
+    if log_every_n_plans and runner.dcut_plan_count % log_every_n_plans == 0:
+        _log_info(
+            "D-Cut adaptive verify PLAN: count=%d batch=%d verifier_tokens=%s "
+            "draft_lens=%s max_draft_len=%d apply_truncation=%s.",
+            runner.dcut_plan_count,
+            len(req_ids),
+            result["best_Q"],
+            runner.dcut_next_draft_lens,
+            max_draft_len,
+            runner.dcut_config.apply_truncation,
+        )
     logger.debug("D-Cut: selected best_Q=%s draft_lens=%s", result["best_Q"], runner.dcut_next_draft_lens)
 
 

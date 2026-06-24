@@ -5,6 +5,8 @@ import sys
 import types
 from dataclasses import dataclass
 
+from dcut.verify_adaptive_config import VerifyAdaptiveConfig
+
 
 class _Logger:
     def info(self, *args, **kwargs):
@@ -213,3 +215,43 @@ def test_apply_dcut_draft_lens_removes_zero_length_spec_entries(monkeypatch):
     assert result.scheduled_spec_decode_tokens == {}
     assert result.num_scheduled_tokens == {"req-0": 1}
     assert result.total_num_scheduled_tokens == 1
+
+
+def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeProbs:
+        def detach(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def tolist(self):
+            return [[0.9, 0.8, 0.7, 0.6]]
+
+    class FakeDraftTokenIds:
+        shape = (1, 4)
+
+    logs = []
+    runner = types.SimpleNamespace(
+        drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
+        input_batch=types.SimpleNamespace(req_ids=["req-0"]),
+        dcut_config=VerifyAdaptiveConfig(log_every_n_plans=1),
+        dcut_next_draft_lens={},
+        dcut_logged_first_plan=True,
+        dcut_plan_count=0,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+    monkeypatch.setattr(dcut_monkeypatch, "_in_acl_graph_capture", lambda: False)
+    monkeypatch.setattr(
+        dcut_monkeypatch,
+        "_log_info",
+        lambda message, *args, **kwargs: logs.append(message % args),
+    )
+
+    dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
+
+    assert runner.dcut_plan_count == 1
+    assert any("verifier_tokens=" in log and "draft_lens=" in log for log in logs)

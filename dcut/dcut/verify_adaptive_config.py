@@ -21,6 +21,7 @@ class VerifyAdaptiveConfig:
     warmup_seq_lens: int = 4096
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
+    log_every_n_plans: int = 0
 
     @classmethod
     def from_file(cls, path: str) -> VerifyAdaptiveConfig:
@@ -50,4 +51,5 @@ class VerifyAdaptiveConfig:
             "warmup_seq_lens": self.warmup_seq_lens,
             "n_warmup_iters": self.n_warmup_iters,
             "n_measure_iters": self.n_measure_iters,
+            "log_every_n_plans": self.log_every_n_plans,
         }

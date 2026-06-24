@@ -9,5 +9,6 @@
   "query_len_step_per_req": 2,
   "warmup_seq_lens": 4096,
   "n_warmup_iters": 3,
-  "n_measure_iters": 5
+  "n_measure_iters": 5,
+  "log_every_n_plans": 0
 }

@@ -27,6 +27,11 @@ By default the example config runs in observe-only mode with
 plans without changing verifier inputs. Set `"apply_truncation": true` only after
 validating correctness against vanilla DFlash on your workload.
 
+Set `"log_every_n_plans": 1` to print every adaptive plan during debugging. The
+plan log includes the verifier token budget (`verifier_tokens`) and per-request
+draft lengths (`draft_lens`). Keep the default `0` outside debugging to avoid
+high-volume logs.
+
 ## Scope
 
 - Active only for DFlash, or `method=draft_model` with `parallel_drafting=true`.
@@ -58,6 +63,8 @@ D-Cut adaptive-verify patched NPUModelRunner.
 D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.
 D-Cut adaptive verify ENABLED (config=...)
 D-Cut adaptive verify ACTIVE: computed first adaptive draft-length plan (...)
+# If log_every_n_plans > 0:
+D-Cut adaptive verify PLAN: count=... batch=... verifier_tokens=... draft_lens=...
 D-Cut adaptive verify observe-only mode: computed plans are not applied.
 # If apply_truncation=true:
 D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
