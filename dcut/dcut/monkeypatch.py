@@ -69,6 +69,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_next_draft_lens = {}
     runner.dcut_logged_first_plan = False
     runner.dcut_logged_first_truncation = False
+    runner.dcut_logged_skip_capture = False
 
     config = _load_config()
     if config is None:
@@ -121,11 +122,25 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     return replace(scheduler_output, scheduled_spec_decode_tokens=updated)
 
 
+def _in_acl_graph_capture() -> bool:
+    forward_context_module = sys.modules.get("vllm.forward_context")
+    get_forward_context = getattr(forward_context_module, "get_forward_context", None)
+    if get_forward_context is None:
+        return False
+    forward_context = get_forward_context()
+    return bool(getattr(forward_context, "capturing", False))
+
+
 def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: Any) -> None:
     runner = getattr(proposer, "runner", None)
     if runner is None or not _ensure_runner_state(runner):
         return
     if getattr(proposer, "method", None) != "dflash" and not getattr(proposer, "parallel_drafting", False):
+        return
+    if _in_acl_graph_capture():
+        if not getattr(runner, "dcut_logged_skip_capture", False):
+            logger.info("D-Cut adaptive verify skips probability capture during ACL graph capture.")
+            runner.dcut_logged_skip_capture = True
         return
     try:
         import torch
@@ -134,18 +149,18 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
         logits = logits[:num_indices]
         draft_token_ids = draft_token_ids[:num_indices].to(torch.long)
         vocab_size = logits.shape[-1]
-        if bool(torch.any((draft_token_ids < 0) | (draft_token_ids >= vocab_size)).item()):
-            logger.debug("D-Cut: selected draft ids are outside logits vocab; skip probs for this step.")
-            return
+        valid_token_mask = (draft_token_ids >= 0) & (draft_token_ids < vocab_size)
+        safe_draft_token_ids = draft_token_ids.clamp(0, vocab_size - 1)
         probs = torch.softmax(logits.float(), dim=-1)
-        selected_probs = probs.gather(dim=-1, index=draft_token_ids.view(-1, 1)).view(-1)
+        selected_probs = probs.gather(dim=-1, index=safe_draft_token_ids.view(-1, 1)).view(-1)
+        selected_probs = selected_probs * valid_token_mask.to(selected_probs.dtype)
         proposer.latest_draft_token_probs = selected_probs.view(-1, proposer.num_speculative_tokens)
     except Exception:
         logger.exception("D-Cut: failed to record selected draft token probabilities.")
 
 
 def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
-    if not _ensure_runner_state(runner) or draft_token_ids is None:
+    if not _ensure_runner_state(runner) or draft_token_ids is None or _in_acl_graph_capture():
         return
     drafter = getattr(runner, "drafter", None)
     drafter_probs = getattr(drafter, "latest_draft_token_probs", None)

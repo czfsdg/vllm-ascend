@@ -79,3 +79,30 @@ def test_proposer_patch_does_not_replace_logits_processor_child_module(monkeypat
 
     assert proposer.model.logits_processor.called
     assert recorded["logits"] == "logits"
+
+
+def test_record_probs_skips_acl_graph_capture(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeForwardContext:
+        capturing = True
+
+    forward_context_module = types.ModuleType("vllm.forward_context")
+    forward_context_module.get_forward_context = lambda: FakeForwardContext()
+    monkeypatch.setitem(sys.modules, "vllm.forward_context", forward_context_module)
+
+    class FakeRunner:
+        dcut_logged_skip_capture = False
+
+    class FakeProposer:
+        runner = FakeRunner()
+        method = "dflash"
+        parallel_drafting = False
+
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    dcut_monkeypatch._record_selected_token_probs(FakeProposer(), object(), object())
+
+    assert not hasattr(FakeProposer, "latest_draft_token_probs")
+    assert FakeProposer.runner.dcut_logged_skip_capture
