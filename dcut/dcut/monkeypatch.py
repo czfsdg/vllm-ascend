@@ -98,15 +98,23 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         return scheduler_output
 
     updated = {}
+    updated_num_scheduled_tokens = scheduler_output.num_scheduled_tokens.copy()
     changed = False
+    total_removed = 0
     for req_id, draft_token_ids in scheduled.items():
         target_len = runner.dcut_next_draft_lens.get(req_id)
         if target_len is None:
             updated[req_id] = draft_token_ids
             continue
-        target_len = max(0, min(int(target_len), len(draft_token_ids)))
-        updated[req_id] = draft_token_ids[:target_len]
-        changed = changed or target_len != len(draft_token_ids)
+        original_len = len(draft_token_ids)
+        target_len = max(0, min(int(target_len), original_len))
+        removed = original_len - target_len
+        if target_len > 0:
+            updated[req_id] = draft_token_ids[:target_len]
+        changed = changed or removed > 0
+        total_removed += removed
+        if removed > 0:
+            updated_num_scheduled_tokens[req_id] -= removed
     runner.dcut_next_draft_lens = {}
     if not changed:
         return scheduler_output
@@ -117,7 +125,12 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         )
         runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
-    return replace(scheduler_output, scheduled_spec_decode_tokens=updated)
+    return replace(
+        scheduler_output,
+        scheduled_spec_decode_tokens=updated,
+        num_scheduled_tokens=updated_num_scheduled_tokens,
+        total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - total_removed,
+    )
 
 
 def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: Any) -> None:

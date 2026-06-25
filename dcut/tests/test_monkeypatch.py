@@ -1,13 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
+import importlib
+import sys
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 
-def test_patch_proposer_captures_module_logits_processor_with_forward_hook():
+def import_monkeypatch_with_fake_vllm(monkeypatch):
+    logger_module = ModuleType("vllm.logger")
+    logger_module.init_logger = lambda name: SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+        debug=lambda *args, **kwargs: None,
+        exception=lambda *args, **kwargs: None,
+    )
+    vllm_module = ModuleType("vllm")
+    monkeypatch.setitem(sys.modules, "vllm", vllm_module)
+    monkeypatch.setitem(sys.modules, "vllm.logger", logger_module)
+    sys.modules.pop("dcut.monkeypatch", None)
+    return importlib.import_module("dcut.monkeypatch")
+
+
+def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    @dataclass(frozen=True)
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12], "r1": [20, 21]},
+        num_scheduled_tokens={"r0": 4, "r1": 3},
+        total_num_scheduled_tokens=7,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1, "r1": 0},
+        dcut_logged_first_truncation=False,
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated.scheduled_spec_decode_tokens == {"r0": [10]}
+    assert updated.num_scheduled_tokens == {"r0": 2, "r1": 1}
+    assert updated.total_num_scheduled_tokens == 3
+    assert runner.dcut_next_draft_lens == {}
+
+
+def test_patch_proposer_captures_module_logits_processor_with_forward_hook(monkeypatch):
     torch = pytest.importorskip("torch")
-    monkeypatch_module = pytest.importorskip("dcut.monkeypatch")
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
     nn = torch.nn
 
     class FakeLogitsProcessor(nn.Module):
