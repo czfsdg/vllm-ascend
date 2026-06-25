@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "apply_truncation": false,
+  "apply_truncation": true,
   "warmup_batch_sizes": [],
   "min_warmup_batch_size": 2,
   "max_warmup_batch_size": null,
@@ -10,5 +10,5 @@
   "warmup_seq_lens": 4096,
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
-  "log_every_n_plans": 0
+  "log_every_n_plans": 50
 }

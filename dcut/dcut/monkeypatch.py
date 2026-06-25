@@ -135,10 +135,31 @@ def _min_draft_len_for_accepted_tokens(
     return min(original_draft_len, min_draft_len)
 
 
+def _apply_truncation_enabled(runner: Any) -> bool:
+    config = getattr(runner, "dcut_config", None)
+    if config is None:
+        return True
+    return bool(getattr(config, "apply_truncation", True))
+
+
+def _rollback_dropped_draft_tokens(runner: Any, req_id: Any, dropped_tokens: int) -> None:
+    if dropped_tokens <= 0:
+        return
+    requests = getattr(runner, "requests", None)
+    request = requests.get(req_id) if hasattr(requests, "get") else None
+    if request is None:
+        return
+    for attr_name in ("num_computed_tokens", "num_output_placeholders"):
+        current_value = getattr(request, attr_name, None)
+        if current_value is None or current_value <= 0:
+            continue
+        setattr(request, attr_name, max(0, current_value - dropped_tokens))
+
+
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
         return scheduler_output
-    if not runner.dcut_config.apply_truncation:
+    if not _apply_truncation_enabled(runner):
         if not getattr(runner, "dcut_logged_observe_only", False):
             _log_info("D-Cut adaptive verify observe-only mode: computed plans are not applied.")
             runner.dcut_logged_observe_only = True
@@ -190,6 +211,8 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         changed = changed or target_len != original_len
         if target_len == original_len:
             continue
+        dropped_tokens = original_len - target_len
+        _rollback_dropped_draft_tokens(runner, req_id, dropped_tokens)
         if isinstance(updated_num_scheduled_tokens, dict) and req_id in updated_num_scheduled_tokens:
             if num_valid_tokens is None:
                 num_valid_tokens = max(
@@ -197,7 +220,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
                 )
             updated_num_scheduled_tokens[req_id] = num_valid_tokens + target_len
         if updated_total_num_scheduled_tokens is not None:
-            updated_total_num_scheduled_tokens -= original_len - target_len
+            updated_total_num_scheduled_tokens -= dropped_tokens
     runner.dcut_next_draft_lens = {}
     if not changed:
         return scheduler_output
@@ -230,7 +253,7 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
     runner = getattr(proposer, "runner", None)
     if runner is None or not _ensure_runner_state(runner):
         return
-    if not runner.dcut_config.apply_truncation:
+    if not _apply_truncation_enabled(runner):
         return
     if getattr(proposer, "method", None) != "dflash" and not getattr(proposer, "parallel_drafting", False):
         return
@@ -259,7 +282,7 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
 def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     if not _ensure_runner_state(runner) or draft_token_ids is None or _in_acl_graph_capture():
         return
-    if not runner.dcut_config.apply_truncation:
+    if not _apply_truncation_enabled(runner):
         runner.dcut_next_draft_lens = {}
         return
     drafter = getattr(runner, "drafter", None)
@@ -358,7 +381,7 @@ def _patch_proposer_module(module: Any) -> bool:
         runner = getattr(self, "runner", None)
         if runner is None or not _ensure_runner_state(runner):
             return original_run_merged_draft(self, *args, **kwargs)
-        if not runner.dcut_config.apply_truncation:
+        if not _apply_truncation_enabled(runner):
             return original_run_merged_draft(self, *args, **kwargs)
 
         captured_logits = None

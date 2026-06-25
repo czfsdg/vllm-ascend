@@ -188,6 +188,43 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     assert runner.dcut_logged_first_truncation
 
 
+
+def test_apply_dcut_draft_lens_rolls_back_scheduler_request_counters(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    @dataclass(frozen=True)
+    class SchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    request = types.SimpleNamespace(
+        num_computed_tokens=10,
+        num_output_placeholders=4,
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_spec_decode_tokens={"req-0": [11, 12, 13, 14]},
+        num_scheduled_tokens={"req-0": 5},
+        total_num_scheduled_tokens=5,
+    )
+    runner = types.SimpleNamespace(
+        requests={"req-0": request},
+        dcut_next_draft_lens={"req-0": 2},
+        dcut_config=types.SimpleNamespace(apply_truncation=True),
+        dcut_logged_first_truncation=False,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    result = dcut_monkeypatch._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert result.scheduled_spec_decode_tokens == {"req-0": [11, 12]}
+    assert result.num_scheduled_tokens == {"req-0": 3}
+    assert result.total_num_scheduled_tokens == 3
+    assert request.num_computed_tokens == 8
+    assert request.num_output_placeholders == 2
+
+
 def test_apply_dcut_draft_lens_removes_zero_length_spec_entries(monkeypatch):
     _install_fake_vllm_logger()
     dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
@@ -274,7 +311,7 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
     runner = types.SimpleNamespace(
         drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
         input_batch=types.SimpleNamespace(req_ids=["req-0"]),
-        dcut_config=VerifyAdaptiveConfig(log_every_n_plans=1),
+        dcut_config=VerifyAdaptiveConfig(apply_truncation=True, log_every_n_plans=1),
         dcut_next_draft_lens={},
         dcut_logged_first_plan=True,
         dcut_plan_count=0,
