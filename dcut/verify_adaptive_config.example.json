@@ -10,6 +10,7 @@
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
   "apply_adaptive_lengths": false,
+  "min_prefix_prob": 0.05,
   "cost_table": {
     "2,2": 2.0,
     "2,4": 3.4,

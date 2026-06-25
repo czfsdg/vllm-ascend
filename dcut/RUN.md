@@ -26,8 +26,6 @@ dormant.
 
 - Active only for DFlash, or `method=draft_model` with `parallel_drafting=true`.
 - MTP is intentionally unsupported and remains dormant.
-- Qwen3-Next/GDN hybrid models are intentionally unsupported because current
-  DFlash/spec-decode acceptance and varlen metadata are unstable on that path.
 - Async scheduling is not adapted; if enabled, the plugin logs a warning.
 - If `cost_table` is provided in the JSON config, D-Cut uses those profiled
   verifier costs. Keys may be `"Q"` or `"bs,Q"`; batch-keyed rows use the
@@ -38,6 +36,9 @@ dormant.
   draft tokens. Set it to `true` only for scheduler-side D-Cut experiments,
   because engine and worker token accounting must remain identical for
   correctness.
+- `min_prefix_prob` filters low-confidence draft prefixes out of the adaptive
+  planner. Increase it if a small number of requests repeatedly run to the
+  generation limit with low acceptance.
 
 ## Smoke checks
 

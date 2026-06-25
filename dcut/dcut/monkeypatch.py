@@ -50,22 +50,7 @@ def _load_config() -> VerifyAdaptiveConfig | None:
     return config
 
 
-def _runner_uses_gdn_or_qwen3_next(runner: Any) -> bool:
-    model_config = getattr(runner, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    model_type = str(getattr(hf_config, "model_type", "")).lower()
-    architectures = [str(arch).lower() for arch in getattr(hf_config, "architectures", []) or []]
-    if "qwen3_next" in model_type or any("qwen3" in arch and "next" in arch for arch in architectures):
-        return True
-
-    model = getattr(runner, "model", None)
-    model_text = str(type(model)).lower()
-    return "qwen3_next" in model_text or "gdn" in model_text
-
-
 def _is_supported_runner(runner: Any) -> bool:
-    if _runner_uses_gdn_or_qwen3_next(runner):
-        return False
     speculative_config = getattr(runner, "speculative_config", None)
     if speculative_config is None:
         return False
@@ -204,6 +189,7 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         q_levels=q_levels,
         cost_lookup=make_cost_lookup(runner.dcut_config.cost_table, base_batch_size),
         max_draft_len=max_draft_len,
+        min_prefix_prob=runner.dcut_config.min_prefix_prob,
     )
     runner.dcut_next_draft_lens = {
         req_id: int(draft_len) for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)

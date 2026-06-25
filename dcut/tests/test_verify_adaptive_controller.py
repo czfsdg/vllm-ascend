@@ -27,16 +27,17 @@ def test_config_query_len_levels_include_baseline_and_cap():
     assert config.query_len_levels(max_draft_len=5) == [1, 2, 4, 6]
 
 
-def test_choose_query_lens_discrete_includes_anchor_tokens_in_score():
+def test_choose_query_lens_discrete_filters_low_confidence_prefixes():
     result = choose_query_lens_discrete(
-        probs=[[0.1], [0.1]],
+        probs=[[0.04], [0.9]],
         base_batch_size=2,
         q_levels=[2, 4],
         cost_lookup=lambda q: {2: 1.0, 4: 1.05}[q],
         max_draft_len=1,
+        min_prefix_prob=0.05,
     )
 
-    assert result["draft_lens"] == [1, 1]
+    assert result["draft_lens"] == [0, 1]
     assert result["best_Q"] == 4
 
 

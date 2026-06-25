@@ -20,14 +20,16 @@ def choose_query_lens_discrete(
     q_levels: Sequence[int],
     cost_lookup: Callable[[int], float],
     max_draft_len: int,
+    min_prefix_prob: float = 0.0,
 ) -> dict[str, object]:
     """Choose per-request draft lengths with a batch-wide D-Cut top-K scan.
 
-    The verifier always processes one anchor token per active request.  For a
-    candidate total query length ``Q``, the extra draft-token budget is
-    ``Q - base_batch_size``.  D-Cut ranks marginal accepted-token gains by the
+    For a candidate total query length ``Q``, the extra draft-token budget is
+    ``Q - base_batch_size``. D-Cut ranks marginal accepted-token gains by the
     prefix product of selected draft-token probabilities and maximizes
-    ``(base_batch_size + accepted_gain) / verifier_cost(Q)``.
+    ``accepted_gain / verifier_cost(Q)``. Very low-confidence prefixes can be
+    filtered out with ``min_prefix_prob`` to avoid over-drafting pathological
+    requests.
     """
     num_reqs = len(probs)
     if max_draft_len <= 0 or num_reqs == 0:
@@ -43,10 +45,12 @@ def choose_query_lens_discrete(
     if not q_levels:
         q_levels = [base_batch_size, max_query_len]
 
+    min_prefix_prob = max(0.0, min(1.0, float(min_prefix_prob)))
     gains: list[tuple[float, int]] = []
     for req_idx, req_probs in enumerate(probs):
         for score in _prefix_scores(req_probs, max_draft_len):
-            gains.append((score, req_idx))
+            if score >= min_prefix_prob:
+                gains.append((score, req_idx))
     gains.sort(reverse=True, key=lambda item: item[0])
 
     best_score = float("-inf")
@@ -57,7 +61,7 @@ def choose_query_lens_discrete(
         k = min(draft_budget, len(gains))
         accepted_gain = sum(score for score, _ in gains[:k])
         cost = max(float(cost_lookup(q)), 1e-9)
-        score = (base_batch_size + accepted_gain) / cost
+        score = accepted_gain / cost
         if score > best_score:
             best_score = score
             best_k = k
