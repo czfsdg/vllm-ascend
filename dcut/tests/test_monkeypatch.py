@@ -291,3 +291,71 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
 
     assert runner.dcut_plan_count == 1
     assert any("verifier_tokens=" in log and "draft_lens=" in log for log in logs)
+
+
+def test_update_dcut_next_draft_lens_uses_uniform_dflash_lengths(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeProbs:
+        def detach(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def tolist(self):
+            return [[0.95, 0.95, 0.95], [0.20, 0.20, 0.20]]
+
+    class FakeDraftTokenIds:
+        shape = (2, 3)
+
+    runner = types.SimpleNamespace(
+        drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
+        input_batch=types.SimpleNamespace(req_ids=["req-0", "req-1"]),
+        dcut_config=VerifyAdaptiveConfig(),
+        dcut_next_draft_lens={},
+        dcut_plan_count=0,
+        dcut_logged_first_plan=True,
+        speculative_config=types.SimpleNamespace(method="dflash"),
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+    monkeypatch.setattr(dcut_monkeypatch, "_in_acl_graph_capture", lambda: False)
+
+    dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
+
+    assert set(runner.dcut_next_draft_lens.values()) == {1}
+
+
+def test_update_dcut_next_draft_lens_keeps_non_dflash_per_request_lengths(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeProbs:
+        def detach(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def tolist(self):
+            return [[0.95, 0.95, 0.95], [0.20, 0.20, 0.20]]
+
+    class FakeDraftTokenIds:
+        shape = (2, 3)
+
+    runner = types.SimpleNamespace(
+        drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
+        input_batch=types.SimpleNamespace(req_ids=["req-0", "req-1"]),
+        dcut_config=VerifyAdaptiveConfig(),
+        dcut_next_draft_lens={},
+        dcut_plan_count=0,
+        dcut_logged_first_plan=True,
+        speculative_config=types.SimpleNamespace(method="eagle"),
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+    monkeypatch.setattr(dcut_monkeypatch, "_in_acl_graph_capture", lambda: False)
+
+    dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
+
+    assert runner.dcut_next_draft_lens == {"req-0": 2, "req-1": 0}

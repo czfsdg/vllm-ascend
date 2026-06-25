@@ -286,9 +286,22 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         cost_lookup=lambda q: float(q),
         max_draft_len=max_draft_len,
     )
+    draft_lens = [int(draft_len) for draft_len in result["draft_lens"]]
+    speculative_config = getattr(runner, "speculative_config", None)
+    if getattr(speculative_config, "method", None) == "dflash" and base_batch_size > 1:
+        # DFlash verification is sensitive to per-request query-length
+        # truncation inside the same batch: variable scheduled draft lengths can
+        # desynchronize the DFlash context/verify metadata under concurrency.
+        # Keep D-Cut safe by applying a batch-uniform truncation level derived
+        # from the selected verifier token budget. This preserves correctness
+        # while still allowing the whole batch to use a shorter verify length.
+        uniform_query_len = max(1, int(result["best_Q"]) // base_batch_size)
+        uniform_draft_len = min(max_draft_len, max(0, uniform_query_len - 1))
+        draft_lens = [uniform_draft_len] * len(req_ids)
+
     runner.dcut_next_draft_lens = {
-        req_id: int(draft_len)
-        for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
+        req_id: draft_len
+        for req_id, draft_len in zip(req_ids, draft_lens, strict=False)
     }
     runner.dcut_plan_count += 1
     if not getattr(runner, "dcut_logged_first_plan", False):
