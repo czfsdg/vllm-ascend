@@ -674,21 +674,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
 
-        use_draft_aclgraph = self.use_cuda_graph
-
-        # The current warmup profiler can be configured with a minimum graph
-        # batch size greater than one and query-length truncation. In that mode
-        # a single request stays eager (correct but slower), while multi-request
-        # speculative draft batches may be dispatched to a truncated FULL graph.
-        # The truncated graph can replay with stale per-request draft metadata and
-        # corrupt accepted-token verification under concurrency. Keep the target
-        # model graph-enabled, but run the draft proposer eagerly for
-        # multi-request batches until the dispatcher can express draft-specific
-        # query lengths safely.
-        if common_attn_metadata.num_reqs > 1:
-            use_draft_aclgraph = False
-
-        if use_draft_aclgraph:
+        if self.use_cuda_graph:
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -702,7 +688,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
 
-        if use_draft_aclgraph:
+        if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
