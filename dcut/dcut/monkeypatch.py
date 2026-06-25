@@ -230,6 +230,8 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
     runner = getattr(proposer, "runner", None)
     if runner is None or not _ensure_runner_state(runner):
         return
+    if not runner.dcut_config.apply_truncation:
+        return
     if getattr(proposer, "method", None) != "dflash" and not getattr(proposer, "parallel_drafting", False):
         return
     if _in_acl_graph_capture():
@@ -256,6 +258,9 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
 
 def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     if not _ensure_runner_state(runner) or draft_token_ids is None or _in_acl_graph_capture():
+        return
+    if not runner.dcut_config.apply_truncation:
+        runner.dcut_next_draft_lens = {}
         return
     drafter = getattr(runner, "drafter", None)
     drafter_probs = getattr(drafter, "latest_draft_token_probs", None)
@@ -352,6 +357,8 @@ def _patch_proposer_module(module: Any) -> bool:
     def _run_merged_draft(self: Any, *args: Any, **kwargs: Any) -> Any:
         runner = getattr(self, "runner", None)
         if runner is None or not _ensure_runner_state(runner):
+            return original_run_merged_draft(self, *args, **kwargs)
+        if not runner.dcut_config.apply_truncation:
             return original_run_merged_draft(self, *args, **kwargs)
 
         captured_logits = None
