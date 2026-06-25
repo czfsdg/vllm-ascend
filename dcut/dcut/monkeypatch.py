@@ -95,15 +95,6 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
         return scheduler_output
     if not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False):
-        runner.dcut_next_draft_lens = {}
-        if not getattr(runner, "dcut_logged_safe_mode", False):
-            logger.warning(
-                "D-Cut adaptive verify is running in safe planning-only mode; "
-                "not truncating already scheduled draft tokens. Set "
-                "apply_adaptive_lengths=true only after scheduler-side integration "
-                "is available."
-            )
-            runner.dcut_logged_safe_mode = True
         return scheduler_output
     scheduled = scheduler_output.scheduled_spec_decode_tokens
     if not scheduled:
@@ -166,6 +157,8 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
 
 def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     if not _ensure_runner_state(runner) or draft_token_ids is None:
+        return
+    if not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False):
         return
     drafter = getattr(runner, "drafter", None)
     drafter_probs = getattr(drafter, "latest_draft_token_probs", None)
@@ -247,7 +240,11 @@ def _patch_proposer_module(module: Any) -> bool:
     @wraps(original_run_merged_draft)
     def _run_merged_draft(self: Any, *args: Any, **kwargs: Any) -> Any:
         runner = getattr(self, "runner", None)
-        if runner is None or not _ensure_runner_state(runner):
+        if (
+            runner is None
+            or not _ensure_runner_state(runner)
+            or not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False)
+        ):
             return original_run_merged_draft(self, *args, **kwargs)
 
         captured_logits = None

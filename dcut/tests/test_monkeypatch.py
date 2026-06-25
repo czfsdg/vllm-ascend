@@ -78,8 +78,8 @@ def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monke
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
 
     assert updated is scheduler_output
-    assert runner.dcut_next_draft_lens == {}
-    assert runner.dcut_logged_safe_mode
+    assert runner.dcut_next_draft_lens == {"r0": 1}
+    assert not runner.dcut_logged_safe_mode
 
 
 def test_patch_proposer_captures_module_logits_processor_with_forward_hook(monkeypatch):
