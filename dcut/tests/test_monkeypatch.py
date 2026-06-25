@@ -188,6 +188,49 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     assert runner.dcut_logged_first_truncation
 
 
+
+def test_apply_dcut_draft_lens_rolls_back_scheduler_request_counters(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    @dataclass(frozen=True)
+    class SchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    request = types.SimpleNamespace(
+        num_computed_tokens=10,
+        num_output_placeholders=4,
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_spec_decode_tokens={"req-0": [11, 12, 13, 14]},
+        num_scheduled_tokens={"req-0": 5},
+        total_num_scheduled_tokens=5,
+    )
+    runner = types.SimpleNamespace(
+        requests={"req-0": request},
+        input_batch=types.SimpleNamespace(
+            req_ids=["req-0"],
+            req_id_to_index={"req-0": 0},
+            num_computed_tokens_cpu=[10],
+        ),
+        dcut_next_draft_lens={"req-0": 2},
+        dcut_config=types.SimpleNamespace(apply_truncation=True),
+        dcut_logged_first_truncation=False,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+
+    result = dcut_monkeypatch._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert result.scheduled_spec_decode_tokens == {"req-0": [11, 12]}
+    assert result.num_scheduled_tokens == {"req-0": 3}
+    assert result.total_num_scheduled_tokens == 3
+    assert runner.input_batch.num_computed_tokens_cpu == [8]
+    assert request.num_computed_tokens == 8
+    assert request.num_output_placeholders == 2
+
+
 def test_apply_dcut_draft_lens_removes_zero_length_spec_entries(monkeypatch):
     _install_fake_vllm_logger()
     dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
@@ -265,16 +308,16 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
             return self
 
         def tolist(self):
-            return [[0.9, 0.8, 0.7, 0.6]]
+            return [[0.9, 0.8, 0.7, 0.6], [0.2, 0.1, 0.1, 0.1]]
 
     class FakeDraftTokenIds:
-        shape = (1, 4)
+        shape = (2, 4)
 
     logs = []
     runner = types.SimpleNamespace(
         drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
-        input_batch=types.SimpleNamespace(req_ids=["req-0"]),
-        dcut_config=VerifyAdaptiveConfig(log_every_n_plans=1),
+        input_batch=types.SimpleNamespace(req_ids=["req-0", "req-1"]),
+        dcut_config=VerifyAdaptiveConfig(apply_truncation=True, log_every_n_plans=1),
         dcut_next_draft_lens={},
         dcut_logged_first_plan=True,
         dcut_plan_count=0,
@@ -290,4 +333,80 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
     dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
 
     assert runner.dcut_plan_count == 1
+    assert len(set(runner.dcut_next_draft_lens.values())) == 1
     assert any("verifier_tokens=" in log and "draft_lens=" in log for log in logs)
+
+
+def test_proposer_patch_observe_only_does_not_wrap_logits(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeDraftTokenIds:
+        def reshape(self, *args):
+            return self
+
+    class FakeModel:
+        def __init__(self):
+            self.compute_logits = self._compute_logits
+            self.compute_logits_calls = 0
+
+        def _compute_logits(self, *args, **kwargs):
+            self.compute_logits_calls += 1
+            return "logits"
+
+    class FakeRunner:
+        dcut_config = types.SimpleNamespace(apply_truncation=False)
+
+    class FakeProposer:
+        def __init__(self):
+            self.runner = FakeRunner()
+            self.model = FakeModel()
+            self.compute_logits_seen_by_draft = None
+
+        def _run_merged_draft(self):
+            self.compute_logits_seen_by_draft = self.model.compute_logits
+            self.model.compute_logits("hidden_states")
+            return FakeDraftTokenIds()
+
+    module = types.SimpleNamespace(AscendSpecDecodeBaseProposer=FakeProposer)
+    assert dcut_monkeypatch._patch_proposer_module(module)
+
+    recorded = {}
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+    monkeypatch.setattr(
+        dcut_monkeypatch,
+        "_record_selected_token_probs",
+        lambda proposer, logits, draft_token_ids: recorded.setdefault("logits", logits),
+    )
+
+    proposer = FakeProposer()
+    original_compute_logits = proposer.model.compute_logits
+    proposer._run_merged_draft()
+
+    assert proposer.compute_logits_seen_by_draft is original_compute_logits
+    assert proposer.model.compute_logits is original_compute_logits
+    assert proposer.model.compute_logits_calls == 1
+    assert recorded == {}
+
+
+def test_update_dcut_next_draft_lens_observe_only_does_not_plan(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeDraftTokenIds:
+        shape = (1, 4)
+
+    runner = types.SimpleNamespace(
+        drafter=types.SimpleNamespace(latest_draft_token_probs=object()),
+        input_batch=types.SimpleNamespace(req_ids=["req-0"]),
+        dcut_config=VerifyAdaptiveConfig(apply_truncation=False),
+        dcut_next_draft_lens={"stale": 1},
+        dcut_plan_count=0,
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+    monkeypatch.setattr(dcut_monkeypatch, "_in_acl_graph_capture", lambda: False)
+
+    dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
+
+    assert runner.dcut_next_draft_lens == {}
+    assert runner.dcut_plan_count == 0
