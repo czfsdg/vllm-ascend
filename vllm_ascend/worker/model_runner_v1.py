@@ -624,18 +624,6 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
 
-    def _disable_padded_drafter_batch_for_method(self) -> bool:
-        if self.speculative_config is None:
-            return False
-        # DFlash precomputes context KV from the drafter input hidden states.
-        # The padded drafter path keeps rejected draft tokens as padding in
-        # that context and only filters the sample indices. Those rejected
-        # context tokens can still be attended by the DFlash cross-attention
-        # path, which corrupts multi-request generation when requests accept
-        # different draft lengths (for example with D-Cut truncation). Use the
-        # compact CPU path for DFlash until its context KV path masks padding.
-        return self.speculative_config.method == "dflash"
-
     def _sync_metadata_across_dp(
         self,
         num_tokens: int,
@@ -1752,10 +1740,7 @@ class NPUModelRunner(GPUModelRunner):
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
 
-            if (
-                self.vllm_config.speculative_config.disable_padded_drafter_batch
-                or self._disable_padded_drafter_batch_for_method()
-            ):
+            if self.vllm_config.speculative_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
                 # the cpu-side list[list[int]] of valid sampled tokens for each
                 # request, with invalid requests having empty lists.
@@ -1835,10 +1820,7 @@ class NPUModelRunner(GPUModelRunner):
                     ]
                     assert common_attn_metadata is not None
                     common_attn_metadata.query_start_loc[: num_reqs + 1] = query_start_loc_pcp_full[: num_reqs + 1]
-                if (
-                    self.vllm_config.speculative_config.disable_padded_drafter_batch
-                    or self._disable_padded_drafter_batch_for_method()
-                ):
+                if self.vllm_config.speculative_config.disable_padded_drafter_batch:
                     # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                     token_indices_to_sample = None
                     assert self.drafter is not None
@@ -2460,7 +2442,6 @@ class NPUModelRunner(GPUModelRunner):
                         or self.speculative_config.use_ngram_gpu()
                     )
                     and not self.speculative_config.disable_padded_drafter_batch
-                    and not self._disable_padded_drafter_batch_for_method()
                 )
                 if use_padded_batch:
                     # EAGLE speculative decoding can use the GPU sampled tokens
