@@ -364,6 +364,19 @@ def _patch_proposer_module(module: Any) -> bool:
         if runner is None or not _ensure_runner_state(runner):
             return original_run_merged_draft(self, *args, **kwargs)
 
+        if getattr(self, "method", None) == "dflash":
+            batch_size = kwargs.get("batch_size")
+            if batch_size is None and len(args) >= 2:
+                batch_size = args[1]
+            if batch_size is not None and int(batch_size) > 1:
+                if not getattr(runner, "dcut_logged_skip_dflash_batch", False):
+                    _log_info(
+                        "D-Cut adaptive verify skips DFlash probability capture "
+                        "for multi-request batches to preserve correctness."
+                    )
+                    runner.dcut_logged_skip_dflash_batch = True
+                return original_run_merged_draft(self, *args, **kwargs)
+
         captured_logits = None
         original_compute_logits = getattr(self.model, "compute_logits", None)
         logits_processor = getattr(self.model, "logits_processor", None)
