@@ -12,7 +12,7 @@ from typing import Any
 from vllm.logger import init_logger
 
 from dcut.verify_adaptive_config import VerifyAdaptiveConfig
-from dcut.verify_adaptive_controller import choose_query_lens_discrete
+from dcut.verify_adaptive_controller import choose_query_lens_discrete, make_cost_lookup
 
 logger = init_logger(__name__)
 _INSTALLED = False
@@ -112,8 +112,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         return scheduler_output
     if not getattr(runner, "dcut_logged_first_truncation", False):
         logger.info(
-            "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens "
-            "for the first time (requests=%d).",
+            "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (requests=%d).",
             len(updated),
         )
         runner.dcut_logged_first_truncation = True
@@ -133,10 +132,6 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
         num_indices = min(logits.shape[0], draft_token_ids.numel())
         logits = logits[:num_indices]
         draft_token_ids = draft_token_ids[:num_indices].to(torch.long)
-        vocab_size = logits.shape[-1]
-        if bool(torch.any((draft_token_ids < 0) | (draft_token_ids >= vocab_size)).item()):
-            logger.debug("D-Cut: selected draft ids are outside logits vocab; skip probs for this step.")
-            return
         probs = torch.softmax(logits.float(), dim=-1)
         selected_probs = probs.gather(dim=-1, index=draft_token_ids.view(-1, 1)).view(-1)
         proposer.latest_draft_token_probs = selected_probs.view(-1, proposer.num_speculative_tokens)
@@ -173,12 +168,11 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         probs=probs_cpu,
         base_batch_size=base_batch_size,
         q_levels=q_levels,
-        cost_lookup=lambda q: float(q),
+        cost_lookup=make_cost_lookup(runner.dcut_config.cost_table, base_batch_size),
         max_draft_len=max_draft_len,
     )
     runner.dcut_next_draft_lens = {
-        req_id: int(draft_len)
-        for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
+        req_id: int(draft_len) for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
     }
     if not getattr(runner, "dcut_logged_first_plan", False):
         logger.info(
@@ -303,8 +297,7 @@ def install() -> None:
         logger.info("D-Cut adaptive-verify plugin already installed; skipping duplicate install.")
         return
     logger.info(
-        "D-Cut adaptive-verify plugin install requested "
-        "(VLLM_PLUGINS=%s, config_env=%s).",
+        "D-Cut adaptive-verify plugin install requested (VLLM_PLUGINS=%s, config_env=%s).",
         os.getenv("VLLM_PLUGINS", "<unset>"),
         _get_config_path() or "<unset>",
     )

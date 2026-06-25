@@ -27,9 +27,10 @@ dormant.
 - Active only for DFlash, or `method=draft_model` with `parallel_drafting=true`.
 - MTP is intentionally unsupported and remains dormant.
 - Async scheduling is not adapted; if enabled, the plugin logs a warning.
-- The first Ascend plugin version uses a monotonic synthetic cost model for the
-  verifier query levels. Replace `cost_lookup` in `dcut/monkeypatch.py` with a
-  hardware-profiled table when NPU profiling data is available.
+- If `cost_table` is provided in the JSON config, D-Cut uses those profiled
+  verifier costs. Keys may be `"Q"` or `"bs,Q"`; batch-keyed rows use the
+  smallest profiled batch size greater than or equal to the active batch.
+  Without `cost_table`, it falls back to a monotonic synthetic `cost=Q` model.
 
 ## Smoke checks
 
@@ -65,7 +66,7 @@ prove D-Cut is actually computing and applying adaptive verifier lengths.
 Useful log checks:
 
 ```bash
-grep -Ei "D-Cut adaptive|dcut" /path/to/server.log | tail -80
+rg -i "D-Cut adaptive|dcut" /path/to/server.log | tail -80
 ```
 
 If the plugin is installed but inactive, the log explains why, for example a
