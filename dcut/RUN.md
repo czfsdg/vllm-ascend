@@ -22,15 +22,15 @@ export VLLM_PLUGINS=ascend,dcut_adaptive_verify
 `VLLM_DCUT_CONFIG`. If neither config env var is set, the plugin loads but stays
 dormant.
 
-By default the example config runs in observe-only mode with
-`"apply_truncation": false`, so it records probabilities and computes adaptive
-plans without changing verifier inputs. Set `"apply_truncation": true` only after
-validating correctness against vanilla DFlash on your workload.
+By default the example config enables active truncation with
+`"apply_truncation": true` and prints one adaptive plan every 50 plans via
+`"log_every_n_plans": 50`. Set `"apply_truncation": false` to run in
+observe-only mode without changing verifier inputs.
 
-Set `"log_every_n_plans": 1` to print every adaptive plan during debugging. The
-plan log includes the verifier token budget (`verifier_tokens`) and per-request
-draft lengths (`draft_lens`). Keep the default `0` outside debugging to avoid
-high-volume logs.
+The plan log includes the verifier token budget (`verifier_tokens`) and the
+applied draft prefix lengths (`draft_lens`). Active truncation applies a
+batch-uniform draft prefix length derived from the selected verifier budget,
+which avoids ragged per-request verifier shapes on Ascend DFlash.
 
 ## Scope
 

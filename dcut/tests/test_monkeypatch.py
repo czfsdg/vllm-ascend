@@ -308,15 +308,15 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
             return self
 
         def tolist(self):
-            return [[0.9, 0.8, 0.7, 0.6]]
+            return [[0.9, 0.8, 0.7, 0.6], [0.2, 0.1, 0.1, 0.1]]
 
     class FakeDraftTokenIds:
-        shape = (1, 4)
+        shape = (2, 4)
 
     logs = []
     runner = types.SimpleNamespace(
         drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
-        input_batch=types.SimpleNamespace(req_ids=["req-0"]),
+        input_batch=types.SimpleNamespace(req_ids=["req-0", "req-1"]),
         dcut_config=VerifyAdaptiveConfig(apply_truncation=True, log_every_n_plans=1),
         dcut_next_draft_lens={},
         dcut_logged_first_plan=True,
@@ -333,6 +333,7 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
     dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
 
     assert runner.dcut_plan_count == 1
+    assert len(set(runner.dcut_next_draft_lens.values())) == 1
     assert any("verifier_tokens=" in log and "draft_lens=" in log for log in logs)
 
 

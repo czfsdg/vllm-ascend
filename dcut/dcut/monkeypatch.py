@@ -149,6 +149,17 @@ def _decrement_attr(obj: Any, attr_name: str, decrement: int) -> None:
     setattr(obj, attr_name, max(0, current_value - decrement))
 
 
+def _uniform_draft_len_from_budget(best_q: Any, base_batch_size: int, max_draft_len: int) -> int:
+    try:
+        verifier_tokens = int(best_q)
+    except (TypeError, ValueError):
+        verifier_tokens = base_batch_size
+    draft_budget = max(0, verifier_tokens - base_batch_size)
+    if base_batch_size <= 0:
+        return 0
+    return min(max_draft_len, draft_budget // base_batch_size)
+
+
 def _rollback_input_batch_computed_tokens(runner: Any, req_id: Any, dropped_tokens: int) -> None:
     input_batch = getattr(runner, "input_batch", None)
     if input_batch is None:
@@ -337,10 +348,10 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         cost_lookup=lambda q: float(q),
         max_draft_len=max_draft_len,
     )
-    runner.dcut_next_draft_lens = {
-        req_id: int(draft_len)
-        for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
-    }
+    uniform_draft_len = _uniform_draft_len_from_budget(
+        result["best_Q"], base_batch_size, max_draft_len
+    )
+    runner.dcut_next_draft_lens = {req_id: uniform_draft_len for req_id in req_ids}
     runner.dcut_plan_count += 1
     if not getattr(runner, "dcut_logged_first_plan", False):
         _log_info(
