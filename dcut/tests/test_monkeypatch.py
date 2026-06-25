@@ -23,6 +23,21 @@ def import_monkeypatch_with_fake_vllm(monkeypatch):
     return importlib.import_module("dcut.monkeypatch")
 
 
+def test_qwen3_next_runner_is_unsupported(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    runner = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="qwen3_next",
+                architectures=["Qwen3NextForCausalLM"],
+            )
+        ),
+        speculative_config=SimpleNamespace(method="dflash", parallel_drafting=False),
+    )
+
+    assert not monkeypatch_module._is_supported_runner(runner)
+
+
 def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 

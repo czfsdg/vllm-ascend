@@ -26,6 +26,8 @@ dormant.
 
 - Active only for DFlash, or `method=draft_model` with `parallel_drafting=true`.
 - MTP is intentionally unsupported and remains dormant.
+- Qwen3-Next/GDN hybrid models are intentionally unsupported because current
+  DFlash/spec-decode acceptance and varlen metadata are unstable on that path.
 - Async scheduling is not adapted; if enabled, the plugin logs a warning.
 - If `cost_table` is provided in the JSON config, D-Cut uses those profiled
   verifier costs. Keys may be `"Q"` or `"bs,Q"`; batch-keyed rows use the

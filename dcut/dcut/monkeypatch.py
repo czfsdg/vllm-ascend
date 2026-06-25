@@ -50,7 +50,22 @@ def _load_config() -> VerifyAdaptiveConfig | None:
     return config
 
 
+def _runner_uses_gdn_or_qwen3_next(runner: Any) -> bool:
+    model_config = getattr(runner, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    model_type = str(getattr(hf_config, "model_type", "")).lower()
+    architectures = [str(arch).lower() for arch in getattr(hf_config, "architectures", []) or []]
+    if "qwen3_next" in model_type or any("qwen3" in arch and "next" in arch for arch in architectures):
+        return True
+
+    model = getattr(runner, "model", None)
+    model_text = str(type(model)).lower()
+    return "qwen3_next" in model_text or "gdn" in model_text
+
+
 def _is_supported_runner(runner: Any) -> bool:
+    if _runner_uses_gdn_or_qwen3_next(runner):
+        return False
     speculative_config = getattr(runner, "speculative_config", None)
     if speculative_config is None:
         return False
@@ -77,9 +92,10 @@ def _ensure_runner_state(runner: Any) -> bool:
     if not _is_supported_runner(runner):
         speculative_config = getattr(runner, "speculative_config", None)
         logger.info(
-            "D-Cut adaptive verify dormant: method=%s parallel_drafting=%s is unsupported.",
+            "D-Cut adaptive verify dormant: method=%s parallel_drafting=%s model_type=%s is unsupported.",
             getattr(speculative_config, "method", None),
             bool(getattr(speculative_config, "parallel_drafting", False)),
+            getattr(getattr(getattr(runner, "model_config", None), "hf_config", None), "model_type", None),
         )
         return False
     if getattr(runner, "use_async_scheduling", False):
