@@ -74,7 +74,12 @@ def _is_supported_runner(runner: Any) -> bool:
         return False
     method = getattr(speculative_config, "method", None)
     parallel_drafting = bool(getattr(speculative_config, "parallel_drafting", False))
-    return method == "dflash" or (method == "draft_model" and parallel_drafting)
+    # DFlash needs the full reference implementation (native probability
+    # capture, async probability queue, profiled verifier cost table, and
+    # scheduler-safe truncation) before adaptive truncation can be enabled
+    # safely on Ascend. Keep the plugin dormant for DFlash for now so enabling
+    # dcut_adaptive_verify does not perturb DFlash multi-request correctness.
+    return method == "draft_model" and parallel_drafting
 
 
 def _ensure_runner_state(runner: Any) -> bool:
@@ -291,14 +296,6 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         max_draft_len=max_draft_len,
     )
     draft_lens = [int(draft_len) for draft_len in result["draft_lens"]]
-    speculative_config = getattr(runner, "speculative_config", None)
-    if getattr(speculative_config, "method", None) == "dflash" and base_batch_size > 1:
-        # DFlash multi-request verification is still sensitive to changing the
-        # scheduled draft window, even when probabilities are captured natively.
-        # Keep the reference-style probability planning, but leave actual
-        # truncation in observe-only mode for concurrent DFlash batches.
-        draft_lens = [max_draft_len] * len(req_ids)
-
     runner.dcut_next_draft_lens = {
         req_id: draft_len
         for req_id, draft_len in zip(req_ids, draft_lens, strict=False)
