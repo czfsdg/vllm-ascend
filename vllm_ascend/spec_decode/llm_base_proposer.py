@@ -220,6 +220,32 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
+        # D-Cut-style adaptive verification can ask the proposer to retain the
+        # probabilities of the selected draft tokens. Keep this native to the
+        # proposer instead of monkeypatching compute_logits/logits_processor at
+        # runtime, which is fragile for DFlash graph/concurrency paths.
+        self.needs_draft_probs = False
+        self._last_selected_probs: torch.Tensor | None = None
+
+    def take_last_selected_probs(self) -> torch.Tensor | None:
+        return self._last_selected_probs
+
+    def _maybe_store_selected_draft_probs(self, logits: torch.Tensor, draft_token_ids: torch.Tensor) -> None:
+        if not self.needs_draft_probs:
+            return
+        try:
+            token_ids = draft_token_ids.to(torch.long)
+            valid_token_mask = (token_ids >= 0) & (token_ids < logits.shape[-1])
+            safe_token_ids = token_ids.clamp(0, logits.shape[-1] - 1)
+            selected_logprobs = logits.float().log_softmax(dim=-1).gather(
+                dim=-1, index=safe_token_ids.view(-1, 1)
+            ).view(-1)
+            selected_probs = selected_logprobs.exp() * valid_token_mask.to(selected_logprobs.dtype)
+            self._last_selected_probs = selected_probs.view(-1, self.num_speculative_tokens).contiguous()
+        except Exception:
+            logger.exception("D-Cut: failed to store selected draft token probabilities.")
+            self._last_selected_probs = None
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -953,10 +979,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
         logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
-            return greedy_sample(logits)
         logits = logits.contiguous()
         next_token = greedy_sample(logits)
+        self._maybe_store_selected_draft_probs(logits, next_token)
+        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
+            return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
             next_token.shape
         )

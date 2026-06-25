@@ -72,19 +72,13 @@ def test_proposer_patch_does_not_replace_logits_processor_child_module(monkeypat
     module = types.SimpleNamespace(AscendSpecDecodeBaseProposer=FakeProposer)
     assert dcut_monkeypatch._patch_proposer_module(module)
 
-    recorded = {}
-    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
-    monkeypatch.setattr(
-        dcut_monkeypatch,
-        "_record_selected_token_probs",
-        lambda proposer, logits, draft_token_ids: recorded.setdefault("logits", logits),
-    )
-
     proposer = FakeProposer()
     proposer._run_merged_draft()
 
     assert proposer.model.logits_processor.called
-    assert recorded["logits"] == "logits"
+    # The plugin now relies on native proposer-side probability capture and
+    # must not wrap _run_merged_draft/logits methods from the outside.
+    assert FakeProposer._run_merged_draft.__name__ == "_run_merged_draft"
 
 
 def test_record_probs_skips_acl_graph_capture(monkeypatch):
@@ -272,7 +266,7 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
 
     logs = []
     runner = types.SimpleNamespace(
-        drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
+        drafter=types.SimpleNamespace(take_last_selected_probs=lambda: FakeProbs()),
         input_batch=types.SimpleNamespace(req_ids=["req-0"]),
         dcut_config=VerifyAdaptiveConfig(log_every_n_plans=1),
         dcut_next_draft_lens={},
@@ -291,3 +285,48 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
 
     assert runner.dcut_plan_count == 1
     assert any("verifier_tokens=" in log and "draft_lens=" in log for log in logs)
+
+
+def test_dflash_runner_is_not_supported_until_full_reference_port(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    runner = types.SimpleNamespace(
+        speculative_config=types.SimpleNamespace(method="dflash", parallel_drafting=False),
+    )
+
+    assert not dcut_monkeypatch._is_supported_runner(runner)
+
+
+def test_update_dcut_next_draft_lens_keeps_non_dflash_per_request_lengths(monkeypatch):
+    _install_fake_vllm_logger()
+    dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
+
+    class FakeProbs:
+        def detach(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def tolist(self):
+            return [[0.95, 0.95, 0.95], [0.20, 0.20, 0.20]]
+
+    class FakeDraftTokenIds:
+        shape = (2, 3)
+
+    runner = types.SimpleNamespace(
+        drafter=types.SimpleNamespace(latest_draft_token_probs=FakeProbs()),
+        input_batch=types.SimpleNamespace(req_ids=["req-0", "req-1"]),
+        dcut_config=VerifyAdaptiveConfig(),
+        dcut_next_draft_lens={},
+        dcut_plan_count=0,
+        dcut_logged_first_plan=True,
+        speculative_config=types.SimpleNamespace(method="eagle"),
+    )
+    monkeypatch.setattr(dcut_monkeypatch, "_ensure_runner_state", lambda runner: True)
+    monkeypatch.setattr(dcut_monkeypatch, "_in_acl_graph_capture", lambda: False)
+
+    dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
+
+    assert runner.dcut_next_draft_lens == {"req-0": 2, "req-1": 0}

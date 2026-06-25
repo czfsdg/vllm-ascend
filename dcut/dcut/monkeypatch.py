@@ -74,7 +74,12 @@ def _is_supported_runner(runner: Any) -> bool:
         return False
     method = getattr(speculative_config, "method", None)
     parallel_drafting = bool(getattr(speculative_config, "parallel_drafting", False))
-    return method == "dflash" or (method == "draft_model" and parallel_drafting)
+    # DFlash needs the full reference implementation (native probability
+    # capture, async probability queue, profiled verifier cost table, and
+    # scheduler-safe truncation) before adaptive truncation can be enabled
+    # safely on Ascend. Keep the plugin dormant for DFlash for now so enabling
+    # dcut_adaptive_verify does not perturb DFlash multi-request correctness.
+    return method == "draft_model" and parallel_drafting
 
 
 def _ensure_runner_state(runner: Any) -> bool:
@@ -108,6 +113,9 @@ def _ensure_runner_state(runner: Any) -> bool:
 
     runner.dcut_config = config
     runner.dcut_adaptive_enabled = True
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None and hasattr(drafter, "needs_draft_probs"):
+        drafter.needs_draft_probs = True
     _log_info("D-Cut adaptive verify ENABLED (config=%s)", config.to_log_dict())
     return True
 
@@ -258,7 +266,8 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     if not _ensure_runner_state(runner) or draft_token_ids is None or _in_acl_graph_capture():
         return
     drafter = getattr(runner, "drafter", None)
-    drafter_probs = getattr(drafter, "latest_draft_token_probs", None)
+    take_probs = getattr(drafter, "take_last_selected_probs", None)
+    drafter_probs = take_probs() if callable(take_probs) else getattr(drafter, "latest_draft_token_probs", None)
     if drafter_probs is None:
         return
     try:
@@ -286,9 +295,10 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         cost_lookup=lambda q: float(q),
         max_draft_len=max_draft_len,
     )
+    draft_lens = [int(draft_len) for draft_len in result["draft_lens"]]
     runner.dcut_next_draft_lens = {
-        req_id: int(draft_len)
-        for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
+        req_id: draft_len
+        for req_id, draft_len in zip(req_ids, draft_lens, strict=False)
     }
     runner.dcut_plan_count += 1
     if not getattr(runner, "dcut_logged_first_plan", False):
@@ -346,51 +356,13 @@ def _patch_proposer_module(module: Any) -> bool:
     if AscendSpecDecodeBaseProposer is None or getattr(AscendSpecDecodeBaseProposer, "_dcut_patched", False):
         return False
 
-    original_run_merged_draft = AscendSpecDecodeBaseProposer._run_merged_draft
-
-    @wraps(original_run_merged_draft)
-    def _run_merged_draft(self: Any, *args: Any, **kwargs: Any) -> Any:
-        runner = getattr(self, "runner", None)
-        if runner is None or not _ensure_runner_state(runner):
-            return original_run_merged_draft(self, *args, **kwargs)
-
-        captured_logits = None
-        original_compute_logits = getattr(self.model, "compute_logits", None)
-        logits_processor = getattr(self.model, "logits_processor", None)
-        original_logits_processor_forward = getattr(logits_processor, "forward", None)
-
-        def capture_logits(logits: Any) -> Any:
-            nonlocal captured_logits
-            captured_logits = logits
-            return logits
-
-        def compute_logits_wrapper(*inner_args: Any, **inner_kwargs: Any) -> Any:
-            return capture_logits(original_compute_logits(*inner_args, **inner_kwargs))
-
-        def logits_processor_forward_wrapper(*inner_args: Any, **inner_kwargs: Any) -> Any:
-            return capture_logits(original_logits_processor_forward(*inner_args, **inner_kwargs))
-
-        if original_compute_logits is not None:
-            self.model.compute_logits = compute_logits_wrapper
-        if original_logits_processor_forward is not None:
-            logits_processor.forward = logits_processor_forward_wrapper
-        try:
-            draft_token_ids = original_run_merged_draft(self, *args, **kwargs)
-        finally:
-            if original_compute_logits is not None:
-                self.model.compute_logits = original_compute_logits
-            if original_logits_processor_forward is not None:
-                logits_processor.forward = original_logits_processor_forward
-
-        if captured_logits is not None and draft_token_ids is not None:
-            _record_selected_token_probs(self, captured_logits, draft_token_ids.reshape(-1))
-        return draft_token_ids
-
-    AscendSpecDecodeBaseProposer._run_merged_draft = _run_merged_draft
+    # Probability capture is implemented natively by AscendSpecDecodeBaseProposer
+    # (needs_draft_probs/take_last_selected_probs). Do not monkeypatch
+    # _run_merged_draft or logits methods here; DFlash graph/concurrency paths
+    # are sensitive to runtime method replacement.
     AscendSpecDecodeBaseProposer._dcut_patched = True
-    _log_info("D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.")
+    _log_info("D-Cut adaptive-verify enabled native Ascend proposer probability capture.")
     return True
-
 
 def _try_patch_loaded_modules() -> None:
     runner_module = sys.modules.get(_MODEL_RUNNER_MODULE)
