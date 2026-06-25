@@ -293,7 +293,7 @@ def test_update_dcut_next_draft_lens_logs_every_configured_plan(monkeypatch):
     assert any("verifier_tokens=" in log and "draft_lens=" in log for log in logs)
 
 
-def test_update_dcut_next_draft_lens_uses_uniform_dflash_lengths(monkeypatch):
+def test_update_dcut_next_draft_lens_preserves_dflash_lengths(monkeypatch):
     _install_fake_vllm_logger()
     dcut_monkeypatch = importlib.import_module("dcut.monkeypatch")
 
@@ -324,7 +324,7 @@ def test_update_dcut_next_draft_lens_uses_uniform_dflash_lengths(monkeypatch):
 
     dcut_monkeypatch._update_dcut_next_draft_lens(runner, FakeDraftTokenIds())
 
-    assert set(runner.dcut_next_draft_lens.values()) == {1}
+    assert set(runner.dcut_next_draft_lens.values()) == {3}
 
 
 def test_update_dcut_next_draft_lens_keeps_non_dflash_per_request_lengths(monkeypatch):
