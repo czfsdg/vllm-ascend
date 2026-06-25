@@ -11,6 +11,7 @@
   "n_measure_iters": 5,
   "apply_adaptive_lengths": false,
   "min_prefix_prob": 0.05,
+  "log_concurrency_interval_s": 5.0,
   "cost_table": {
     "2,2": 2.0,
     "2,4": 3.4,

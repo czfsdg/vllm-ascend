@@ -39,6 +39,9 @@ dormant.
 - `min_prefix_prob` filters low-confidence draft prefixes out of the adaptive
   planner. Increase it if a small number of requests repeatedly run to the
   generation limit with low acceptance.
+- `log_concurrency_interval_s` controls periodic server-side INFO logs for
+  actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
+  Set it to `0` to disable these logs.
 
 ## Smoke checks
 
@@ -63,6 +66,7 @@ D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.
 D-Cut adaptive verify ENABLED (config=...)
 D-Cut adaptive verify ACTIVE: computed first adaptive draft-length plan (...)
 D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
+D-Cut concurrency: active_reqs=... scheduled_reqs=... spec_reqs=... total_scheduled_tokens=... max_scheduled_tokens_per_req=...
 ```
 
 The install-hook lines prove vLLM discovered the plugin without eagerly importing

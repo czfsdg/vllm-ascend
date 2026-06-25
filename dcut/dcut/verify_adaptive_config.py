@@ -23,6 +23,7 @@ class VerifyAdaptiveConfig:
     cost_table: dict[str, float] | None = None
     apply_adaptive_lengths: bool = False
     min_prefix_prob: float = 0.05
+    log_concurrency_interval_s: float = 5.0
 
     @classmethod
     def from_file(cls, path: str) -> VerifyAdaptiveConfig:
@@ -54,4 +55,5 @@ class VerifyAdaptiveConfig:
             "cost_table_entries": 0 if self.cost_table is None else len(self.cost_table),
             "apply_adaptive_lengths": self.apply_adaptive_lengths,
             "min_prefix_prob": self.min_prefix_prob,
+            "log_concurrency_interval_s": self.log_concurrency_interval_s,
         }

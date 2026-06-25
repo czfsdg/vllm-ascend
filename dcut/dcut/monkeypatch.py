@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import os
 import sys
+import time
 from dataclasses import replace
 from functools import wraps
 from typing import Any
@@ -70,6 +71,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_logged_first_plan = False
     runner.dcut_logged_first_truncation = False
     runner.dcut_logged_safe_mode = False
+    runner.dcut_last_concurrency_log_ts = 0.0
 
     config = _load_config()
     if config is None:
@@ -90,6 +92,36 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_adaptive_enabled = True
     logger.info("D-Cut adaptive verify ENABLED (config=%s)", config.to_log_dict())
     return True
+
+
+def _log_concurrency(runner: Any, scheduler_output: Any) -> None:
+    if not _ensure_runner_state(runner):
+        return
+    interval_s = float(getattr(runner.dcut_config, "log_concurrency_interval_s", 0.0))
+    if interval_s <= 0:
+        return
+    now = time.monotonic()
+    last_log_ts = float(getattr(runner, "dcut_last_concurrency_log_ts", 0.0))
+    if now - last_log_ts < interval_s:
+        return
+    runner.dcut_last_concurrency_log_ts = now
+
+    num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {}) or {}
+    scheduled_spec_decode_tokens = getattr(scheduler_output, "scheduled_spec_decode_tokens", {}) or {}
+    active_reqs = int(getattr(getattr(runner, "input_batch", None), "num_reqs", 0) or 0)
+    scheduled_reqs = len(num_scheduled_tokens)
+    spec_reqs = len(scheduled_spec_decode_tokens)
+    total_scheduled_tokens = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0)
+    max_scheduled_tokens = max(num_scheduled_tokens.values(), default=0)
+    logger.info(
+        "D-Cut concurrency: active_reqs=%d scheduled_reqs=%d spec_reqs=%d "
+        "total_scheduled_tokens=%d max_scheduled_tokens_per_req=%d",
+        active_reqs,
+        scheduled_reqs,
+        spec_reqs,
+        total_scheduled_tokens,
+        max_scheduled_tokens,
+    )
 
 
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
@@ -216,6 +248,7 @@ def _patch_runner_module(module: Any) -> bool:
 
     @wraps(original_execute_model)
     def execute_model(self: Any, scheduler_output: Any, *args: Any, **kwargs: Any) -> Any:
+        _log_concurrency(self, scheduler_output)
         scheduler_output = _apply_dcut_draft_lens(self, scheduler_output)
         return original_execute_model(self, scheduler_output, *args, **kwargs)
 
