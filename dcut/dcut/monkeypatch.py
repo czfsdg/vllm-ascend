@@ -226,6 +226,7 @@ def _patch_proposer_module(module: Any) -> bool:
             return original_run_merged_draft(self, *args, **kwargs)
 
         captured_logits = None
+        logits_processor_hook = None
         original_compute_logits = getattr(self.model, "compute_logits", None)
         original_logits_processor = getattr(self.model, "logits_processor", None)
 
@@ -240,16 +241,24 @@ def _patch_proposer_module(module: Any) -> bool:
         def logits_processor_wrapper(*inner_args: Any, **inner_kwargs: Any) -> Any:
             return capture_logits(original_logits_processor(*inner_args, **inner_kwargs))
 
+        def logits_processor_hook_fn(module: Any, inputs: Any, output: Any) -> None:
+            capture_logits(output)
+
         if original_compute_logits is not None:
             self.model.compute_logits = compute_logits_wrapper
         if original_logits_processor is not None:
-            self.model.logits_processor = logits_processor_wrapper
+            if hasattr(original_logits_processor, "register_forward_hook"):
+                logits_processor_hook = original_logits_processor.register_forward_hook(logits_processor_hook_fn)
+            else:
+                self.model.logits_processor = logits_processor_wrapper
         try:
             draft_token_ids = original_run_merged_draft(self, *args, **kwargs)
         finally:
             if original_compute_logits is not None:
                 self.model.compute_logits = original_compute_logits
-            if original_logits_processor is not None:
+            if logits_processor_hook is not None:
+                logits_processor_hook.remove()
+            elif original_logits_processor is not None:
                 self.model.logits_processor = original_logits_processor
 
         if captured_logits is not None and draft_token_ids is not None:
