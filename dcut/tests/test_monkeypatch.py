@@ -210,6 +210,11 @@ def test_apply_dcut_draft_lens_rolls_back_scheduler_request_counters(monkeypatch
     )
     runner = types.SimpleNamespace(
         requests={"req-0": request},
+        input_batch=types.SimpleNamespace(
+            req_ids=["req-0"],
+            req_id_to_index={"req-0": 0},
+            num_computed_tokens_cpu=[10],
+        ),
         dcut_next_draft_lens={"req-0": 2},
         dcut_config=types.SimpleNamespace(apply_truncation=True),
         dcut_logged_first_truncation=False,
@@ -221,6 +226,7 @@ def test_apply_dcut_draft_lens_rolls_back_scheduler_request_counters(monkeypatch
     assert result.scheduled_spec_decode_tokens == {"req-0": [11, 12]}
     assert result.num_scheduled_tokens == {"req-0": 3}
     assert result.total_num_scheduled_tokens == 3
+    assert runner.input_batch.num_computed_tokens_cpu == [8]
     assert request.num_computed_tokens == 8
     assert request.num_output_placeholders == 2
 

@@ -142,18 +142,41 @@ def _apply_truncation_enabled(runner: Any) -> bool:
     return bool(getattr(config, "apply_truncation", True))
 
 
+def _decrement_attr(obj: Any, attr_name: str, decrement: int) -> None:
+    current_value = getattr(obj, attr_name, None)
+    if current_value is None or current_value <= 0:
+        return
+    setattr(obj, attr_name, max(0, current_value - decrement))
+
+
+def _rollback_input_batch_computed_tokens(runner: Any, req_id: Any, dropped_tokens: int) -> None:
+    input_batch = getattr(runner, "input_batch", None)
+    if input_batch is None:
+        return
+    try:
+        req_id_to_index = getattr(input_batch, "req_id_to_index", None)
+        if req_id_to_index is not None:
+            req_idx = req_id_to_index[req_id]
+        else:
+            req_idx = list(input_batch.req_ids).index(req_id)
+        num_computed_tokens = input_batch.num_computed_tokens_cpu
+        num_computed_tokens[req_idx] = max(
+            0, int(num_computed_tokens[req_idx]) - dropped_tokens
+        )
+    except Exception:
+        logger.exception("D-Cut: failed to roll back input batch counters for request %s.", req_id)
+
+
 def _rollback_dropped_draft_tokens(runner: Any, req_id: Any, dropped_tokens: int) -> None:
     if dropped_tokens <= 0:
         return
+    _rollback_input_batch_computed_tokens(runner, req_id, dropped_tokens)
     requests = getattr(runner, "requests", None)
     request = requests.get(req_id) if hasattr(requests, "get") else None
     if request is None:
         return
-    for attr_name in ("num_computed_tokens", "num_output_placeholders"):
-        current_value = getattr(request, attr_name, None)
-        if current_value is None or current_value <= 0:
-            continue
-        setattr(request, attr_name, max(0, current_value - dropped_tokens))
+    _decrement_attr(request, "num_computed_tokens", dropped_tokens)
+    _decrement_attr(request, "num_output_placeholders", dropped_tokens)
 
 
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
