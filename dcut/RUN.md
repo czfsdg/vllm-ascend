@@ -31,6 +31,10 @@ dormant.
   verifier costs. Keys may be `"Q"` or `"bs,Q"`; batch-keyed rows use the
   smallest profiled batch size greater than or equal to the active batch.
   Without `cost_table`, it falls back to a monotonic synthetic `cost=Q` model.
+- `apply_adaptive_lengths` defaults to `false`. In this safe mode the plugin
+  computes and logs D-Cut plans but does not post-hoc truncate already scheduled
+  draft tokens, because scheduler-side token accounting must remain identical
+  between engine and worker processes for correctness.
 
 ## Smoke checks
 

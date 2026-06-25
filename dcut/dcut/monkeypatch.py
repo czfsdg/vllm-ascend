@@ -69,6 +69,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_next_draft_lens = {}
     runner.dcut_logged_first_plan = False
     runner.dcut_logged_first_truncation = False
+    runner.dcut_logged_safe_mode = False
 
     config = _load_config()
     if config is None:
@@ -92,6 +93,17 @@ def _ensure_runner_state(runner: Any) -> bool:
 
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
+        return scheduler_output
+    if not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False):
+        runner.dcut_next_draft_lens = {}
+        if not getattr(runner, "dcut_logged_safe_mode", False):
+            logger.warning(
+                "D-Cut adaptive verify is running in safe planning-only mode; "
+                "not truncating already scheduled draft tokens. Set "
+                "apply_adaptive_lengths=true only after scheduler-side integration "
+                "is available."
+            )
+            runner.dcut_logged_safe_mode = True
         return scheduler_output
     scheduled = scheduler_output.scheduled_spec_decode_tokens
     if not scheduled:

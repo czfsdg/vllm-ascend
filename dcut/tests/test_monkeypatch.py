@@ -42,6 +42,7 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1, "r1": 0},
         dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -50,6 +51,35 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     assert updated.num_scheduled_tokens == {"r0": 2, "r1": 1}
     assert updated.total_num_scheduled_tokens == 3
     assert runner.dcut_next_draft_lens == {}
+
+
+def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    @dataclass(frozen=True)
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12]},
+        num_scheduled_tokens={"r0": 4},
+        total_num_scheduled_tokens=4,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1},
+        dcut_logged_safe_mode=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=False),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert runner.dcut_next_draft_lens == {}
+    assert runner.dcut_logged_safe_mode
 
 
 def test_patch_proposer_captures_module_logits_processor_with_forward_hook(monkeypatch):
