@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dcut.verify_adaptive_config import VerifyAdaptiveConfig
-from dcut.verify_adaptive_controller import choose_query_lens_discrete
+from dcut.verify_adaptive_controller import choose_query_lens_discrete, make_cost_lookup
 
 
 def test_choose_query_lens_discrete_prefers_global_high_confidence_prefixes():
@@ -25,3 +25,27 @@ def test_config_query_len_levels_include_baseline_and_cap():
     )
 
     assert config.query_len_levels(max_draft_len=5) == [1, 2, 4, 6]
+
+
+def test_choose_query_lens_discrete_filters_low_confidence_prefixes():
+    result = choose_query_lens_discrete(
+        probs=[[0.04], [0.9]],
+        base_batch_size=2,
+        q_levels=[2, 4],
+        cost_lookup=lambda q: {2: 1.0, 4: 1.05}[q],
+        max_draft_len=1,
+        min_prefix_prob=0.05,
+    )
+
+    assert result["draft_lens"] == [0, 1]
+    assert result["best_Q"] == 4
+
+
+def test_make_cost_lookup_uses_ceiling_batch_row_and_nearest_q():
+    lookup = make_cost_lookup(
+        {"4,8": 10.0, "4,16": 18.0, "8,8": 20.0},
+        base_batch_size=3,
+    )
+
+    assert lookup(8) == 10.0
+    assert lookup(12) == 10.0

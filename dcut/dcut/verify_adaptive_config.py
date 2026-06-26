@@ -20,6 +20,12 @@ class VerifyAdaptiveConfig:
     warmup_seq_lens: int = 4096
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
+    cost_table: dict[str, float] | None = None
+    apply_adaptive_lengths: bool = True
+    min_prefix_prob: float = 0.05
+    min_adaptive_draft_len: int = 2
+    log_concurrency_interval_s: float = 5.0
+    log_runtime_events: bool = False
 
     @classmethod
     def from_file(cls, path: str) -> VerifyAdaptiveConfig:
@@ -48,4 +54,10 @@ class VerifyAdaptiveConfig:
             "warmup_seq_lens": self.warmup_seq_lens,
             "n_warmup_iters": self.n_warmup_iters,
             "n_measure_iters": self.n_measure_iters,
+            "cost_table_entries": 0 if self.cost_table is None else len(self.cost_table),
+            "apply_adaptive_lengths": self.apply_adaptive_lengths,
+            "min_prefix_prob": self.min_prefix_prob,
+            "min_adaptive_draft_len": self.min_adaptive_draft_len,
+            "log_concurrency_interval_s": self.log_concurrency_interval_s,
+            "log_runtime_events": self.log_runtime_events,
         }
