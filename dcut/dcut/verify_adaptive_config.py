@@ -23,7 +23,7 @@ class VerifyAdaptiveConfig:
     cost_table: dict[str, float] | None = None
     apply_adaptive_lengths: bool = True
     min_prefix_prob: float = 0.05
-    min_adaptive_draft_len: int = 2
+    min_adaptive_draft_len: int = 4
     uniform_adaptive_lengths: bool = True
     mutate_scheduler_output: bool = True
     log_concurrency_interval_s: float = 5.0

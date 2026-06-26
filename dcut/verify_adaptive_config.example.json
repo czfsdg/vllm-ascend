@@ -11,7 +11,7 @@
   "n_measure_iters": 5,
   "apply_adaptive_lengths": true,
   "min_prefix_prob": 0.05,
-  "min_adaptive_draft_len": 2,
+  "min_adaptive_draft_len": 4,
   "uniform_adaptive_lengths": true,
   "mutate_scheduler_output": true,
   "log_concurrency_interval_s": 5.0,
