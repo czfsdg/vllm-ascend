@@ -144,6 +144,11 @@ def _log_concurrency(runner: Any, scheduler_output: Any) -> None:
     )
 
 
+def _min_configured_draft_len(runner: Any) -> int:
+    config = getattr(runner, "dcut_config", None)
+    return max(0, int(getattr(config, "min_adaptive_draft_len", 2)))
+
+
 def _min_safe_draft_len(runner: Any, req_id: Any) -> int:
     input_batch = getattr(runner, "input_batch", None)
     req_id_to_index = getattr(input_batch, "req_id_to_index", {}) or {}
@@ -178,7 +183,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             updated[req_id] = draft_token_ids
             continue
         original_len = len(draft_token_ids)
-        min_safe_len = _min_safe_draft_len(runner, req_id)
+        min_safe_len = max(_min_safe_draft_len(runner, req_id), _min_configured_draft_len(runner))
         target_len = max(min_safe_len, min(int(target_len), original_len))
         removed = original_len - target_len
         if target_len > 0:

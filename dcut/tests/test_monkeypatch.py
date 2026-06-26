@@ -42,7 +42,7 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1, "r1": 0},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True),
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -51,6 +51,35 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     assert updated.num_scheduled_tokens == {"r0": 2, "r1": 1}
     assert updated.total_num_scheduled_tokens == 3
     assert runner.dcut_next_draft_lens == {}
+
+
+def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    @dataclass(frozen=True)
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12, 13]},
+        num_scheduled_tokens={"r0": 5},
+        total_num_scheduled_tokens=5,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 0},
+        dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=2),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated.scheduled_spec_decode_tokens == {"r0": [10, 11]}
+    assert updated.num_scheduled_tokens == {"r0": 3}
+    assert updated.total_num_scheduled_tokens == 3
 
 
 def test_apply_dcut_draft_lens_respects_accepted_token_floor(monkeypatch):
@@ -72,7 +101,7 @@ def test_apply_dcut_draft_lens_respects_accepted_token_floor(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True),
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
         input_batch=SimpleNamespace(
             req_id_to_index={"r0": 0},
             num_accepted_tokens_cpu=[8],
@@ -116,6 +145,7 @@ def test_runtime_event_logging_can_be_disabled(monkeypatch):
             apply_adaptive_lengths=True,
             log_runtime_events=False,
             log_concurrency_interval_s=0.0,
+            min_adaptive_draft_len=0,
         ),
         input_batch=SimpleNamespace(num_reqs=1),
     )

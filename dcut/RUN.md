@@ -38,6 +38,10 @@ dormant.
 - `min_prefix_prob` filters low-confidence draft prefixes out of the adaptive
   planner. Increase it if a small number of requests repeatedly run to the
   generation limit with low acceptance.
+- `min_adaptive_draft_len` defaults to `2` and is applied as a runtime floor
+  when D-Cut rewrites scheduled draft tokens. This avoids pathological `0`/`1`
+  token verifier segments that can destabilize high-concurrency Ascend/GDN
+  paths. Lower it only when explicitly testing aggressive truncation.
 - `log_concurrency_interval_s` controls periodic server-side INFO logs for
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
   Set it to `0` to disable these logs. If no D-Cut config is loaded,
