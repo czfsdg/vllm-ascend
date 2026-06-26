@@ -9,7 +9,7 @@
   "warmup_seq_lens": 4096,
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
-  "apply_adaptive_lengths": false,
+  "apply_adaptive_lengths": true,
   "min_prefix_prob": 0.05,
   "log_concurrency_interval_s": 5.0,
   "cost_table": {

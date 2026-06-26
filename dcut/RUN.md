@@ -31,11 +31,10 @@ dormant.
   verifier costs. Keys may be `"Q"` or `"bs,Q"`; batch-keyed rows use the
   smallest profiled batch size greater than or equal to the active batch.
   Without `cost_table`, it falls back to a monotonic synthetic `cost=Q` model.
-- `apply_adaptive_lengths` defaults to `false`. In this safe mode the plugin
-  does not capture draft logits, compute adaptive plans, or truncate scheduled
-  draft tokens. Set it to `true` only for scheduler-side D-Cut experiments,
-  because engine and worker token accounting must remain identical for
-  correctness.
+- `apply_adaptive_lengths` defaults to `true` when a D-Cut config is loaded, so
+  adaptive planning and draft-length application are enabled by default for D-Cut
+  benchmark runs. Set it to `false` only when you want logging/patch smoke checks
+  without changing decoding behavior.
 - `min_prefix_prob` filters low-confidence draft prefixes out of the adaptive
   planner. Increase it if a small number of requests repeatedly run to the
   generation limit with low acceptance.

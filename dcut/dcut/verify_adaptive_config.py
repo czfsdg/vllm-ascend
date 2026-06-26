@@ -21,7 +21,7 @@ class VerifyAdaptiveConfig:
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
     cost_table: dict[str, float] | None = None
-    apply_adaptive_lengths: bool = False
+    apply_adaptive_lengths: bool = True
     min_prefix_prob: float = 0.05
     log_concurrency_interval_s: float = 5.0
 
