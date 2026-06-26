@@ -208,22 +208,6 @@ def _scheduled_cached_req_ids(scheduler_output: Any) -> list[Any]:
     return list(getattr(cached, "req_ids", []) or [])
 
 
-def _cached_req_num_output_tokens(scheduler_output: Any, req_id: Any) -> int:
-    cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
-    req_ids = list(getattr(cached, "req_ids", []) or [])
-    try:
-        req_index = req_ids.index(req_id)
-    except ValueError:
-        return 0
-    output_lens = list(getattr(cached, "num_output_tokens", []) or [])
-    if req_index >= len(output_lens):
-        return 0
-    try:
-        return max(0, int(output_lens[req_index]))
-    except Exception:
-        return 0
-
-
 def _normalize_scheduled_token_counts(
     scheduler_output: Any,
     num_scheduled_tokens: dict[Any, int],
@@ -286,9 +270,11 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         else:
             updated.pop(req_id, None)
         original_num_scheduled_tokens = int(updated_num_scheduled_tokens.get(req_id, original_len + 1))
-        min_required_scheduled_tokens = max(target_len, _cached_req_num_output_tokens(scheduler_output, req_id))
         new_num_scheduled_tokens = (
-            max(1, min_required_scheduled_tokens, original_num_scheduled_tokens - removed)
+            min(
+                target_len + 1,
+                max(1, target_len, original_num_scheduled_tokens - removed),
+            )
             if removed > 0
             else original_num_scheduled_tokens
         )
