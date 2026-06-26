@@ -222,6 +222,22 @@ def _normalize_scheduled_token_counts(
     return normalized, changed
 
 
+def _align_scheduled_spec_decode_tokens_with_counts(scheduler_output: Any) -> bool:
+    scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
+    num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", None) or {}
+    changed = False
+    for req_id, draft_token_ids in list(scheduled.items()):
+        try:
+            scheduled_count = int(num_scheduled_tokens.get(req_id, len(draft_token_ids) + 1))
+        except Exception:
+            continue
+        max_draft_len = max(0, scheduled_count - 1)
+        if len(draft_token_ids) > max_draft_len:
+            scheduled[req_id] = draft_token_ids[:max_draft_len]
+            changed = True
+    return changed
+
+
 def _update_scheduler_output(scheduler_output: Any, **updates: Any) -> Any:
     try:
         for name, value in updates.items():
@@ -429,6 +445,14 @@ def _patch_runner_module(module: Any) -> bool:
 
     @wraps(original_propose_draft_token_ids)
     def propose_draft_token_ids(self: Any, *args: Any, **kwargs: Any) -> Any:
+        scheduler_output = args[2] if len(args) > 2 else kwargs.get("scheduler_output")
+        config = getattr(self, "dcut_config", None)
+        if (
+            scheduler_output is not None
+            and getattr(config, "apply_adaptive_lengths", False)
+            and getattr(config, "mutate_scheduler_output", False)
+        ):
+            _align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
         draft_token_ids = original_propose_draft_token_ids(self, *args, **kwargs)
         _update_dcut_next_draft_lens(self, draft_token_ids)
         return draft_token_ids

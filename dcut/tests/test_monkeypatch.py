@@ -157,6 +157,25 @@ def test_apply_dcut_draft_lens_count_floor_uses_target_len(monkeypatch):
     assert updated.total_num_scheduled_tokens == 4
 
 
+def test_align_scheduled_spec_decode_tokens_with_counts(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={
+            "r0": [10, 11, 12, 13, 14, 15, 16],
+            "r1": [20, 21, 22, 23, 24, 25, 26],
+        },
+        num_scheduled_tokens={"r0": 6, "r1": 8},
+    )
+
+    changed = monkeypatch_module._align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
+
+    assert changed is True
+    assert scheduler_output.scheduled_spec_decode_tokens == {
+        "r0": [10, 11, 12, 13, 14],
+        "r1": [20, 21, 22, 23, 24, 25, 26],
+    }
+
+
 def test_apply_dcut_draft_lens_updates_scheduled_dict_in_place(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
     scheduled = {"r0": [10, 11, 12, 13, 14, 15, 16]}
