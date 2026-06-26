@@ -107,11 +107,11 @@ def test_apply_dcut_draft_lens_mutates_mutable_scheduler_output(monkeypatch):
     assert scheduler_output.total_num_scheduled_tokens == 2
 
 
-def test_apply_dcut_draft_lens_recomputes_counts_from_final_draft_lengths(monkeypatch):
+def test_apply_dcut_draft_lens_preserves_native_count_without_removed_tokens(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
     scheduler_output = SimpleNamespace(
         scheduled_spec_decode_tokens={"r0": [10, 11, 12, 13, 14, 15, 16]},
-        # Simulate a stale count left from a previous shorter adaptive step.
+        # Simulate a native scheduler count that is lower than len(spec)+1.
         num_scheduled_tokens={"r0": 4},
         total_num_scheduled_tokens=4,
     )
@@ -129,8 +129,8 @@ def test_apply_dcut_draft_lens_recomputes_counts_from_final_draft_lengths(monkey
 
     assert updated is scheduler_output
     assert scheduler_output.scheduled_spec_decode_tokens == {"r0": [10, 11, 12, 13, 14, 15, 16]}
-    assert scheduler_output.num_scheduled_tokens == {"r0": 8}
-    assert scheduler_output.total_num_scheduled_tokens == 8
+    assert scheduler_output.num_scheduled_tokens == {"r0": 4}
+    assert scheduler_output.total_num_scheduled_tokens == 4
 
 
 def test_apply_dcut_draft_lens_recomputes_total_from_updated_counts(monkeypatch):
@@ -180,8 +180,8 @@ def test_apply_dcut_draft_lens_normalizes_negative_scheduled_counts(monkeypatch)
 
     assert updated is scheduler_output
     assert scheduler_output.scheduled_spec_decode_tokens == {"r0": [10, 11]}
-    assert scheduler_output.num_scheduled_tokens == {"r0": 3, "r1": 1}
-    assert scheduler_output.total_num_scheduled_tokens == 4
+    assert scheduler_output.num_scheduled_tokens == {"r0": 1, "r1": 1}
+    assert scheduler_output.total_num_scheduled_tokens == 2
 
 
 def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):

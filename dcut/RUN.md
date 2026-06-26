@@ -62,7 +62,7 @@ dormant.
 - `debug_scheduler_state` defaults to `false`. Set it to `true` only when
   collecting service-side bug logs; it emits compact before/after scheduler
   state summaries including spec draft-length histograms, scheduled-count
-  histograms, total scheduled tokens, and count-vs-draft mismatches.
+  histograms, total scheduled tokens, and scheduled-count range violations.
 
 ## Smoke checks
 

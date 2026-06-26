@@ -165,20 +165,21 @@ def _debug_scheduler_state(runner: Any, scheduler_output: Any, phase: str) -> No
     num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {}) or {}
     spec_lens = [len(tokens) for tokens in scheduled.values()]
     scheduled_counts = [int(count) for count in num_scheduled_tokens.values()]
-    mismatches = 0
+    count_out_of_range = 0
     for req_id, draft_token_ids in scheduled.items():
-        if int(num_scheduled_tokens.get(req_id, 0)) != len(draft_token_ids) + 1:
-            mismatches += 1
+        count = int(num_scheduled_tokens.get(req_id, 0))
+        if count <= 0 or count > len(draft_token_ids) + 1:
+            count_out_of_range += 1
     _emit_dcut_log(
         "D-Cut debug %s: spec_reqs=%d spec_lens_hist=%s scheduled_reqs=%d "
-        "scheduled_counts_hist=%s total_scheduled_tokens=%d count_mismatches=%d",
+        "scheduled_counts_hist=%s total_scheduled_tokens=%d count_out_of_range=%d",
         phase,
         len(scheduled),
         _format_int_hist(spec_lens),
         len(num_scheduled_tokens),
         _format_int_hist(scheduled_counts),
         int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0),
-        mismatches,
+        count_out_of_range,
     )
 
 
@@ -209,16 +210,10 @@ def _scheduled_cached_req_ids(scheduler_output: Any) -> list[Any]:
 
 def _normalize_scheduled_token_counts(
     scheduler_output: Any,
-    scheduled_spec_decode_tokens: dict[Any, list[int]],
     num_scheduled_tokens: dict[Any, int],
 ) -> tuple[dict[Any, int], bool]:
     normalized = dict(num_scheduled_tokens)
     changed = False
-    for req_id, draft_token_ids in scheduled_spec_decode_tokens.items():
-        expected = len(draft_token_ids) + 1
-        if normalized.get(req_id) != expected:
-            normalized[req_id] = expected
-            changed = True
     for req_id in _scheduled_cached_req_ids(scheduler_output):
         current = int(normalized.get(req_id, 0))
         if current <= 0:
@@ -265,9 +260,6 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         target_len = runner.dcut_next_draft_lens.get(req_id)
         if target_len is None:
             updated[req_id] = draft_token_ids
-            new_num_scheduled_tokens = len(draft_token_ids) + 1
-            changed = changed or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens
-            updated_num_scheduled_tokens[req_id] = new_num_scheduled_tokens
             continue
         original_len = len(draft_token_ids)
         min_safe_len = max(_min_safe_draft_len(runner, req_id), _min_configured_draft_len(runner))
@@ -275,10 +267,11 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         removed = original_len - target_len
         if target_len > 0:
             updated[req_id] = draft_token_ids[:target_len]
-            new_num_scheduled_tokens = target_len + 1
         else:
-            new_num_scheduled_tokens = 1
-        changed = changed or removed > 0 or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens
+            updated.pop(req_id, None)
+        original_num_scheduled_tokens = int(updated_num_scheduled_tokens.get(req_id, original_len + 1))
+        new_num_scheduled_tokens = max(1, original_num_scheduled_tokens - removed)
+        changed = removed > 0 or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens or changed
         updated_num_scheduled_tokens[req_id] = new_num_scheduled_tokens
         total_removed += removed
     runner.dcut_next_draft_lens = {}
@@ -300,7 +293,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
     updated_num_scheduled_tokens, normalized_changed = _normalize_scheduled_token_counts(
-        scheduler_output, updated, updated_num_scheduled_tokens
+        scheduler_output, updated_num_scheduled_tokens
     )
     changed = changed or normalized_changed
     updated_total_num_scheduled_tokens = sum(updated_num_scheduled_tokens.values())
