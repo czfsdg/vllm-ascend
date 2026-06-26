@@ -8,5 +8,16 @@
   "query_len_step_per_req": 2,
   "warmup_seq_lens": 4096,
   "n_warmup_iters": 3,
-  "n_measure_iters": 5
+  "n_measure_iters": 5,
+  "apply_adaptive_lengths": true,
+  "min_prefix_prob": 0.05,
+  "min_adaptive_draft_len": 2,
+  "log_concurrency_interval_s": 5.0,
+  "log_runtime_events": true,
+  "cost_table": {
+    "2,2": 2.0,
+    "2,4": 3.4,
+    "4,4": 4.0,
+    "4,8": 6.5
+  }
 }
