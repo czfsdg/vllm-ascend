@@ -113,15 +113,22 @@ def _should_debug_scheduler_state(runner: Any) -> bool:
     return bool(getattr(config, "debug_scheduler_state", False))
 
 
-def _scheduler_mutation_allowed(runner: Any) -> bool:
+def _max_cached_output_tokens(scheduler_output: Any | None) -> int:
+    cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
+    return max((int(value) for value in getattr(cached, "num_output_tokens", []) or []), default=0)
+
+
+def _scheduler_mutation_allowed(runner: Any, scheduler_output: Any | None = None) -> bool:
     config = getattr(runner, "dcut_config", None)
     if not getattr(config, "mutate_scheduler_output", False):
         return False
     speculative_config = getattr(runner, "speculative_config", None)
-    return not (
-        getattr(speculative_config, "method", None) == "dflash"
-        and not getattr(config, "allow_dflash_scheduler_mutation", False)
-    )
+    if getattr(speculative_config, "method", None) != "dflash":
+        return True
+    if not getattr(config, "allow_dflash_scheduler_mutation", False):
+        return False
+    max_output_tokens = int(getattr(config, "max_dflash_mutation_output_tokens", 32))
+    return max_output_tokens <= 0 or _max_cached_output_tokens(scheduler_output) <= max_output_tokens
 
 
 def _get_concurrency_log_interval(runner: Any) -> float:
@@ -276,14 +283,14 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not getattr(config, "apply_adaptive_lengths", False):
         return scheduler_output
     _debug_scheduler_state(runner, scheduler_output, "before_apply")
-    if not _scheduler_mutation_allowed(runner):
+    if not _scheduler_mutation_allowed(runner, scheduler_output):
         runner.dcut_next_draft_lens = {}
         if not getattr(runner, "dcut_logged_safe_apply_bypass", False):
             speculative_config = getattr(runner, "speculative_config", None)
             if getattr(speculative_config, "method", None) == "dflash":
                 _emit_dcut_log(
                     "D-Cut adaptive verify SAFE: computed plans but did not mutate DFlash scheduler output "
-                    "(set allow_dflash_scheduler_mutation=true to enable guarded truncation)."
+                    "(allow flag is disabled or max_dflash_mutation_output_tokens was exceeded)."
                 )
             else:
                 _emit_dcut_log(
@@ -486,7 +493,7 @@ def _patch_runner_module(module: Any) -> bool:
         if (
             scheduler_output is not None
             and getattr(config, "apply_adaptive_lengths", False)
-            and _scheduler_mutation_allowed(self)
+            and _scheduler_mutation_allowed(self, scheduler_output)
         ):
             _align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
         draft_token_ids = original_propose_draft_token_ids(self, *args, **kwargs)

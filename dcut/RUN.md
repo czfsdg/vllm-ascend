@@ -42,16 +42,20 @@ dormant.
   when D-Cut rewrites scheduled draft tokens. DFlash additionally applies
   `min_dflash_adaptive_draft_len` (default `6`) so the guarded DFlash mutation
   path can still reduce work while avoiding very short Ascend/GDN verifier
-  segments. Lower the DFlash floor only when explicitly testing aggressive
-  truncation on the exact model/kernel combination.
+  segments. It also stops mutating DFlash after any scheduled request exceeds
+  `max_dflash_mutation_output_tokens` (default `32`) because long decode GDN
+  paths have shown proposer/metadata instability after scheduler rewrites.
+  Lower the DFlash floor or raise the long-decode limit only when explicitly
+  testing aggressive truncation on the exact model/kernel combination.
 - `uniform_adaptive_lengths` defaults to `true`, so each batch applies one
   adaptive draft length to all requests. Keep this on for Ascend runs; fully
   per-request variable draft lengths are experimental and can disturb
   spec-decode metadata on some kernels.
 - `mutate_scheduler_output` defaults to `true`, and DFlash scheduler mutation is
   enabled by default through `allow_dflash_scheduler_mutation=true`. The DFlash
-  path is guarded by `min_dflash_adaptive_draft_len=6`, so it only applies
-  conservative truncation by default. Set `allow_dflash_scheduler_mutation=false`
+  path is guarded by `min_dflash_adaptive_draft_len=6` and
+  `max_dflash_mutation_output_tokens=32`, so it only applies conservative
+  early-decode truncation by default. Set `allow_dflash_scheduler_mutation=false`
   for observe-only/debug runs if a model/kernel combination still shows Ascend
   metadata or GDN tiling instability. Set `mutate_scheduler_output=false` for
   observe-only/debug runs on every speculative method.
@@ -101,8 +105,9 @@ Ascend runner modules during CLI setup. The `patched ...` lines appear once the
 Ascend modules load normally. The `ENABLED` line proves the runner accepted the
 config and speculative method. The `ACTIVE`, `plan`, and `apply` lines appear after traffic starts. For
 DFlash, the default `allow_dflash_scheduler_mutation=true` applies guarded
-mutation with `min_dflash_adaptive_draft_len=6`; set the allow flag to `false`
-only when collecting observe-only logs or isolating a model/kernel instability.
+early-decode mutation with `min_dflash_adaptive_draft_len=6` and
+`max_dflash_mutation_output_tokens=32`; set the allow flag to `false` only when
+collecting observe-only logs or isolating a model/kernel instability.
 `log_runtime_events` should normally remain `false` for throughput benchmarks;
 enable it only for short validation runs if these per-step logs are needed.
 
