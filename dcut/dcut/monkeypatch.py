@@ -252,23 +252,22 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not scheduled:
         return scheduler_output
 
-    updated = {}
+    updated = scheduled
     updated_num_scheduled_tokens = scheduler_output.num_scheduled_tokens.copy()
     changed = False
     total_removed = 0
-    for req_id, draft_token_ids in scheduled.items():
+    for req_id, draft_token_ids in list(scheduled.items()):
         target_len = runner.dcut_next_draft_lens.get(req_id)
         if target_len is None:
-            updated[req_id] = draft_token_ids
             continue
         original_len = len(draft_token_ids)
         min_safe_len = max(_min_safe_draft_len(runner, req_id), _min_configured_draft_len(runner))
         target_len = max(min_safe_len, min(int(target_len), original_len))
         removed = original_len - target_len
         if target_len > 0:
-            updated[req_id] = draft_token_ids[:target_len]
+            scheduled[req_id] = draft_token_ids[:target_len]
         else:
-            updated.pop(req_id, None)
+            scheduled.pop(req_id, None)
         original_num_scheduled_tokens = int(updated_num_scheduled_tokens.get(req_id, original_len + 1))
         new_num_scheduled_tokens = max(1, target_len + 1) if removed > 0 else original_num_scheduled_tokens
         changed = removed > 0 or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens or changed
