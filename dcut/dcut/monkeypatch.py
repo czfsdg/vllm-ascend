@@ -164,6 +164,31 @@ def _min_safe_draft_len(runner: Any, req_id: Any) -> int:
         return 0
 
 
+def _scheduled_cached_req_ids(scheduler_output: Any) -> list[Any]:
+    cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
+    return list(getattr(cached, "req_ids", []) or [])
+
+
+def _normalize_scheduled_token_counts(
+    scheduler_output: Any,
+    scheduled_spec_decode_tokens: dict[Any, list[int]],
+    num_scheduled_tokens: dict[Any, int],
+) -> tuple[dict[Any, int], bool]:
+    normalized = dict(num_scheduled_tokens)
+    changed = False
+    for req_id, draft_token_ids in scheduled_spec_decode_tokens.items():
+        expected = len(draft_token_ids) + 1
+        if normalized.get(req_id) != expected:
+            normalized[req_id] = expected
+            changed = True
+    for req_id in _scheduled_cached_req_ids(scheduler_output):
+        current = int(normalized.get(req_id, 0))
+        if current <= 0:
+            normalized[req_id] = 1
+            changed = True
+    return normalized, changed
+
+
 def _update_scheduler_output(scheduler_output: Any, **updates: Any) -> Any:
     try:
         for name, value in updates.items():
@@ -224,6 +249,10 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             )
             runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
+    updated_num_scheduled_tokens, normalized_changed = _normalize_scheduled_token_counts(
+        scheduler_output, updated, updated_num_scheduled_tokens
+    )
+    changed = changed or normalized_changed
     updated_total_num_scheduled_tokens = sum(updated_num_scheduled_tokens.values())
     if updated_total_num_scheduled_tokens <= 0:
         logger.warning("D-Cut: skip truncation because updated scheduled-token total is non-positive.")

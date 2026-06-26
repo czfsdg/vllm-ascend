@@ -123,6 +123,30 @@ def test_apply_dcut_draft_lens_recomputes_total_from_updated_counts(monkeypatch)
     assert scheduler_output.total_num_scheduled_tokens == 5
 
 
+def test_apply_dcut_draft_lens_normalizes_negative_scheduled_counts(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["r0", "r1"]),
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12]},
+        num_scheduled_tokens={"r0": -4, "r1": -1},
+        total_num_scheduled_tokens=-5,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 2},
+        dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert scheduler_output.scheduled_spec_decode_tokens == {"r0": [10, 11]}
+    assert scheduler_output.num_scheduled_tokens == {"r0": 3, "r1": 1}
+    assert scheduler_output.total_num_scheduled_tokens == 4
+
+
 def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 
