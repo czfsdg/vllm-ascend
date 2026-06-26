@@ -224,9 +224,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         target_len = max(min_safe_len, min(int(target_len), original_len))
         removed = original_len - target_len
         if target_len > 0:
-            if removed > 0:
-                del draft_token_ids[target_len:]
-            updated[req_id] = draft_token_ids
+            updated[req_id] = draft_token_ids[:target_len]
             new_num_scheduled_tokens = target_len + 1
         else:
             new_num_scheduled_tokens = 1
