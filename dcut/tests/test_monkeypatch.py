@@ -53,6 +53,30 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     assert runner.dcut_next_draft_lens == {}
 
 
+def test_apply_dcut_draft_lens_truncates_draft_token_list_in_place(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    draft_token_ids = [10, 11, 12, 13]
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"r0": draft_token_ids},
+        num_scheduled_tokens={"r0": 5},
+        total_num_scheduled_tokens=5,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 2},
+        dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated.scheduled_spec_decode_tokens["r0"] is draft_token_ids
+    assert draft_token_ids == [10, 11]
+    assert updated.num_scheduled_tokens == {"r0": 3}
+    assert updated.total_num_scheduled_tokens == 3
+
+
 def test_apply_dcut_draft_lens_mutates_mutable_scheduler_output(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
     scheduler_output = SimpleNamespace(
