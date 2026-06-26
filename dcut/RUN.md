@@ -38,9 +38,9 @@ dormant.
 - `min_prefix_prob` filters low-confidence draft prefixes out of the adaptive
   planner. Increase it if a small number of requests repeatedly run to the
   generation limit with low acceptance.
-- `min_adaptive_draft_len` defaults to `4` and is applied as a runtime floor
-  when D-Cut rewrites scheduled draft tokens. This avoids pathological tiny
-  verifier segments that can destabilize high-concurrency Ascend/GDN
+- `min_adaptive_draft_len` defaults to `2` and is applied as a runtime floor
+  when D-Cut rewrites scheduled draft tokens. This avoids pathological `0`/`1`
+  token verifier segments that can destabilize high-concurrency Ascend/GDN
   paths. Lower it only when explicitly testing aggressive truncation.
 - `uniform_adaptive_lengths` defaults to `true`, so each batch applies one
   adaptive draft length to all requests. Keep this on for Ascend runs; fully
@@ -59,6 +59,10 @@ dormant.
   `false`; keep it off for throughput benchmarks and set it to `true` only
   for short validation runs. Startup, dormant, and patch/install status logs
   are still emitted.
+- `debug_scheduler_state` defaults to `false`. Set it to `true` only when
+  collecting service-side bug logs; it emits compact before/after scheduler
+  state summaries including spec draft-length histograms, scheduled-count
+  histograms, total scheduled tokens, and count-vs-draft mismatches.
 
 ## Smoke checks
 

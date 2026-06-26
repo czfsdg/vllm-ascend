@@ -23,11 +23,12 @@ class VerifyAdaptiveConfig:
     cost_table: dict[str, float] | None = None
     apply_adaptive_lengths: bool = True
     min_prefix_prob: float = 0.05
-    min_adaptive_draft_len: int = 4
+    min_adaptive_draft_len: int = 2
     uniform_adaptive_lengths: bool = True
     mutate_scheduler_output: bool = True
     log_concurrency_interval_s: float = 5.0
     log_runtime_events: bool = False
+    debug_scheduler_state: bool = False
 
     @classmethod
     def from_file(cls, path: str) -> VerifyAdaptiveConfig:
@@ -64,4 +65,5 @@ class VerifyAdaptiveConfig:
             "mutate_scheduler_output": self.mutate_scheduler_output,
             "log_concurrency_interval_s": self.log_concurrency_interval_s,
             "log_runtime_events": self.log_runtime_events,
+            "debug_scheduler_state": self.debug_scheduler_state,
         }

@@ -293,6 +293,30 @@ def test_runtime_event_logging_can_be_disabled(monkeypatch):
     assert emitted == []
 
 
+def test_debug_scheduler_state_logs_compact_summary(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    emitted: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        monkeypatch_module,
+        "_emit_dcut_log",
+        lambda message, *args: emitted.append((message, args)),
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"r0": [10, 11], "r1": [20]},
+        num_scheduled_tokens={"r0": 3, "r1": 4},
+        total_num_scheduled_tokens=7,
+    )
+    runner = SimpleNamespace(dcut_config=SimpleNamespace(debug_scheduler_state=True))
+
+    monkeypatch_module._debug_scheduler_state(runner, scheduler_output, "unit")
+
+    assert emitted
+    message, args = emitted[0]
+    assert message.startswith("D-Cut debug %s:")
+    assert args[0] == "unit"
+    assert args[-1] == 1
+
+
 def test_update_dcut_next_draft_lens_defaults_to_uniform_batch_length(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 

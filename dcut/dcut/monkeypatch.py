@@ -108,6 +108,11 @@ def _should_log_runtime_events(runner: Any) -> bool:
     return bool(getattr(config, "log_runtime_events", False))
 
 
+def _should_debug_scheduler_state(runner: Any) -> bool:
+    config = getattr(runner, "dcut_config", None)
+    return bool(getattr(config, "debug_scheduler_state", False))
+
+
 def _get_concurrency_log_interval(runner: Any) -> float:
     config = getattr(runner, "dcut_config", None)
     if config is not None:
@@ -142,6 +147,38 @@ def _log_concurrency(runner: Any, scheduler_output: Any) -> None:
         spec_reqs,
         total_scheduled_tokens,
         max_scheduled_tokens,
+    )
+
+
+def _format_int_hist(values: list[int]) -> str:
+    hist: dict[int, int] = {}
+    for value in values:
+        value = int(value)
+        hist[value] = hist.get(value, 0) + 1
+    return ",".join(f"{value}:{count}" for value, count in sorted(hist.items())) or "<empty>"
+
+
+def _debug_scheduler_state(runner: Any, scheduler_output: Any, phase: str) -> None:
+    if not _should_debug_scheduler_state(runner):
+        return
+    scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", {}) or {}
+    num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {}) or {}
+    spec_lens = [len(tokens) for tokens in scheduled.values()]
+    scheduled_counts = [int(count) for count in num_scheduled_tokens.values()]
+    mismatches = 0
+    for req_id, draft_token_ids in scheduled.items():
+        if int(num_scheduled_tokens.get(req_id, 0)) != len(draft_token_ids) + 1:
+            mismatches += 1
+    _emit_dcut_log(
+        "D-Cut debug %s: spec_reqs=%d spec_lens_hist=%s scheduled_reqs=%d "
+        "scheduled_counts_hist=%s total_scheduled_tokens=%d count_mismatches=%d",
+        phase,
+        len(scheduled),
+        _format_int_hist(spec_lens),
+        len(num_scheduled_tokens),
+        _format_int_hist(scheduled_counts),
+        int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0),
+        mismatches,
     )
 
 
@@ -205,6 +242,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     config = getattr(runner, "dcut_config", None)
     if not getattr(config, "apply_adaptive_lengths", False):
         return scheduler_output
+    _debug_scheduler_state(runner, scheduler_output, "before_apply")
     if not getattr(config, "mutate_scheduler_output", False):
         runner.dcut_next_draft_lens = {}
         if not getattr(runner, "dcut_logged_safe_apply_bypass", False):
@@ -213,6 +251,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
                 "(set mutate_scheduler_output=true to enable experimental truncation)."
             )
             runner.dcut_logged_safe_apply_bypass = True
+        _debug_scheduler_state(runner, scheduler_output, "bypass_apply")
         return scheduler_output
     scheduled = scheduler_output.scheduled_spec_decode_tokens
     if not scheduled:
@@ -268,12 +307,14 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if updated_total_num_scheduled_tokens <= 0:
         logger.warning("D-Cut: skip truncation because updated scheduled-token total is non-positive.")
         return scheduler_output
-    return _update_scheduler_output(
+    updated_scheduler_output = _update_scheduler_output(
         scheduler_output,
         scheduled_spec_decode_tokens=updated,
         num_scheduled_tokens=updated_num_scheduled_tokens,
         total_num_scheduled_tokens=updated_total_num_scheduled_tokens,
     )
+    _debug_scheduler_state(runner, updated_scheduler_output, "after_apply")
+    return updated_scheduler_output
 
 
 def _selected_token_probs_from_logits(logits: Any, draft_token_ids: Any) -> Any:

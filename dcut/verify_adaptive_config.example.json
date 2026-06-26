@@ -11,11 +11,12 @@
   "n_measure_iters": 5,
   "apply_adaptive_lengths": true,
   "min_prefix_prob": 0.05,
-  "min_adaptive_draft_len": 4,
+  "min_adaptive_draft_len": 2,
   "uniform_adaptive_lengths": true,
   "mutate_scheduler_output": true,
   "log_concurrency_interval_s": 5.0,
   "log_runtime_events": false,
+  "debug_scheduler_state": false,
   "cost_table": {
     "2,2": 2.0,
     "2,4": 3.4,
