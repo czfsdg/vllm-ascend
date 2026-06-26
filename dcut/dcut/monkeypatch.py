@@ -137,6 +137,21 @@ def _log_concurrency(runner: Any, scheduler_output: Any) -> None:
     )
 
 
+def _min_safe_draft_len(runner: Any, req_id: Any) -> int:
+    input_batch = getattr(runner, "input_batch", None)
+    req_id_to_index = getattr(input_batch, "req_id_to_index", {}) or {}
+    req_idx = req_id_to_index.get(req_id)
+    if req_idx is None:
+        return 0
+    accepted_tokens = getattr(input_batch, "num_accepted_tokens_cpu", None)
+    if accepted_tokens is None:
+        return 0
+    try:
+        return max(0, int(accepted_tokens[req_idx]) - 1)
+    except Exception:
+        return 0
+
+
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
         return scheduler_output
@@ -156,7 +171,8 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             updated[req_id] = draft_token_ids
             continue
         original_len = len(draft_token_ids)
-        target_len = max(0, min(int(target_len), original_len))
+        min_safe_len = _min_safe_draft_len(runner, req_id)
+        target_len = max(min_safe_len, min(int(target_len), original_len))
         removed = original_len - target_len
         if target_len > 0:
             updated[req_id] = draft_token_ids[:target_len]
@@ -167,6 +183,13 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     runner.dcut_next_draft_lens = {}
     if not changed:
         return scheduler_output
+    applied_draft_lens = [len(draft_token_ids) for draft_token_ids in updated.values()]
+    _emit_dcut_log(
+        "D-Cut apply: requests=%d removed_tokens=%d applied_draft_lens_hist=%s",
+        len(updated),
+        total_removed,
+        _format_draft_lens_hist(applied_draft_lens),
+    )
     if not getattr(runner, "dcut_logged_first_truncation", False):
         _emit_dcut_log(
             "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (requests=%d).",

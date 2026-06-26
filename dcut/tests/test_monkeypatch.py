@@ -53,6 +53,39 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
     assert runner.dcut_next_draft_lens == {}
 
 
+def test_apply_dcut_draft_lens_respects_accepted_token_floor(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    @dataclass(frozen=True)
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12, 13, 14, 15, 16]},
+        num_scheduled_tokens={"r0": 8},
+        total_num_scheduled_tokens=8,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1},
+        dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True),
+        input_batch=SimpleNamespace(
+            req_id_to_index={"r0": 0},
+            num_accepted_tokens_cpu=[8],
+        ),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated.scheduled_spec_decode_tokens == {"r0": [10, 11, 12, 13, 14, 15, 16]}
+    assert updated.num_scheduled_tokens == {"r0": 8}
+    assert updated.total_num_scheduled_tokens == 8
+
+
 def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 
