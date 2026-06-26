@@ -190,6 +190,9 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         target_len = runner.dcut_next_draft_lens.get(req_id)
         if target_len is None:
             updated[req_id] = draft_token_ids
+            new_num_scheduled_tokens = len(draft_token_ids) + 1
+            changed = changed or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens
+            updated_num_scheduled_tokens[req_id] = new_num_scheduled_tokens
             continue
         original_len = len(draft_token_ids)
         min_safe_len = max(_min_safe_draft_len(runner, req_id), _min_configured_draft_len(runner))
@@ -197,10 +200,12 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         removed = original_len - target_len
         if target_len > 0:
             updated[req_id] = draft_token_ids[:target_len]
-        changed = changed or removed > 0
+            new_num_scheduled_tokens = target_len + 1
+        else:
+            new_num_scheduled_tokens = 1
+        changed = changed or removed > 0 or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens
+        updated_num_scheduled_tokens[req_id] = new_num_scheduled_tokens
         total_removed += removed
-        if removed > 0:
-            updated_num_scheduled_tokens[req_id] -= removed
     runner.dcut_next_draft_lens = {}
     if not changed:
         return scheduler_output
