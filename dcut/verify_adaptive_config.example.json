@@ -13,6 +13,7 @@
   "min_prefix_prob": 0.05,
   "min_adaptive_draft_len": 2,
   "uniform_adaptive_lengths": true,
+  "mutate_scheduler_output": false,
   "log_concurrency_interval_s": 5.0,
   "log_runtime_events": false,
   "cost_table": {

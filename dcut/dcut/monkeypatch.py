@@ -79,6 +79,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_logged_first_plan = False
     runner.dcut_logged_first_truncation = False
     runner.dcut_logged_safe_mode = False
+    runner.dcut_logged_safe_apply_bypass = False
     runner.dcut_last_concurrency_log_ts = 0.0
 
     config = _load_config()
@@ -201,7 +202,17 @@ def _update_scheduler_output(scheduler_output: Any, **updates: Any) -> Any:
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
         return scheduler_output
-    if not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False):
+    config = getattr(runner, "dcut_config", None)
+    if not getattr(config, "apply_adaptive_lengths", False):
+        return scheduler_output
+    if not getattr(config, "mutate_scheduler_output", False):
+        runner.dcut_next_draft_lens = {}
+        if not getattr(runner, "dcut_logged_safe_apply_bypass", False):
+            _emit_dcut_log(
+                "D-Cut adaptive verify SAFE: computed plans but did not mutate scheduler output "
+                "(set mutate_scheduler_output=true to enable experimental truncation)."
+            )
+            runner.dcut_logged_safe_apply_bypass = True
         return scheduler_output
     scheduled = scheduler_output.scheduled_spec_decode_tokens
     if not scheduled:

@@ -42,7 +42,9 @@ def test_apply_dcut_draft_lens_updates_scheduler_token_counts(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1, "r1": 0},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -66,7 +68,9 @@ def test_apply_dcut_draft_lens_truncates_draft_token_list_without_mutating_sourc
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 2},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -90,7 +94,9 @@ def test_apply_dcut_draft_lens_mutates_mutable_scheduler_output(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -114,7 +120,9 @@ def test_apply_dcut_draft_lens_recomputes_counts_from_final_draft_lengths(monkey
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 7},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -138,7 +146,9 @@ def test_apply_dcut_draft_lens_recomputes_total_from_updated_counts(monkeypatch)
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1, "r1": 2},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -161,7 +171,9 @@ def test_apply_dcut_draft_lens_normalizes_negative_scheduled_counts(monkeypatch)
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 2},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -191,7 +203,9 @@ def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 0},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=2),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=2
+        ),
     )
 
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
@@ -220,7 +234,9 @@ def test_apply_dcut_draft_lens_respects_accepted_token_floor(monkeypatch):
         dcut_adaptive_enabled=True,
         dcut_next_draft_lens={"r0": 1},
         dcut_logged_first_truncation=False,
-        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
         input_batch=SimpleNamespace(
             req_id_to_index={"r0": 0},
             num_accepted_tokens_cpu=[8],
@@ -264,6 +280,7 @@ def test_runtime_event_logging_can_be_disabled(monkeypatch):
             apply_adaptive_lengths=True,
             log_runtime_events=False,
             log_concurrency_interval_s=0.0,
+            mutate_scheduler_output=True,
             min_adaptive_draft_len=0,
         ),
         input_batch=SimpleNamespace(num_reqs=1),
@@ -322,6 +339,37 @@ def test_update_dcut_next_draft_lens_defaults_to_uniform_batch_length(monkeypatc
 
     assert len(set(runner.dcut_next_draft_lens.values())) == 1
     assert runner.dcut_next_draft_lens == {"r0": 3, "r1": 3, "r2": 3}
+
+
+def test_apply_dcut_draft_lens_does_not_mutate_scheduler_without_opt_in(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    @dataclass(frozen=True)
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12]},
+        num_scheduled_tokens={"r0": 4},
+        total_num_scheduled_tokens=4,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1},
+        dcut_logged_safe_apply_bypass=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, mutate_scheduler_output=False),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert scheduler_output.scheduled_spec_decode_tokens == {"r0": [10, 11, 12]}
+    assert scheduler_output.num_scheduled_tokens == {"r0": 4}
+    assert runner.dcut_next_draft_lens == {}
+    assert runner.dcut_logged_safe_apply_bypass
 
 
 def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monkeypatch):
