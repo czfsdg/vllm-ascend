@@ -164,6 +164,15 @@ def _min_safe_draft_len(runner: Any, req_id: Any) -> int:
         return 0
 
 
+def _update_scheduler_output(scheduler_output: Any, **updates: Any) -> Any:
+    try:
+        for name, value in updates.items():
+            setattr(scheduler_output, name, value)
+        return scheduler_output
+    except Exception:
+        return replace(scheduler_output, **updates)
+
+
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
         return scheduler_output
@@ -210,7 +219,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             )
             runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
-    return replace(
+    return _update_scheduler_output(
         scheduler_output,
         scheduled_spec_decode_tokens=updated,
         num_scheduled_tokens=updated_num_scheduled_tokens,
