@@ -56,18 +56,18 @@ assert "dcut_adaptive_verify" in plugins
 PY
 ```
 
-For a live server, check logs for:
+For a live server, check logs for (`[DCUT]` is printed directly to stdout in addition to logger output):
 
 ```text
-D-Cut adaptive-verify plugin install requested (VLLM_PLUGINS=ascend,dcut_adaptive_verify, config_env=/tmp/dcut_config.json).
-D-Cut adaptive-verify delayed import hook installed.
-D-Cut adaptive-verify plugin installed for vLLM Ascend (patches are applied lazily after Ascend runner modules load).
-D-Cut adaptive-verify patched NPUModelRunner.
-D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.
-D-Cut adaptive verify ENABLED (config=...)
-D-Cut adaptive verify ACTIVE: computed first adaptive draft-length plan (...)
-D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
-D-Cut concurrency: active_reqs=... scheduled_reqs=... spec_reqs=... total_scheduled_tokens=... max_scheduled_tokens_per_req=...
+[DCUT] D-Cut adaptive-verify plugin install requested (VLLM_PLUGINS=ascend,dcut_adaptive_verify, config_env=/tmp/dcut_config.json).
+[DCUT] D-Cut adaptive-verify delayed import hook installed.
+[DCUT] D-Cut adaptive-verify plugin installed for vLLM Ascend (patches are applied lazily after Ascend runner modules load).
+[DCUT] D-Cut adaptive-verify patched NPUModelRunner.
+[DCUT] D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.
+[DCUT] D-Cut adaptive verify ENABLED (config=...)
+[DCUT] D-Cut adaptive verify ACTIVE: computed first adaptive draft-length plan (...)
+[DCUT] D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
+[DCUT] D-Cut concurrency: active_reqs=... scheduled_reqs=... spec_reqs=... total_scheduled_tokens=... max_scheduled_tokens_per_req=...
 ```
 
 The install-hook lines prove vLLM discovered the plugin without eagerly importing
@@ -79,7 +79,7 @@ prove D-Cut is actually computing and applying adaptive verifier lengths.
 Useful log checks:
 
 ```bash
-rg -i "D-Cut adaptive|dcut" /path/to/server.log | tail -80
+rg -i "\[DCUT\]|D-Cut adaptive|dcut" /path/to/server.log | tail -80
 ```
 
 If the plugin is installed but inactive, the log explains why, for example a
