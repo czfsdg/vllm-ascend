@@ -76,6 +76,29 @@ def test_apply_dcut_draft_lens_mutates_mutable_scheduler_output(monkeypatch):
     assert scheduler_output.total_num_scheduled_tokens == 2
 
 
+def test_apply_dcut_draft_lens_recomputes_total_from_updated_counts(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12], "r1": [20, 21, 22]},
+        num_scheduled_tokens={"r0": 4, "r1": 4},
+        # Simulate a stale/runner-local total that should not be decremented.
+        total_num_scheduled_tokens=3,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1, "r1": 2},
+        dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(apply_adaptive_lengths=True, min_adaptive_draft_len=0),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert scheduler_output.num_scheduled_tokens == {"r0": 2, "r1": 3}
+    assert scheduler_output.total_num_scheduled_tokens == 5
+
+
 def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 

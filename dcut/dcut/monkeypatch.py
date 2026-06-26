@@ -219,11 +219,15 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             )
             runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
+    updated_total_num_scheduled_tokens = sum(updated_num_scheduled_tokens.values())
+    if updated_total_num_scheduled_tokens <= 0:
+        logger.warning("D-Cut: skip truncation because updated scheduled-token total is non-positive.")
+        return scheduler_output
     return _update_scheduler_output(
         scheduler_output,
         scheduled_spec_decode_tokens=updated,
         num_scheduled_tokens=updated_num_scheduled_tokens,
-        total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - total_removed,
+        total_num_scheduled_tokens=updated_total_num_scheduled_tokens,
     )
 
 
