@@ -66,6 +66,7 @@ For a live server, check logs for (`[DCUT]` is printed directly to stdout in add
 [DCUT] D-Cut adaptive-verify patched AscendSpecDecodeBaseProposer.
 [DCUT] D-Cut adaptive verify ENABLED (config=...)
 [DCUT] D-Cut adaptive verify ACTIVE: computed first adaptive draft-length plan (...)
+[DCUT] D-Cut plan: batch=... verify_query_tokens=... query_len_per_req=... draft_lens_total=... draft_lens_avg=... draft_lens_min=... draft_lens_max=... draft_lens_hist=...
 [DCUT] D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (...)
 [DCUT] D-Cut concurrency: active_reqs=... scheduled_reqs=... spec_reqs=... total_scheduled_tokens=... max_scheduled_tokens_per_req=...
 ```

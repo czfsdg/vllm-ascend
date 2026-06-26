@@ -201,6 +201,13 @@ def _record_selected_token_probs(proposer: Any, logits: Any, draft_token_ids: An
         logger.exception("D-Cut: failed to record selected draft token probabilities.")
 
 
+def _format_draft_lens_hist(draft_lens: list[int]) -> str:
+    hist: dict[int, int] = {}
+    for draft_len in draft_lens:
+        hist[int(draft_len)] = hist.get(int(draft_len), 0) + 1
+    return ",".join(f"{draft_len}:{count}" for draft_len, count in sorted(hist.items()))
+
+
 def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     if not _ensure_runner_state(runner) or draft_token_ids is None:
         return
@@ -236,9 +243,27 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         max_draft_len=max_draft_len,
         min_prefix_prob=runner.dcut_config.min_prefix_prob,
     )
-    runner.dcut_next_draft_lens = {
-        req_id: int(draft_len) for req_id, draft_len in zip(req_ids, result["draft_lens"], strict=False)
-    }
+    draft_lens = [int(draft_len) for draft_len in result["draft_lens"]]
+    runner.dcut_next_draft_lens = {req_id: draft_len for req_id, draft_len in zip(req_ids, draft_lens, strict=False)}
+    total_draft_lens = sum(draft_lens)
+    max_draft_lens = max(draft_lens, default=0)
+    min_draft_lens = min(draft_lens, default=0)
+    avg_draft_lens = total_draft_lens / max(1, len(draft_lens))
+    best_q = int(result["best_Q"])
+    query_len_per_req = best_q / max(1, base_batch_size)
+    _emit_dcut_log(
+        "D-Cut plan: batch=%d verify_query_tokens=%d query_len_per_req=%.2f "
+        "draft_lens_total=%d draft_lens_avg=%.2f draft_lens_min=%d "
+        "draft_lens_max=%d draft_lens_hist=%s",
+        len(req_ids),
+        best_q,
+        query_len_per_req,
+        total_draft_lens,
+        avg_draft_lens,
+        min_draft_lens,
+        max_draft_lens,
+        _format_draft_lens_hist(draft_lens),
+    )
     if not getattr(runner, "dcut_logged_first_plan", False):
         _emit_dcut_log(
             "D-Cut adaptive verify ACTIVE: computed first adaptive draft-length "
