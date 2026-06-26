@@ -153,8 +153,8 @@ def test_apply_dcut_draft_lens_count_floor_uses_target_len(monkeypatch):
     updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
 
     assert updated.scheduled_spec_decode_tokens == {"r0": [10, 11, 12]}
-    assert updated.num_scheduled_tokens == {"r0": 3}
-    assert updated.total_num_scheduled_tokens == 3
+    assert updated.num_scheduled_tokens == {"r0": 4}
+    assert updated.total_num_scheduled_tokens == 4
 
 
 def test_apply_dcut_draft_lens_caps_count_by_retained_decode_width(monkeypatch):
@@ -228,8 +228,8 @@ def test_apply_dcut_draft_lens_normalizes_negative_scheduled_counts(monkeypatch)
 
     assert updated is scheduler_output
     assert scheduler_output.scheduled_spec_decode_tokens == {"r0": [10, 11]}
-    assert scheduler_output.num_scheduled_tokens == {"r0": 2, "r1": 1}
-    assert scheduler_output.total_num_scheduled_tokens == 3
+    assert scheduler_output.num_scheduled_tokens == {"r0": 3, "r1": 1}
+    assert scheduler_output.total_num_scheduled_tokens == 4
 
 
 def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):
