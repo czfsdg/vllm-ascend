@@ -307,6 +307,32 @@ def test_apply_dcut_draft_lens_uses_configured_minimum_draft_len(monkeypatch):
     assert updated.total_num_scheduled_tokens == 3
 
 
+def test_apply_dcut_draft_lens_uses_scheduler_order_accepted_floor(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["r0"]),
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12, 13, 14, 15, 16]},
+        num_scheduled_tokens={"r0": 6},
+        total_num_scheduled_tokens=6,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 5},
+        dcut_logged_first_truncation=False,
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True, mutate_scheduler_output=True, min_adaptive_draft_len=0
+        ),
+        input_batch=SimpleNamespace(req_id_to_index={}, num_accepted_tokens_cpu=[8]),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated.scheduled_spec_decode_tokens == {"r0": [10, 11, 12, 13, 14, 15, 16]}
+    assert updated.num_scheduled_tokens == {"r0": 8}
+    assert updated.total_num_scheduled_tokens == 8
+
+
 def test_apply_dcut_draft_lens_respects_accepted_token_floor(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 

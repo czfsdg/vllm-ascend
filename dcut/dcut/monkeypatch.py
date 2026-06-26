@@ -188,14 +188,21 @@ def _min_configured_draft_len(runner: Any) -> int:
     return max(0, int(getattr(config, "min_adaptive_draft_len", 2)))
 
 
-def _min_safe_draft_len(runner: Any, req_id: Any) -> int:
+def _min_safe_draft_len(runner: Any, req_id: Any, scheduler_output: Any | None = None) -> int:
     input_batch = getattr(runner, "input_batch", None)
     req_id_to_index = getattr(input_batch, "req_id_to_index", {}) or {}
     req_idx = req_id_to_index.get(req_id)
-    if req_idx is None:
-        return 0
     accepted_tokens = getattr(input_batch, "num_accepted_tokens_cpu", None)
     if accepted_tokens is None:
+        return 0
+    if req_idx is None and scheduler_output is not None:
+        cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
+        req_ids = list(getattr(cached, "req_ids", []) or [])
+        try:
+            req_idx = req_ids.index(req_id)
+        except ValueError:
+            req_idx = None
+    if req_idx is None:
         return 0
     try:
         return max(0, int(accepted_tokens[req_idx]) - 1)
@@ -277,7 +284,8 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         if target_len is None:
             continue
         original_len = len(draft_token_ids)
-        min_safe_len = max(_min_safe_draft_len(runner, req_id), _min_configured_draft_len(runner))
+        accepted_safe_len = _min_safe_draft_len(runner, req_id, scheduler_output)
+        min_safe_len = max(accepted_safe_len, _min_configured_draft_len(runner))
         target_len = max(min_safe_len, min(int(target_len), original_len))
         removed = original_len - target_len
         if target_len > 0:
@@ -285,7 +293,13 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         else:
             scheduled.pop(req_id, None)
         original_num_scheduled_tokens = int(updated_num_scheduled_tokens.get(req_id, original_len + 1))
-        new_num_scheduled_tokens = max(1, target_len + 1) if removed > 0 else original_num_scheduled_tokens
+        required_num_scheduled_tokens = max(1, target_len + 1)
+        if removed > 0:
+            new_num_scheduled_tokens = required_num_scheduled_tokens
+        elif accepted_safe_len >= original_len:
+            new_num_scheduled_tokens = max(original_num_scheduled_tokens, required_num_scheduled_tokens)
+        else:
+            new_num_scheduled_tokens = original_num_scheduled_tokens
         changed = removed > 0 or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens or changed
         updated_num_scheduled_tokens[req_id] = new_num_scheduled_tokens
         total_removed += removed
