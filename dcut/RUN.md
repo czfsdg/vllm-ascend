@@ -46,10 +46,10 @@ dormant.
   adaptive draft length to all requests. Keep this on for Ascend runs; fully
   per-request variable draft lengths are experimental and can disturb
   spec-decode metadata on some kernels.
-- `mutate_scheduler_output` defaults to `false`. In this safe mode D-Cut still
-  computes adaptive plans, but does not rewrite vLLM/Ascend scheduler outputs.
-  Set it to `true` only for experimental truncation runs after validating that
-  the target spec-decode path supports adaptive scheduled draft lengths.
+- `mutate_scheduler_output` defaults to `true`, so `apply_adaptive_lengths=true`
+  actually rewrites scheduled draft lengths and D-Cut is active. Set it to
+  `false` only for observe-only/debug runs where you want adaptive plans and
+  logs without changing vLLM/Ascend scheduler outputs.
 - `log_concurrency_interval_s` controls periodic server-side INFO logs for
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
   Set it to `0` to disable these logs. If no D-Cut config is loaded,
