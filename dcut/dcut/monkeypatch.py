@@ -270,7 +270,11 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
         else:
             updated.pop(req_id, None)
         original_num_scheduled_tokens = int(updated_num_scheduled_tokens.get(req_id, original_len + 1))
-        new_num_scheduled_tokens = max(1, original_num_scheduled_tokens - removed)
+        new_num_scheduled_tokens = (
+            max(1, target_len, original_num_scheduled_tokens - removed)
+            if removed > 0
+            else original_num_scheduled_tokens
+        )
         changed = removed > 0 or updated_num_scheduled_tokens.get(req_id) != new_num_scheduled_tokens or changed
         updated_num_scheduled_tokens[req_id] = new_num_scheduled_tokens
         total_removed += removed
