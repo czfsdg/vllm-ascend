@@ -335,6 +335,9 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         min_prefix_prob=runner.dcut_config.min_prefix_prob,
     )
     draft_lens = [int(draft_len) for draft_len in result["draft_lens"]]
+    if getattr(runner.dcut_config, "uniform_adaptive_lengths", True):
+        uniform_draft_len = max(0, min(max_draft_len, int(result["best_Q"]) // base_batch_size - 1))
+        draft_lens = [uniform_draft_len] * len(draft_lens)
     runner.dcut_next_draft_lens = {req_id: draft_len for req_id, draft_len in zip(req_ids, draft_lens, strict=False)}
     total_draft_lens = sum(draft_lens)
     max_draft_lens = max(draft_lens, default=0)

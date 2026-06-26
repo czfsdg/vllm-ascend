@@ -275,6 +275,54 @@ def test_runtime_event_logging_can_be_disabled(monkeypatch):
     assert emitted == []
 
 
+def test_update_dcut_next_draft_lens_defaults_to_uniform_batch_length(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    class FakeTensor:
+        def __init__(self, values):
+            self.values = values
+
+        def detach(self):
+            return self
+
+        def to(self, device):
+            return self
+
+        def tolist(self):
+            return self.values
+
+    draft_token_ids = SimpleNamespace(shape=(3, 7))
+    drafter = SimpleNamespace(
+        latest_draft_token_probs=FakeTensor(
+            [
+                [0.95, 0.95, 0.95, 0.95, 0.95, 0.95, 0.95],
+                [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+                [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8],
+            ]
+        )
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True,
+            query_len_levels=lambda max_draft_len: [1, 4],
+            cost_table=None,
+            min_prefix_prob=0.0,
+            uniform_adaptive_lengths=True,
+        ),
+        drafter=drafter,
+        input_batch=SimpleNamespace(req_ids=["r0", "r1", "r2"]),
+        dcut_logged_first_plan=True,
+        dcut_next_draft_lens={},
+    )
+
+    monkeypatch_module._update_dcut_next_draft_lens(runner, draft_token_ids)
+
+    assert len(set(runner.dcut_next_draft_lens.values())) == 1
+    assert runner.dcut_next_draft_lens == {"r0": 3, "r1": 3, "r2": 3}
+
+
 def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 

@@ -42,6 +42,10 @@ dormant.
   when D-Cut rewrites scheduled draft tokens. This avoids pathological `0`/`1`
   token verifier segments that can destabilize high-concurrency Ascend/GDN
   paths. Lower it only when explicitly testing aggressive truncation.
+- `uniform_adaptive_lengths` defaults to `true`, so each batch applies one
+  adaptive draft length to all requests. Keep this on for Ascend runs; fully
+  per-request variable draft lengths are experimental and can disturb
+  spec-decode metadata on some kernels.
 - `log_concurrency_interval_s` controls periodic server-side INFO logs for
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
   Set it to `0` to disable these logs. If no D-Cut config is loaded,

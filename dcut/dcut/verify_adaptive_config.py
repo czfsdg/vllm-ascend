@@ -24,6 +24,7 @@ class VerifyAdaptiveConfig:
     apply_adaptive_lengths: bool = True
     min_prefix_prob: float = 0.05
     min_adaptive_draft_len: int = 2
+    uniform_adaptive_lengths: bool = True
     log_concurrency_interval_s: float = 5.0
     log_runtime_events: bool = False
 
@@ -58,6 +59,7 @@ class VerifyAdaptiveConfig:
             "apply_adaptive_lengths": self.apply_adaptive_lengths,
             "min_prefix_prob": self.min_prefix_prob,
             "min_adaptive_draft_len": self.min_adaptive_draft_len,
+            "uniform_adaptive_lengths": self.uniform_adaptive_lengths,
             "log_concurrency_interval_s": self.log_concurrency_interval_s,
             "log_runtime_events": self.log_runtime_events,
         }
