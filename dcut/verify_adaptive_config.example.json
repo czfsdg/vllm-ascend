@@ -12,6 +12,7 @@
   "apply_adaptive_lengths": true,
   "min_prefix_prob": 0.05,
   "log_concurrency_interval_s": 5.0,
+  "log_runtime_events": true,
   "cost_table": {
     "2,2": 2.0,
     "2,4": 3.4,

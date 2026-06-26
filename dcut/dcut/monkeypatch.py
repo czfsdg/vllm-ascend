@@ -102,6 +102,11 @@ def _ensure_runner_state(runner: Any) -> bool:
     return True
 
 
+def _should_log_runtime_events(runner: Any) -> bool:
+    config = getattr(runner, "dcut_config", None)
+    return bool(getattr(config, "log_runtime_events", True))
+
+
 def _get_concurrency_log_interval(runner: Any) -> float:
     config = getattr(runner, "dcut_config", None)
     if config is not None:
@@ -110,6 +115,8 @@ def _get_concurrency_log_interval(runner: Any) -> float:
 
 
 def _log_concurrency(runner: Any, scheduler_output: Any) -> None:
+    if not _should_log_runtime_events(runner):
+        return
     interval_s = _get_concurrency_log_interval(runner)
     if interval_s <= 0:
         return
@@ -184,18 +191,19 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not changed:
         return scheduler_output
     applied_draft_lens = [len(draft_token_ids) for draft_token_ids in updated.values()]
-    _emit_dcut_log(
-        "D-Cut apply: requests=%d removed_tokens=%d applied_draft_lens_hist=%s",
-        len(updated),
-        total_removed,
-        _format_draft_lens_hist(applied_draft_lens),
-    )
-    if not getattr(runner, "dcut_logged_first_truncation", False):
+    if _should_log_runtime_events(runner):
         _emit_dcut_log(
-            "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (requests=%d).",
+            "D-Cut apply: requests=%d removed_tokens=%d applied_draft_lens_hist=%s",
             len(updated),
+            total_removed,
+            _format_draft_lens_hist(applied_draft_lens),
         )
-        runner.dcut_logged_first_truncation = True
+        if not getattr(runner, "dcut_logged_first_truncation", False):
+            _emit_dcut_log(
+                "D-Cut adaptive verify ACTIVE: truncated scheduled draft tokens for the first time (requests=%d).",
+                len(updated),
+            )
+            runner.dcut_logged_first_truncation = True
     logger.debug("D-Cut: truncated scheduled spec-decode tokens for %d requests.", len(updated))
     return replace(
         scheduler_output,
@@ -274,28 +282,29 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     avg_draft_lens = total_draft_lens / max(1, len(draft_lens))
     best_q = int(result["best_Q"])
     query_len_per_req = best_q / max(1, base_batch_size)
-    _emit_dcut_log(
-        "D-Cut plan: batch=%d verify_query_tokens=%d query_len_per_req=%.2f "
-        "draft_lens_total=%d draft_lens_avg=%.2f draft_lens_min=%d "
-        "draft_lens_max=%d draft_lens_hist=%s",
-        len(req_ids),
-        best_q,
-        query_len_per_req,
-        total_draft_lens,
-        avg_draft_lens,
-        min_draft_lens,
-        max_draft_lens,
-        _format_draft_lens_hist(draft_lens),
-    )
-    if not getattr(runner, "dcut_logged_first_plan", False):
+    if _should_log_runtime_events(runner):
         _emit_dcut_log(
-            "D-Cut adaptive verify ACTIVE: computed first adaptive draft-length "
-            "plan (batch=%d, best_Q=%s, max_draft_len=%d).",
+            "D-Cut plan: batch=%d verify_query_tokens=%d query_len_per_req=%.2f "
+            "draft_lens_total=%d draft_lens_avg=%.2f draft_lens_min=%d "
+            "draft_lens_max=%d draft_lens_hist=%s",
             len(req_ids),
-            result["best_Q"],
-            max_draft_len,
+            best_q,
+            query_len_per_req,
+            total_draft_lens,
+            avg_draft_lens,
+            min_draft_lens,
+            max_draft_lens,
+            _format_draft_lens_hist(draft_lens),
         )
-        runner.dcut_logged_first_plan = True
+        if not getattr(runner, "dcut_logged_first_plan", False):
+            _emit_dcut_log(
+                "D-Cut adaptive verify ACTIVE: computed first adaptive draft-length "
+                "plan (batch=%d, best_Q=%s, max_draft_len=%d).",
+                len(req_ids),
+                result["best_Q"],
+                max_draft_len,
+            )
+            runner.dcut_logged_first_plan = True
     logger.debug("D-Cut: selected best_Q=%s draft_lens=%s", result["best_Q"], runner.dcut_next_draft_lens)
 
 

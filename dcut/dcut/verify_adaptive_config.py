@@ -24,6 +24,7 @@ class VerifyAdaptiveConfig:
     apply_adaptive_lengths: bool = True
     min_prefix_prob: float = 0.05
     log_concurrency_interval_s: float = 5.0
+    log_runtime_events: bool = True
 
     @classmethod
     def from_file(cls, path: str) -> VerifyAdaptiveConfig:
@@ -56,4 +57,5 @@ class VerifyAdaptiveConfig:
             "apply_adaptive_lengths": self.apply_adaptive_lengths,
             "min_prefix_prob": self.min_prefix_prob,
             "log_concurrency_interval_s": self.log_concurrency_interval_s,
+            "log_runtime_events": self.log_runtime_events,
         }

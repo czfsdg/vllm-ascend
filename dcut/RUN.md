@@ -42,6 +42,10 @@ dormant.
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
   Set it to `0` to disable these logs. If no D-Cut config is loaded,
   `VLLM_DCUT_LOG_CONCURRENCY_INTERVAL_S` is used and defaults to `5.0`.
+- `log_runtime_events` controls high-frequency runtime `[DCUT]` logs such as
+  `D-Cut plan`, `D-Cut apply`, and `D-Cut concurrency`. Set it to `false`
+  to keep D-Cut active while suppressing per-step stdout/log spam. Startup,
+  dormant, and patch/install status logs are still emitted.
 
 ## Smoke checks
 
@@ -55,7 +59,7 @@ assert "dcut_adaptive_verify" in plugins
 PY
 ```
 
-For a live server, check logs for (`[DCUT]` is printed directly to stdout in addition to logger output):
+For a live server, check logs for (`[DCUT]` is printed directly to stdout in addition to logger output unless `log_runtime_events=false` suppresses high-frequency runtime events):
 
 ```text
 [DCUT] D-Cut adaptive-verify plugin install requested (VLLM_PLUGINS=ascend,dcut_adaptive_verify, config_env=/tmp/dcut_config.json).
@@ -73,8 +77,9 @@ For a live server, check logs for (`[DCUT]` is printed directly to stdout in add
 The install-hook lines prove vLLM discovered the plugin without eagerly importing
 Ascend runner modules during CLI setup. The `patched ...` lines appear once the
 Ascend modules load normally. The `ENABLED` line proves the runner accepted the
-config and speculative method. The `ACTIVE` lines appear after traffic starts and
-prove D-Cut is actually computing and applying adaptive verifier lengths.
+config and speculative method. The `ACTIVE`, `plan`, and `apply` lines appear after traffic starts and
+prove D-Cut is actually computing and applying adaptive verifier lengths. Set
+`log_runtime_events=false` after validation if these per-step logs are too noisy.
 
 Useful log checks:
 

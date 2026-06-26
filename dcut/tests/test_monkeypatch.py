@@ -86,6 +86,47 @@ def test_apply_dcut_draft_lens_respects_accepted_token_floor(monkeypatch):
     assert updated.total_num_scheduled_tokens == 8
 
 
+def test_runtime_event_logging_can_be_disabled(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    emitted: list[tuple[str, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        monkeypatch_module,
+        "_emit_dcut_log",
+        lambda message, *args: emitted.append((message, args)),
+    )
+
+    @dataclass(frozen=True)
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12]},
+        num_scheduled_tokens={"r0": 4},
+        total_num_scheduled_tokens=4,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1},
+        dcut_logged_first_truncation=False,
+        dcut_last_concurrency_log_ts=0.0,
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True,
+            log_runtime_events=False,
+            log_concurrency_interval_s=0.0,
+        ),
+        input_batch=SimpleNamespace(num_reqs=1),
+    )
+
+    monkeypatch_module._log_concurrency(runner, scheduler_output)
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated.scheduled_spec_decode_tokens == {"r0": [10]}
+    assert emitted == []
+
+
 def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 
