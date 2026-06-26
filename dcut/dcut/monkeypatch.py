@@ -196,7 +196,11 @@ def _debug_scheduler_state(runner: Any, scheduler_output: Any, phase: str) -> No
 
 def _min_configured_draft_len(runner: Any) -> int:
     config = getattr(runner, "dcut_config", None)
-    return max(0, int(getattr(config, "min_adaptive_draft_len", 2)))
+    min_len = max(0, int(getattr(config, "min_adaptive_draft_len", 2)))
+    speculative_config = getattr(runner, "speculative_config", None)
+    if getattr(speculative_config, "method", None) == "dflash":
+        min_len = max(min_len, int(getattr(config, "min_dflash_adaptive_draft_len", 6)))
+    return min_len
 
 
 def _min_safe_draft_len(runner: Any, req_id: Any, scheduler_output: Any | None = None) -> int:
@@ -279,7 +283,7 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
             if getattr(speculative_config, "method", None) == "dflash":
                 _emit_dcut_log(
                     "D-Cut adaptive verify SAFE: computed plans but did not mutate DFlash scheduler output "
-                    "(set allow_dflash_scheduler_mutation=true for unsafe experimental truncation)."
+                    "(set allow_dflash_scheduler_mutation=true to enable guarded truncation)."
                 )
             else:
                 _emit_dcut_log(

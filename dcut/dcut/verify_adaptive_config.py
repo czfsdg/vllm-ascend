@@ -26,7 +26,8 @@ class VerifyAdaptiveConfig:
     min_adaptive_draft_len: int = 2
     uniform_adaptive_lengths: bool = True
     mutate_scheduler_output: bool = True
-    allow_dflash_scheduler_mutation: bool = False
+    allow_dflash_scheduler_mutation: bool = True
+    min_dflash_adaptive_draft_len: int = 6
     log_concurrency_interval_s: float = 5.0
     log_runtime_events: bool = False
     debug_scheduler_state: bool = False
@@ -65,6 +66,7 @@ class VerifyAdaptiveConfig:
             "uniform_adaptive_lengths": self.uniform_adaptive_lengths,
             "mutate_scheduler_output": self.mutate_scheduler_output,
             "allow_dflash_scheduler_mutation": self.allow_dflash_scheduler_mutation,
+            "min_dflash_adaptive_draft_len": self.min_dflash_adaptive_draft_len,
             "log_concurrency_interval_s": self.log_concurrency_interval_s,
             "log_runtime_events": self.log_runtime_events,
             "debug_scheduler_state": self.debug_scheduler_state,
