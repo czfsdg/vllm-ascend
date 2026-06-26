@@ -41,7 +41,8 @@ dormant.
   generation limit with low acceptance.
 - `log_concurrency_interval_s` controls periodic server-side INFO logs for
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
-  Set it to `0` to disable these logs.
+  Set it to `0` to disable these logs. If no D-Cut config is loaded,
+  `VLLM_DCUT_LOG_CONCURRENCY_INTERVAL_S` is used and defaults to `5.0`.
 
 ## Smoke checks
 

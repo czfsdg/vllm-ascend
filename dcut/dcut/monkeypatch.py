@@ -94,10 +94,15 @@ def _ensure_runner_state(runner: Any) -> bool:
     return True
 
 
+def _get_concurrency_log_interval(runner: Any) -> float:
+    config = getattr(runner, "dcut_config", None)
+    if config is not None:
+        return float(getattr(config, "log_concurrency_interval_s", 5.0))
+    return float(os.getenv("VLLM_DCUT_LOG_CONCURRENCY_INTERVAL_S", "5.0"))
+
+
 def _log_concurrency(runner: Any, scheduler_output: Any) -> None:
-    if not _ensure_runner_state(runner):
-        return
-    interval_s = float(getattr(runner.dcut_config, "log_concurrency_interval_s", 0.0))
+    interval_s = _get_concurrency_log_interval(runner)
     if interval_s <= 0:
         return
     now = time.monotonic()
