@@ -46,10 +46,14 @@ dormant.
   adaptive draft length to all requests. Keep this on for Ascend runs; fully
   per-request variable draft lengths are experimental and can disturb
   spec-decode metadata on some kernels.
-- `mutate_scheduler_output` defaults to `true`, so `apply_adaptive_lengths=true`
-  actually rewrites scheduled draft lengths and D-Cut is active. Set it to
-  `false` only for observe-only/debug runs where you want adaptive plans and
-  logs without changing vLLM/Ascend scheduler outputs.
+- `mutate_scheduler_output` defaults to `true`, but DFlash scheduler mutation is
+  additionally gated by `allow_dflash_scheduler_mutation=false`. With the
+  default gate, D-Cut still computes/logs plans for DFlash but does not rewrite
+  DFlash scheduler outputs, avoiding observed Ascend/GDN varlen and proposer
+  metadata crashes. Set `allow_dflash_scheduler_mutation=true` only for unsafe
+  local experiments after validating the exact model/kernel combination. Set
+  `mutate_scheduler_output=false` for observe-only/debug runs on every
+  speculative method.
 - `log_concurrency_interval_s` controls periodic server-side INFO logs for
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
   Set it to `0` to disable these logs. If no D-Cut config is loaded,
@@ -94,9 +98,12 @@ For a live server, temporarily set `log_runtime_events=true` and check logs for 
 The install-hook lines prove vLLM discovered the plugin without eagerly importing
 Ascend runner modules during CLI setup. The `patched ...` lines appear once the
 Ascend modules load normally. The `ENABLED` line proves the runner accepted the
-config and speculative method. The `ACTIVE`, `plan`, and `apply` lines appear after traffic starts and
-prove D-Cut is actually computing and applying adaptive verifier lengths. Set
-`log_runtime_events` should normally remain `false` for throughput benchmarks; enable it only for short validation runs if these per-step logs are needed.
+config and speculative method. The `ACTIVE`, `plan`, and `apply` lines appear after traffic starts. For
+DFlash, the default `allow_dflash_scheduler_mutation=false` keeps application in
+safe observe-only mode, so expect `plan` plus a `SAFE` bypass line rather than
+`apply` unless unsafe DFlash mutation is explicitly enabled. `log_runtime_events`
+should normally remain `false` for throughput benchmarks; enable it only for
+short validation runs if these per-step logs are needed.
 
 Useful log checks:
 

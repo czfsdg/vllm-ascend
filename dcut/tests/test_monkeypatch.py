@@ -483,6 +483,35 @@ def test_update_dcut_next_draft_lens_defaults_to_uniform_batch_length(monkeypatc
     assert runner.dcut_next_draft_lens == {"r0": 3, "r1": 3, "r2": 3}
 
 
+def test_apply_dcut_draft_lens_dflash_defaults_to_safe_bypass(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12]},
+        num_scheduled_tokens={"r0": 4},
+        total_num_scheduled_tokens=4,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={"r0": 1},
+        dcut_logged_safe_apply_bypass=False,
+        speculative_config=SimpleNamespace(method="dflash"),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True,
+            mutate_scheduler_output=True,
+            allow_dflash_scheduler_mutation=False,
+        ),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert scheduler_output.scheduled_spec_decode_tokens == {"r0": [10, 11, 12]}
+    assert scheduler_output.num_scheduled_tokens == {"r0": 4}
+    assert runner.dcut_next_draft_lens == {}
+    assert runner.dcut_logged_safe_apply_bypass
+
+
 def test_apply_dcut_draft_lens_does_not_mutate_scheduler_without_opt_in(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
 

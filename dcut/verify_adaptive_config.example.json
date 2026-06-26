@@ -14,6 +14,7 @@
   "min_adaptive_draft_len": 2,
   "uniform_adaptive_lengths": true,
   "mutate_scheduler_output": true,
+  "allow_dflash_scheduler_mutation": false,
   "log_concurrency_interval_s": 5.0,
   "log_runtime_events": false,
   "debug_scheduler_state": false,

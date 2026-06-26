@@ -113,6 +113,17 @@ def _should_debug_scheduler_state(runner: Any) -> bool:
     return bool(getattr(config, "debug_scheduler_state", False))
 
 
+def _scheduler_mutation_allowed(runner: Any) -> bool:
+    config = getattr(runner, "dcut_config", None)
+    if not getattr(config, "mutate_scheduler_output", False):
+        return False
+    speculative_config = getattr(runner, "speculative_config", None)
+    return not (
+        getattr(speculative_config, "method", None) == "dflash"
+        and not getattr(config, "allow_dflash_scheduler_mutation", False)
+    )
+
+
 def _get_concurrency_log_interval(runner: Any) -> float:
     config = getattr(runner, "dcut_config", None)
     if config is not None:
@@ -261,13 +272,20 @@ def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
     if not getattr(config, "apply_adaptive_lengths", False):
         return scheduler_output
     _debug_scheduler_state(runner, scheduler_output, "before_apply")
-    if not getattr(config, "mutate_scheduler_output", False):
+    if not _scheduler_mutation_allowed(runner):
         runner.dcut_next_draft_lens = {}
         if not getattr(runner, "dcut_logged_safe_apply_bypass", False):
-            _emit_dcut_log(
-                "D-Cut adaptive verify SAFE: computed plans but did not mutate scheduler output "
-                "(set mutate_scheduler_output=true to enable experimental truncation)."
-            )
+            speculative_config = getattr(runner, "speculative_config", None)
+            if getattr(speculative_config, "method", None) == "dflash":
+                _emit_dcut_log(
+                    "D-Cut adaptive verify SAFE: computed plans but did not mutate DFlash scheduler output "
+                    "(set allow_dflash_scheduler_mutation=true for unsafe experimental truncation)."
+                )
+            else:
+                _emit_dcut_log(
+                    "D-Cut adaptive verify SAFE: computed plans but did not mutate scheduler output "
+                    "(set mutate_scheduler_output=true to enable experimental truncation)."
+                )
             runner.dcut_logged_safe_apply_bypass = True
         _debug_scheduler_state(runner, scheduler_output, "bypass_apply")
         return scheduler_output
@@ -464,7 +482,7 @@ def _patch_runner_module(module: Any) -> bool:
         if (
             scheduler_output is not None
             and getattr(config, "apply_adaptive_lengths", False)
-            and getattr(config, "mutate_scheduler_output", False)
+            and _scheduler_mutation_allowed(self)
         ):
             _align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
         draft_token_ids = original_propose_draft_token_ids(self, *args, **kwargs)
