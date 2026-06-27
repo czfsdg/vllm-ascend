@@ -60,7 +60,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_decision_details": true,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
-  "min_score_improvement_ratio": 0.01,
+  "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
 JSON
@@ -133,7 +133,7 @@ example, with `num_speculative_tokens=7`, `batch_size=16`, and
 `budget_ratios=[0.25, 0.5, 0.75, 1.0]`, the speculative budgets are
 `ceil(ratio * 16 * 7)` tokens across the whole batch.
 
-If full-length choices such as `[7, 7, ...]` come from only a tiny score
-improvement over a shorter candidate, increase `min_score_improvement_ratio`
-(for example, `0.02`). The planner then keeps the shorter candidate unless a
-longer candidate improves score by at least that relative ratio.
+By default, `min_score_improvement_ratio=0.0` makes the planner choose the
+highest-scoring budget directly. Increase it only for diagnostics when you
+intentionally want to bias toward shorter budgets and require a longer budget to
+win by a minimum relative margin.
