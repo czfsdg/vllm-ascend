@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-ascend-dcut"
+version = "0.1.0"
+description = "D-Cut adaptive verifier plugin for vLLM Ascend"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.entry-points."vllm.general_plugins"]
+dcut = "dcut:register"
+dcut_adaptive_verify = "dcut:register"
