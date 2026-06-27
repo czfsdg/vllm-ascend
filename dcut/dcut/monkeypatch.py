@@ -262,18 +262,27 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
                 new_spec[req_id] = draft_toks[:adaptive_len]
     if tokens_delta <= 0:
         return scheduler_output
+    tokens_after = scheduler_output.total_num_scheduled_tokens - tokens_delta
     logger.info(
         "D-Cut: cut scheduled speculative tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
         len(scheduler_output.scheduled_spec_decode_tokens),
         scheduler_output.total_num_scheduled_tokens,
-        scheduler_output.total_num_scheduled_tokens - tokens_delta,
+        tokens_after,
         tokens_delta,
     )
+    if controller.config.log_decision_details:
+        max_records = controller.config.log_decision_max_records
+        spec_lens = {req_id: len(tokens) for req_id, tokens in new_spec.items()}
+        logger.info(
+            "D-Cut verifier input check: scheduled_spec_lens=%s total_num_scheduled_tokens=%d",
+            dict(list(spec_lens.items())[:max_records]),
+            tokens_after,
+        )
     return replace(
         scheduler_output,
         scheduled_spec_decode_tokens=new_spec,
         num_scheduled_tokens=new_num_sched,
-        total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - tokens_delta,
+        total_num_scheduled_tokens=tokens_after,
     )
 
 
