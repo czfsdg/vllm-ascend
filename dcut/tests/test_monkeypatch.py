@@ -660,6 +660,46 @@ def test_apply_dcut_draft_lens_safe_mode_does_not_rewrite_scheduler_output(monke
     assert not runner.dcut_logged_safe_mode
 
 
+def test_patch_runner_skips_dflash_proposer_after_output_limit(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    class FakeRunner:
+        def __init__(self):
+            self.dcut_next_draft_lens = {"r0": 6}
+            self.speculative_config = SimpleNamespace(method="dflash")
+            self.dcut_config = SimpleNamespace(
+                apply_adaptive_lengths=True,
+                mutate_scheduler_output=True,
+                allow_dflash_scheduler_mutation=True,
+                max_dflash_mutation_output_tokens=32,
+            )
+            self.original_proposer_called = False
+
+        def execute_model(self, scheduler_output, *args, **kwargs):
+            return scheduler_output
+
+        def propose_draft_token_ids(self, *args, **kwargs):
+            self.original_proposer_called = True
+            raise AssertionError("DFlash proposer should be skipped after cutoff")
+
+    module = SimpleNamespace(NPUModelRunner=FakeRunner)
+    assert monkeypatch_module._patch_runner_module(module)
+
+    runner = FakeRunner()
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(num_output_tokens=[33]),
+        scheduled_spec_decode_tokens={"r0": [1, 2, 3, 4, 5, 6, 7]},
+        num_scheduled_tokens={"r0": 8},
+        total_num_scheduled_tokens=8,
+    )
+
+    result = runner.propose_draft_token_ids(None, None, scheduler_output)
+
+    assert result is None
+    assert not runner.original_proposer_called
+    assert runner.dcut_next_draft_lens == {}
+
+
 def test_selected_token_probs_from_logits_matches_softmax(monkeypatch):
     torch = pytest.importorskip("torch")
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)

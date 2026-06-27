@@ -119,6 +119,15 @@ def _max_cached_output_tokens(scheduler_output: Any | None) -> int:
     return max((int(value) for value in getattr(cached, "num_output_tokens", []) or []), default=0)
 
 
+def _dflash_output_limit_exceeded(runner: Any, scheduler_output: Any | None) -> bool:
+    speculative_config = getattr(runner, "speculative_config", None)
+    if getattr(speculative_config, "method", None) != "dflash":
+        return False
+    config = getattr(runner, "dcut_config", None)
+    max_output_tokens = int(getattr(config, "max_dflash_mutation_output_tokens", 32))
+    return max_output_tokens > 0 and _max_cached_output_tokens(scheduler_output) > max_output_tokens
+
+
 def _scheduler_mutation_allowed(runner: Any, scheduler_output: Any | None = None) -> bool:
     config = getattr(runner, "dcut_config", None)
     if not getattr(config, "mutate_scheduler_output", False):
@@ -128,8 +137,7 @@ def _scheduler_mutation_allowed(runner: Any, scheduler_output: Any | None = None
         return True
     if not getattr(config, "allow_dflash_scheduler_mutation", False):
         return False
-    max_output_tokens = int(getattr(config, "max_dflash_mutation_output_tokens", 32))
-    return max_output_tokens <= 0 or _max_cached_output_tokens(scheduler_output) <= max_output_tokens
+    return not _dflash_output_limit_exceeded(runner, scheduler_output)
 
 
 def _get_concurrency_log_interval(runner: Any) -> float:
@@ -499,12 +507,12 @@ def _patch_runner_module(module: Any) -> bool:
     def propose_draft_token_ids(self: Any, *args: Any, **kwargs: Any) -> Any:
         scheduler_output = args[2] if len(args) > 2 else kwargs.get("scheduler_output")
         config = getattr(self, "dcut_config", None)
-        if (
-            scheduler_output is not None
-            and getattr(config, "apply_adaptive_lengths", False)
-            and _scheduler_mutation_allowed(self, scheduler_output)
-        ):
-            _align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
+        if scheduler_output is not None and getattr(config, "apply_adaptive_lengths", False):
+            if _dflash_output_limit_exceeded(self, scheduler_output):
+                self.dcut_next_draft_lens = {}
+                return None
+            if _scheduler_mutation_allowed(self, scheduler_output):
+                _align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
         draft_token_ids = original_propose_draft_token_ids(self, *args, **kwargs)
         _update_dcut_next_draft_lens(self, draft_token_ids)
         return draft_token_ids
