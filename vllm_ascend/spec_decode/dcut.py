@@ -139,9 +139,13 @@ class VerifyAdaptiveController:
     @classmethod
     def from_env(cls, num_spec_tokens: int, max_batch_size: int) -> VerifyAdaptiveController | None:
         cfg_path = envs.VLLM_ASCEND_DCUT_CONFIG
-        if not cfg_path:
+        if cfg_path:
+            config = VerifyAdaptiveConfig.from_json(cfg_path)
+        elif envs.VLLM_ASCEND_ENABLE_DCUT:
+            config = VerifyAdaptiveConfig()
+        else:
             return None
-        return cls(VerifyAdaptiveConfig.from_json(cfg_path), num_spec_tokens, max_batch_size)
+        return cls(config, num_spec_tokens, max_batch_size)
 
     def _build_batch_size_levels(self) -> list[int]:
         if self.config.warmup_batch_sizes:
