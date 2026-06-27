@@ -55,7 +55,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "min_query_len_per_req": 2,
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
-  "log_decision_details": false,
+  "log_decision_details": true,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
   "min_score_improvement_ratio": 0.01,
