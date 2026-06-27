@@ -33,6 +33,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "query_len_step_per_req": 1,
         "log_decision_details": True,
         "log_decision_interval": 2,
+        "uniform_draft_len": True,
         "unknown": "ignored",
     })
 
@@ -40,6 +41,21 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.min_warmup_batch_size == 1
     assert cfg.log_decision_details is True
     assert cfg.log_decision_interval == 2
+    assert cfg.uniform_draft_len is True
+
+
+def test_choose_query_lens_discrete_can_use_uniform_draft_lengths():
+    result = choose_query_lens_discrete(
+        probs=np.array([[0.9, 0.8, 0.1], [0.6, 0.5, 0.4]]),
+        base_batch_size=2,
+        q_levels=[4, 6],
+        cost_lookup={4: 1.0, 6: 1.0}.__getitem__,
+        max_draft_len=3,
+        uniform_draft_len=True,
+    )
+
+    assert result["best_S"] == 4
+    assert result["draft_lens"] == [2, 2]
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():

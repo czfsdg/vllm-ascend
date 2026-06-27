@@ -33,6 +33,7 @@ def choose_query_lens_discrete(
     max_draft_len: int,
     collect_records: bool = False,
     min_score_improvement_ratio: float = 0.0,
+    uniform_draft_len: bool = False,
 ) -> dict[str, Any]:
     """D-Cut discrete marginal-gain scan over measured sum-query levels."""
     active = len(probs)
@@ -59,8 +60,12 @@ def choose_query_lens_discrete(
             best_score = score
             best_q = q_level
             best_s = speculative_slots
+    if uniform_draft_len:
+        draft_lens = [min(max_draft_len, best_s // active)] * active
+    else:
+        draft_lens = np.bincount(sorted_seq[:best_s], minlength=active).tolist()
     return {
-        "draft_lens": np.bincount(sorted_seq[:best_s], minlength=active).tolist(),
+        "draft_lens": draft_lens,
         "best_Q": best_q,
         "best_S": int(best_s),
         "best_score": best_score,
@@ -174,7 +179,8 @@ class VerifyAdaptiveController:
                                             lambda q: self._cost_table[(bs_key, q)],
                                             self.max_query_len_per_req - 1,
                                             collect_records=log_details,
-                                            min_score_improvement_ratio=self.config.min_score_improvement_ratio)
+                                            min_score_improvement_ratio=self.config.min_score_improvement_ratio,
+                                            uniform_draft_len=self.config.uniform_draft_len)
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
         logger.info(
@@ -188,10 +194,11 @@ class VerifyAdaptiveController:
         if log_details:
             logger.info(
                 "D-Cut decision details: bs_key=%d max_draft_len=%d min_score_improvement_ratio=%.4f "
-                "prob_mean_by_pos=%s candidates=%s",
+                "uniform_draft_len=%s prob_mean_by_pos=%s candidates=%s",
                 bs_key,
                 self.max_query_len_per_req - 1,
                 self.config.min_score_improvement_ratio,
+                self.config.uniform_draft_len,
                 _rounded_list(active_probs.mean(axis=0)),
                 _format_decision_records(result["records"], self.config.log_decision_max_records),
             )
