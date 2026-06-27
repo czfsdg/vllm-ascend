@@ -58,6 +58,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_decision_details": false,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
+  "min_score_improvement_ratio": 0.01,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
 JSON
@@ -120,3 +121,8 @@ To inspect why D-Cut often keeps full draft lengths, set
 selected probabilities and every measured candidate's `(Q, S, cost_ms, score)`.
 Use `log_decision_interval` to print every Nth decision and
 `log_decision_max_records` to cap the number of candidate rows in each log.
+
+If full-length choices such as `[7, 7, ...]` come from only a tiny score
+improvement over a shorter candidate, increase `min_score_improvement_ratio`
+(for example, `0.02`). The planner then keeps the shorter candidate unless a
+longer candidate improves score by at least that relative ratio.

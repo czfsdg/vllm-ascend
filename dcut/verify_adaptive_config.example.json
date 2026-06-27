@@ -8,5 +8,6 @@
   "log_decision_details": false,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
+  "min_score_improvement_ratio": 0.01,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }

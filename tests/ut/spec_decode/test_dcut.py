@@ -42,6 +42,30 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_decision_interval == 2
 
 
+def test_choose_query_lens_discrete_requires_meaningful_score_gain():
+    probs = np.array([[0.9, 0.01, 0.01], [0.8, 0.01, 0.01]])
+
+    without_threshold = choose_query_lens_discrete(
+        probs=probs,
+        base_batch_size=2,
+        q_levels=[4, 6],
+        cost_lookup={4: 1.0, 6: 1.0}.__getitem__,
+        max_draft_len=3,
+    )
+    with_threshold = choose_query_lens_discrete(
+        probs=probs,
+        base_batch_size=2,
+        q_levels=[4, 6],
+        cost_lookup={4: 1.0, 6: 1.0}.__getitem__,
+        max_draft_len=3,
+        min_score_improvement_ratio=0.01,
+    )
+
+    assert without_threshold["best_Q"] == 6
+    assert with_threshold["best_Q"] == 4
+    assert with_threshold["draft_lens"] == [1, 1]
+
+
 def test_verify_adaptive_config_rejects_invalid_query_range():
     cfg = VerifyAdaptiveConfig(min_query_len_per_req=8, max_query_len_per_req=4)
 
@@ -53,4 +77,11 @@ def test_verify_adaptive_config_rejects_invalid_decision_log_interval():
     cfg = VerifyAdaptiveConfig(log_decision_details=True, log_decision_interval=0)
 
     with pytest.raises(ValueError, match="log_decision_interval"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_min_score_improvement_ratio():
+    cfg = VerifyAdaptiveConfig(min_score_improvement_ratio=-0.1)
+
+    with pytest.raises(ValueError, match="min_score_improvement_ratio"):
         cfg.validate(num_speculative_tokens=4)

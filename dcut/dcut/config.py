@@ -27,6 +27,7 @@ class VerifyAdaptiveConfig:
     log_decision_details: bool = False
     log_decision_interval: int = 1
     log_decision_max_records: int = 8
+    min_score_improvement_ratio: float = 0.01
     enabled: bool = True
 
     @classmethod
@@ -59,6 +60,8 @@ class VerifyAdaptiveConfig:
             raise ValueError("log_decision_interval must be >= 1.")
         if self.log_decision_max_records < 1:
             raise ValueError("log_decision_max_records must be >= 1.")
+        if self.min_score_improvement_ratio < 0.0:
+            raise ValueError("min_score_improvement_ratio must be >= 0.0.")
         if self.min_warmup_batch_size < 1:
             raise ValueError("min_warmup_batch_size must be >= 1.")
         if self.max_warmup_batch_size is not None and self.max_warmup_batch_size < 1:
