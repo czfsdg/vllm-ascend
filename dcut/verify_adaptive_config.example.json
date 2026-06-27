@@ -14,7 +14,7 @@
   "min_adaptive_draft_len": 2,
   "uniform_adaptive_lengths": true,
   "mutate_scheduler_output": true,
-  "allow_dflash_scheduler_mutation": true,
+  "allow_dflash_scheduler_mutation": false,
   "min_dflash_adaptive_draft_len": 6,
   "max_dflash_mutation_output_tokens": 32,
   "max_dflash_proposer_batch_size": 8,

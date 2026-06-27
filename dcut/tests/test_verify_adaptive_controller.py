@@ -27,6 +27,13 @@ def test_config_query_len_levels_include_baseline_and_cap():
     assert config.query_len_levels(max_draft_len=5) == [1, 2, 4, 6]
 
 
+def test_config_defaults_disable_dflash_mutation():
+    config = VerifyAdaptiveConfig()
+
+    assert not config.allow_dflash_scheduler_mutation
+    assert config.to_log_dict()["allow_dflash_scheduler_mutation"] is False
+
+
 def test_choose_query_lens_discrete_filters_low_confidence_prefixes():
     result = choose_query_lens_discrete(
         probs=[[0.04], [0.9]],

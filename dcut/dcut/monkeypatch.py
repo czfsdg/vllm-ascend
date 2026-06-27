@@ -143,6 +143,11 @@ def _dflash_proposer_batch_limit_exceeded(runner: Any, scheduler_output: Any | N
 
 
 def _dflash_proposer_disabled(runner: Any, scheduler_output: Any | None) -> bool:
+    speculative_config = getattr(runner, "speculative_config", None)
+    if getattr(speculative_config, "method", None) == "dflash":
+        config = getattr(runner, "dcut_config", None)
+        if not getattr(config, "allow_dflash_scheduler_mutation", False):
+            return True
     return _dflash_output_limit_exceeded(runner, scheduler_output) or _dflash_proposer_batch_limit_exceeded(
         runner, scheduler_output
     )

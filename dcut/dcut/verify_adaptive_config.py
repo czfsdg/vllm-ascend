@@ -26,7 +26,7 @@ class VerifyAdaptiveConfig:
     min_adaptive_draft_len: int = 2
     uniform_adaptive_lengths: bool = True
     mutate_scheduler_output: bool = True
-    allow_dflash_scheduler_mutation: bool = True
+    allow_dflash_scheduler_mutation: bool = False
     min_dflash_adaptive_draft_len: int = 6
     max_dflash_mutation_output_tokens: int = 32
     max_dflash_proposer_batch_size: int = 8

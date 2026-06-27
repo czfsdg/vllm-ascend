@@ -54,15 +54,16 @@ dormant.
   adaptive draft length to all requests. Keep this on for Ascend runs; fully
   per-request variable draft lengths are experimental and can disturb
   spec-decode metadata on some kernels.
-- `mutate_scheduler_output` defaults to `true`, and DFlash scheduler mutation is
-  enabled by default through `allow_dflash_scheduler_mutation=true`. The DFlash
-  path is guarded by `min_dflash_adaptive_draft_len=6` and
-  `max_dflash_mutation_output_tokens=32`, and the DFlash proposer is skipped
-  above `max_dflash_proposer_batch_size=8`, so it only applies conservative
-  early-decode/low-concurrency speculation by default. Set `allow_dflash_scheduler_mutation=false`
-  for observe-only/debug runs if a model/kernel combination still shows Ascend
-  metadata or GDN tiling instability. Set `mutate_scheduler_output=false` for
-  observe-only/debug runs on every speculative method.
+- `mutate_scheduler_output` defaults to `true`, but DFlash scheduler mutation is
+  disabled by default through `allow_dflash_scheduler_mutation=false`. With the
+  default DFlash guard, D-Cut does not mutate DFlash scheduler metadata and also
+  skips new DFlash proposals, because Qwen3.5/DFlash Ascend runs have shown
+  target-model ACL graph and proposer metadata failures after adaptive changes.
+  Set `allow_dflash_scheduler_mutation=true` only for controlled experiments on
+  a validated model/kernel combination; that opt-in path is still guarded by
+  `min_dflash_adaptive_draft_len=6`, `max_dflash_mutation_output_tokens=32`,
+  and `max_dflash_proposer_batch_size=8`. Set `mutate_scheduler_output=false`
+  for observe-only/debug runs on every speculative method.
 - `log_concurrency_interval_s` controls periodic server-side INFO logs for
   actual runner concurrency (`active_reqs`, `scheduled_reqs`, `spec_reqs`).
   Set it to `0` to disable these logs. If no D-Cut config is loaded,
@@ -108,12 +109,10 @@ The install-hook lines prove vLLM discovered the plugin without eagerly importin
 Ascend runner modules during CLI setup. The `patched ...` lines appear once the
 Ascend modules load normally. The `ENABLED` line proves the runner accepted the
 config and speculative method. The `ACTIVE`, `plan`, and `apply` lines appear after traffic starts. For
-DFlash, the default `allow_dflash_scheduler_mutation=true` applies guarded
-early-decode mutation with `min_dflash_adaptive_draft_len=6` and
-`max_dflash_mutation_output_tokens=32`; the proposer is also skipped above
-`max_dflash_proposer_batch_size=8` to avoid very low-acceptance high-concurrency
-drafting. Set the allow flag to `false` only when
-collecting observe-only logs or isolating a model/kernel instability.
+DFlash, the default `allow_dflash_scheduler_mutation=false` is fail-closed:
+it avoids DFlash scheduler mutation and skips new DFlash proposals while keeping
+the D-Cut patch installed. Set the allow flag to `true` only when explicitly
+validating guarded DFlash mutation on a stable model/kernel combination.
 `log_runtime_events` should normally remain `false` for throughput benchmarks;
 enable it only for short validation runs if these per-step logs are needed.
 
