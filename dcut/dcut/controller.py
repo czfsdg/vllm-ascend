@@ -84,11 +84,13 @@ class VerifyAdaptiveController:
 
     @classmethod
     def from_env(cls, num_spec_tokens: int, max_batch_size: int) -> VerifyAdaptiveController | None:
-        cfg_path = os.getenv("VLLM_ASCEND_DCUT_CONFIG")
+        cfg_path = os.getenv("VLLM_ASCEND_DCUT_CONFIG") or os.getenv("VLLM_DCUT_CONFIG")
         if cfg_path:
             config = VerifyAdaptiveConfig.from_json(cfg_path)
+            logger.info("D-Cut: loaded config from %s", cfg_path)
         elif _env_enabled("VLLM_ASCEND_ENABLE_DCUT"):
             config = VerifyAdaptiveConfig()
+            logger.info("D-Cut: using built-in default config")
         else:
             return None
         return cls(config, num_spec_tokens, max_batch_size)
@@ -166,6 +168,14 @@ class VerifyAdaptiveController:
                                             self.max_query_len_per_req - 1)
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
+        logger.info(
+            "D-Cut: planned adaptive draft lengths batch_size=%d active_reqs=%d best_Q=%d best_S=%d draft_lens=%s",
+            batch_size,
+            len(active_req_ids),
+            result["best_Q"],
+            result["best_S"],
+            result["draft_lens"],
+        )
 
     def get_adaptive_draft_len(self, req_id: str) -> int | None:
         return self._adaptive_draft_lens.get(req_id)
@@ -174,7 +184,11 @@ class VerifyAdaptiveController:
         self._adaptive_draft_lens.pop(req_id, None)
 
     def _dump_cost_table_if_requested(self) -> None:
-        dump_path = os.getenv("VLLM_ASCEND_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path
+        dump_path = (
+            os.getenv("VLLM_ASCEND_DCUT_COST_TABLE_OUT")
+            or os.getenv("VLLM_DCUT_COST_TABLE_OUT")
+            or self.config.cost_table_dump_path
+        )
         if not dump_path or get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:
             return
         rows = [{"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1000.0}

@@ -13,3 +13,4 @@ where = ["."]
 
 [project.entry-points."vllm.general_plugins"]
 dcut = "dcut:register"
+dcut_adaptive_verify = "dcut:register"

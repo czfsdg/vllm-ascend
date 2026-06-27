@@ -30,7 +30,7 @@ def apply_patch() -> None:
     _patch_runner(NPUModelRunner)
     _patch_worker(NPUWorker)
     _PATCHED = True
-    logger.info("D-Cut plugin monkeypatches installed.")
+    logger.info("D-Cut plugin monkeypatches installed. Enable flag VLLM_ASCEND_ENABLE_DCUT=1 detected.")
 
 
 def _patch_proposer(cls):
@@ -163,7 +163,12 @@ def _dcut_init_controller(runner) -> None:
     runner._dcut_probs_event = torch.npu.Event()
     runner._dcut_probs_pinned = torch.empty(
         (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory)
-    logger.info("D-Cut adaptive verifier enabled.")
+    logger.info(
+        "D-Cut adaptive verifier enabled: method=%s num_spec_tokens=%d max_num_seqs=%d",
+        getattr(runner.speculative_config, "method", None),
+        num_spec,
+        runner.scheduler_config.max_num_seqs,
+    )
 
 
 def _dcut_profile_cost(runner) -> None:
@@ -191,6 +196,13 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
                 new_spec[req_id] = draft_toks[:adaptive_len]
     if tokens_delta <= 0:
         return scheduler_output
+    logger.info(
+        "D-Cut: cut scheduled speculative tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
+        len(scheduler_output.scheduled_spec_decode_tokens),
+        scheduler_output.total_num_scheduled_tokens,
+        scheduler_output.total_num_scheduled_tokens - tokens_delta,
+        tokens_delta,
+    )
     return replace(
         scheduler_output,
         scheduled_spec_decode_tokens=new_spec,
@@ -230,6 +242,11 @@ def _dcut_maybe_process_probs(runner) -> None:
         runner._dcut_probs_event.synchronize()
     runner._dcut_probs_pending = False
     if runner._dcut_active and runner._dcut_controller is not None:
+        logger.info(
+            "D-Cut: processing draft probabilities batch_size=%d active_decode_reqs=%d",
+            runner._dcut_num_reqs,
+            len(runner._dcut_active),
+        )
         runner._dcut_controller.process_draft_output(
             selected_probs=runner._dcut_probs_pinned[: runner._dcut_num_reqs],
             req_ids=runner._dcut_req_ids,
