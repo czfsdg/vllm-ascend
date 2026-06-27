@@ -374,7 +374,7 @@ def _dcut_maybe_process_probs(runner) -> None:
         runner._dcut_probs_event.synchronize()
     runner._dcut_probs_pending = False
     if runner._dcut_active and runner._dcut_controller is not None:
-        logger.info(
+        logger.debug(
             "D-Cut: processing draft probabilities batch_size=%d active_decode_reqs=%d",
             runner._dcut_num_reqs,
             len(runner._dcut_active),

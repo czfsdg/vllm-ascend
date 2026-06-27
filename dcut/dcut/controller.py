@@ -171,17 +171,36 @@ class VerifyAdaptiveController:
 
     def process_draft_output(self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str],
                              batch_size: int) -> None:
-        if not self.config.enabled or not active_draft_req_ids or not self._sorted_bs:
+        if not self.config.enabled:
+            logger.info_once("D-Cut: skip adaptive planning because the controller is disabled.")
+            return
+        if not active_draft_req_ids:
+            logger.debug("D-Cut: skip adaptive planning because there are no active decode requests.")
+            return
+        if not self._sorted_bs:
+            logger.warning_once(
+                "D-Cut: skip adaptive planning because the verifier cost table is empty. "
+                "Check D-Cut cost profiling during engine initialization."
+            )
             return
         n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
         active_indices = [i for i in range(n_rows) if req_ids[i] in active_draft_req_ids]
         if not active_indices:
+            logger.info_once(
+                "D-Cut: skip adaptive planning because captured probability rows do not match active request ids."
+            )
             return
         active_probs = selected_probs[:n_rows].numpy()[active_indices]
         active_req_ids = [req_ids[i] for i in active_indices]
         bs_key = _ceil_lookup(batch_size, self._sorted_bs)
         q_levels = self._sorted_sql_per_bs.get(bs_key) or []
         if not q_levels:
+            logger.warning_once(
+                "D-Cut: skip adaptive planning because no query levels are available for bs_key=%d. "
+                "Known batch-size levels are %s.",
+                bs_key,
+                self._sorted_bs,
+            )
             return
         log_details = self._should_log_decision_details()
         result = choose_query_lens_discrete(active_probs, batch_size, q_levels,
