@@ -89,7 +89,6 @@ def _patch_proposer(cls):
         original_init(self, *args, **kwargs)
         self.needs_draft_probs = False
         self._last_selected_probs = None
-        self._dcut_step_selected_probs = []
 
     def take_last_selected_probs(self):
         probs = getattr(self, "_last_selected_probs", None)
@@ -100,13 +99,11 @@ def _patch_proposer(cls):
     def compute_draft_token_ids(self, hidden_states):
         logits = self.model.logits_processor(self.model.lm_head, hidden_states)
         next_token = _greedy_sample_from_tp_logits(logits)
-        if getattr(self, "needs_draft_probs", False):
+        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
             chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            selected_probs = (chosen - logits.logsumexp(dim=-1)).exp()
-            if getattr(self, "parallel_drafting", False):
-                self._last_selected_probs = selected_probs.view(-1, self.num_speculative_tokens).contiguous()
-            else:
-                _dcut_accumulate_step_probs(self, selected_probs)
+            self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
+                -1, self.num_speculative_tokens
+            ).contiguous()
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -118,18 +115,6 @@ def _patch_proposer(cls):
     cls.take_last_selected_probs = take_last_selected_probs
     cls.compute_draft_token_ids = compute_draft_token_ids
     cls._dcut_patched = True
-
-
-def _dcut_accumulate_step_probs(proposer, selected_probs: torch.Tensor) -> None:
-    step_probs = getattr(proposer, "_dcut_step_selected_probs", [])
-    if step_probs and step_probs[-1].shape != selected_probs.shape:
-        step_probs = []
-    step_probs.append(selected_probs)
-    num_speculative_tokens = proposer.num_speculative_tokens
-    if len(step_probs) >= num_speculative_tokens:
-        proposer._last_selected_probs = torch.stack(step_probs[-num_speculative_tokens:], dim=1).contiguous()
-        step_probs = []
-    proposer._dcut_step_selected_probs = step_probs
 
 
 def _greedy_sample_from_tp_logits(logits: torch.Tensor) -> torch.Tensor:
@@ -165,6 +150,7 @@ def _patch_runner(cls):
         self._dcut_active = set()
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
+        self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
 
     @wraps(original_execute_model)
@@ -254,13 +240,16 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
         if adaptive_len is not None and adaptive_len < len(draft_toks):
             min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
             if adaptive_len < min_draft_len:
-                logger.debug(
-                    "D-Cut: clamping draft cut for req_id=%s from %d to %d "
-                    "to keep the verifier segment compatible with already-accepted tokens.",
-                    req_id,
-                    adaptive_len,
-                    min_draft_len,
-                )
+                warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
+                if warnings < 5:
+                    logger.warning(
+                        "D-Cut: clamping draft cut for req_id=%s from %d to %d "
+                        "to keep the verifier segment compatible with already-accepted tokens.",
+                        req_id,
+                        adaptive_len,
+                        min_draft_len,
+                    )
+                    runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
                 adaptive_len = min(min_draft_len, len(draft_toks))
             if adaptive_len >= len(draft_toks):
                 continue
@@ -322,7 +311,6 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
     if probs is None:
         fallback_prob = _get_fallback_prob()
         if fallback_prob is None:
-            _dcut_clear_active_plans(runner)
             warnings = getattr(runner, "_dcut_missing_probs_warnings", 0)
             if warnings < 5:
                 logger.warning(
@@ -349,28 +337,13 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
     runner._dcut_probs_pending = True
     runner._dcut_num_reqs = num_reqs
     runner._dcut_req_ids = runner.input_batch.req_ids.copy()
-    runner._dcut_active = _dcut_active_decode_req_ids(runner)
+    runner._dcut_active = {
+        runner.input_batch.req_ids[i]
+        for i in range(num_reqs)
+        if runner.input_batch.num_computed_tokens_cpu[i] >= runner.input_batch.num_prompt_tokens[i]
+    }
     runner._dcut_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
     runner._dcut_probs_event.record()
-
-
-def _dcut_active_decode_req_ids(runner) -> set[str]:
-    input_batch = getattr(runner, "input_batch", None)
-    if input_batch is None:
-        return set()
-    return {
-        input_batch.req_ids[i]
-        for i in range(input_batch.num_reqs)
-        if input_batch.num_computed_tokens_cpu[i] >= input_batch.num_prompt_tokens[i]
-    }
-
-
-def _dcut_clear_active_plans(runner) -> None:
-    controller = getattr(runner, "_dcut_controller", None)
-    if controller is None:
-        return
-    for req_id in _dcut_active_decode_req_ids(runner):
-        controller.invalidate(req_id)
 
 
 def _get_fallback_prob() -> float | None:
