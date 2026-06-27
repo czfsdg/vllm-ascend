@@ -139,8 +139,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self.enable_shared_expert_dp = shared_expert_dp_enabled()
-        self.needs_draft_probs = False
-        self._last_selected_probs = None
 
         self.pcp_size = self.runner.pcp_size
         self.dcp_size = self.runner.dcp_size
@@ -953,28 +951,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
 
-    def take_last_selected_probs(self):
-        probs = self._last_selected_probs
-        self._last_selected_probs = None
-        return probs
-
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
         logits = self.model.logits_processor(self.model.lm_head, hidden_states)
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
-            next_token = greedy_sample(logits)
-            if self.needs_draft_probs and self.parallel_drafting:
-                chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-                self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
-                    -1, self.num_speculative_tokens
-                ).contiguous()
-            return next_token
+            return greedy_sample(logits)
         logits = logits.contiguous()
         next_token = greedy_sample(logits)
-        if self.needs_draft_probs and self.parallel_drafting:
-            chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
-                -1, self.num_speculative_tokens
-            ).contiguous()
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
             next_token.shape
         )

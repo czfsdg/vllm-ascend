@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dcut"))
+
 import numpy as np
 import pytest
-
-from vllm_ascend.spec_decode.dcut import VerifyAdaptiveConfig, choose_query_lens_discrete
+from dcut.config import VerifyAdaptiveConfig
+from dcut.controller import choose_query_lens_discrete
 
 
 def test_choose_query_lens_discrete_global_topk():

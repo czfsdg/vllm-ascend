@@ -135,7 +135,6 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.spec_decode.dcut import VerifyAdaptiveController
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -254,109 +253,6 @@ class ExecuteModelState(NamedTuple):
 
 
 class NPUModelRunner(GPUModelRunner):
-
-    def _supports_adaptive_verify(self) -> bool:
-        spec_cfg = self.speculative_config
-        if spec_cfg is None:
-            return False
-        method = getattr(spec_cfg, "method", None)
-        return method == "dflash" or (method == "draft_model" and getattr(spec_cfg, "parallel_drafting", False))
-
-    def _init_verify_adaptive_controller(self) -> None:
-        if not self._supports_adaptive_verify():
-            return
-        num_spec = getattr(self, "num_spec_tokens", 0) or 0
-        if num_spec <= 0:
-            return
-        try:
-            self._verify_adaptive_controller = VerifyAdaptiveController.from_env(
-                num_spec, self.scheduler_config.max_num_seqs)
-        except Exception as exc:
-            logger.error("D-Cut: failed to initialize adaptive verifier; disabled: %s", exc)
-            self._verify_adaptive_controller = None
-            return
-        if self._verify_adaptive_controller is None:
-            return
-        drafter = getattr(self, "drafter", None)
-        if drafter is not None and hasattr(drafter, "needs_draft_probs"):
-            drafter.needs_draft_probs = True
-        self._adaptive_probs_event = torch.npu.Event()
-        self._adaptive_probs_pinned = torch.empty(
-            (self.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=self.pin_memory)
-        logger.info("D-Cut adaptive verifier enabled for Ascend.")
-
-    def profile_adaptive_cost(self) -> None:
-        if self._verify_adaptive_controller is not None:
-            self._verify_adaptive_controller.profile_cost_table(self)
-
-    def _truncate_adaptive_spec_decode_tokens(self, scheduler_output: "SchedulerOutput") -> "SchedulerOutput":
-        ctrl = self._verify_adaptive_controller
-        if ctrl is None or not scheduler_output.scheduled_spec_decode_tokens:
-            return scheduler_output
-        new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
-        new_num_sched = scheduler_output.num_scheduled_tokens.copy()
-        tokens_delta = 0
-        for req_id, draft_toks in list(new_spec.items()):
-            adaptive_len = ctrl.get_adaptive_draft_len(req_id)
-            if adaptive_len is not None and adaptive_len < len(draft_toks):
-                diff = len(draft_toks) - adaptive_len
-                tokens_delta += diff
-                new_num_sched[req_id] -= diff
-                if adaptive_len == 0:
-                    del new_spec[req_id]
-                else:
-                    new_spec[req_id] = draft_toks[:adaptive_len]
-        if tokens_delta <= 0:
-            return scheduler_output
-        return replace(
-            scheduler_output,
-            scheduled_spec_decode_tokens=new_spec,
-            num_scheduled_tokens=new_num_sched,
-            total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - tokens_delta,
-        )
-
-    def _queue_adaptive_probs(self, zeros_only: bool) -> None:
-        if (
-            zeros_only
-            or self._adaptive_probs_pending
-            or self._adaptive_probs_pinned is None
-            or self._adaptive_probs_event is None
-        ):
-            return
-        drafter = getattr(self, "drafter", None)
-        if drafter is None or not hasattr(drafter, "take_last_selected_probs"):
-            return
-        probs = drafter.take_last_selected_probs()
-        if probs is None:
-            return
-        num_reqs = self.input_batch.num_reqs
-        self._adaptive_probs_pending = True
-        self._adaptive_num_reqs = num_reqs
-        self._adaptive_req_ids = self.input_batch.req_ids.copy()
-        self._adaptive_active = {
-            self.input_batch.req_ids[i]
-            for i in range(num_reqs)
-            if self.input_batch.num_computed_tokens_cpu[i] >= self.input_batch.num_prompt_tokens[i]
-        }
-        self._adaptive_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
-        self._adaptive_probs_event.record()
-
-    def _maybe_process_adaptive_probs(self) -> None:
-        if not self._adaptive_probs_pending:
-            return
-        assert self._adaptive_probs_event is not None
-        if not self._adaptive_probs_event.query():
-            self._adaptive_probs_event.synchronize()
-        self._adaptive_probs_pending = False
-        if self._adaptive_active and self._verify_adaptive_controller is not None:
-            assert self._adaptive_probs_pinned is not None
-            self._verify_adaptive_controller.process_draft_output(
-                selected_probs=self._adaptive_probs_pinned[: self._adaptive_num_reqs],
-                req_ids=self._adaptive_req_ids,
-                active_draft_req_ids=self._adaptive_active,
-                batch_size=self._adaptive_num_reqs,
-            )
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
@@ -446,14 +342,6 @@ class NPUModelRunner(GPUModelRunner):
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
-        self._verify_adaptive_controller: VerifyAdaptiveController | None = None
-        self._adaptive_probs_event = None
-        self._adaptive_probs_pinned: torch.Tensor | None = None
-        self._adaptive_probs_pending = False
-        self._adaptive_num_reqs = 0
-        self._adaptive_req_ids: list[str] = []
-        self._adaptive_active: set[str] = set()
-        self._init_verify_adaptive_controller()
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
@@ -2011,8 +1899,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
-        if self._verify_adaptive_controller is not None:
-            self._queue_adaptive_probs(zeros_only)
 
     @torch.inference_mode()
     def execute_model(
@@ -2040,8 +1926,6 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
-
-        scheduler_output = self._truncate_adaptive_spec_decode_tokens(scheduler_output)
        
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -2505,9 +2389,6 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        if self._verify_adaptive_controller is not None:
-            self._maybe_process_adaptive_probs()
-
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
@@ -2629,10 +2510,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
-
-        if self._verify_adaptive_controller is not None:
-            for req_id in scheduler_output.finished_req_ids:
-                self._verify_adaptive_controller.invalidate(req_id)
 
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()

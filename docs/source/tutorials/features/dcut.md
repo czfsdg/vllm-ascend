@@ -1,36 +1,44 @@
-# D-Cut adaptive verifier
+# D-Cut adaptive verifier plugin
 
-D-Cut is an optional plugin-style feature for Ascend speculative decoding. It
-adapts verifier draft length per request by profiling verifier cost and using
-the selected draft-token probabilities from the drafter.
+D-Cut is an optional standalone plugin for Ascend speculative decoding. It adapts
+verifier draft length per request by profiling verifier cost and using the
+selected draft-token probabilities from the drafter.
 
-## Install
+## Install only the plugin
 
-From the vLLM Ascend repository:
+If your `vllm-ascend` is already installed and you cannot reinstall it, install
+only this plugin from the `dcut/` directory:
 
 ```bash
+cd /path/to/vllm-ascend/dcut
 pip install -e .
 ```
 
-## Enable
+This installs the `vllm-ascend-dcut` package and exposes a `dcut` vLLM
+general-plugin entrypoint. It does **not** reinstall `vllm-ascend`.
 
-Enable D-Cut explicitly after installing the editable package:
+## Enable in the startup script
+
+D-Cut is disabled by default. Add the enable flag before starting vLLM:
 
 ```bash
 export VLLM_ASCEND_ENABLE_DCUT=1
 vllm serve <model> --speculative-config '<your speculative config>'
 ```
 
-D-Cut is disabled by default. Installing the package alone does not change
-runtime behavior. The editable install exposes a `dcut` vLLM general-plugin
-entrypoint. In normal vLLM plugin discovery no extra `VLLM_PLUGINS` setting is
-needed. If your environment already restricts vLLM plugins with `VLLM_PLUGINS`,
-append `dcut` to the existing Ascend plugin list rather than replacing it.
+If your environment restricts vLLM plugins through `VLLM_PLUGINS`, append `dcut`
+to the existing list instead of replacing the Ascend plugin entries, for example:
+
+```bash
+export VLLM_PLUGINS="${VLLM_PLUGINS},dcut"
+```
+
+In normal vLLM plugin discovery, setting `VLLM_PLUGINS` is not required.
 
 ## Optional config
 
-The built-in defaults are used when `VLLM_ASCEND_ENABLE_DCUT=1` and no config is
-provided. To override profiling levels or dump the cost table:
+When `VLLM_ASCEND_ENABLE_DCUT=1` and no config is provided, built-in defaults are
+used. To override profiling levels or dump the cost table:
 
 ```bash
 cat > /tmp/dcut_config.json <<'JSON'

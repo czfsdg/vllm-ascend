@@ -7,7 +7,6 @@ import math
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
 from typing import Any
 
 import numpy as np
@@ -15,60 +14,11 @@ import torch
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.logger import logger
 
-from vllm_ascend import envs
+from dcut.config import VerifyAdaptiveConfig
 
 
-@dataclass
-class VerifyAdaptiveConfig:
-    """Config for D-Cut adaptive verifier step-length.
-
-    ``query_len = 1 (anchor) + draft_len``. Unknown JSON keys are ignored.
-    """
-
-    warmup_batch_sizes: list[int] = field(default_factory=list)
-    min_warmup_batch_size: int = 2
-    max_warmup_batch_size: int | None = None
-    query_len_step_per_req: int = 2
-    max_query_len_per_req: int | None = None
-    min_query_len_per_req: int = 2
-    warmup_seq_lens: int = 4096
-    n_warmup_iters: int = 3
-    n_measure_iters: int = 5
-    cost_table_dump_path: str | None = None
-    enabled: bool = True
-
-    @classmethod
-    def from_json(cls, path: str) -> VerifyAdaptiveConfig:
-        with open(path, encoding="utf-8") as f:
-            return cls.from_dict(json.load(f))
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> VerifyAdaptiveConfig:
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
-
-    def validate(self, num_speculative_tokens: int) -> None:
-        eff_max_q = self.max_query_len_per_req or num_speculative_tokens + 1
-        if self.min_query_len_per_req < 2:
-            raise ValueError("min_query_len_per_req must be >= 2.")
-        if self.query_len_step_per_req < 1:
-            raise ValueError("query_len_step_per_req must be >= 1.")
-        if self.min_query_len_per_req > eff_max_q:
-            raise ValueError(
-                f"min_query_len_per_req ({self.min_query_len_per_req}) > "
-                f"effective max_query_len_per_req ({eff_max_q}).")
-        if self.warmup_seq_lens < 1:
-            raise ValueError("warmup_seq_lens must be >= 1.")
-        if self.n_warmup_iters < 0:
-            raise ValueError("n_warmup_iters must be >= 0.")
-        if self.n_measure_iters < 1:
-            raise ValueError("n_measure_iters must be >= 1.")
-        if self.min_warmup_batch_size < 1:
-            raise ValueError("min_warmup_batch_size must be >= 1.")
-        if self.max_warmup_batch_size is not None and self.max_warmup_batch_size < 1:
-            raise ValueError("max_warmup_batch_size must be >= 1.")
-        if any(bs < 1 for bs in self.warmup_batch_sizes):
-            raise ValueError("warmup_batch_sizes entries must be >= 1.")
+def _env_enabled(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
 
 
 def choose_query_lens_discrete(
@@ -88,16 +38,12 @@ def choose_query_lens_discrete(
     order = np.argsort(-flat_gains, kind="stable")
     sorted_seq = seq_ids[order]
     prefix_gain = np.concatenate(([0.0], np.cumsum(flat_gains[order])))
-    total_available = flat_gains.shape[0]
     best_score = -math.inf
     best_q = base_batch_size
     best_s = 0
     records: list[dict[str, Any]] | None = [] if collect_records else None
     for q_level in q_levels:
-        speculative_slots = q_level - base_batch_size
-        if speculative_slots < 0:
-            continue
-        speculative_slots = min(speculative_slots, total_available)
+        speculative_slots = min(max(q_level - base_batch_size, 0), flat_gains.shape[0])
         cost = cost_lookup(q_level)
         if cost <= 0.0:
             continue
@@ -118,7 +64,7 @@ def choose_query_lens_discrete(
 
 
 class VerifyAdaptiveController:
-    """Per-request D-Cut draft-length selector for verifier steps."""
+    """Per-request D-Cut draft-length selector."""
 
     def __init__(self, config: VerifyAdaptiveConfig, num_spec_tokens: int, max_batch_size: int) -> None:
         config.validate(num_spec_tokens)
@@ -138,10 +84,10 @@ class VerifyAdaptiveController:
 
     @classmethod
     def from_env(cls, num_spec_tokens: int, max_batch_size: int) -> VerifyAdaptiveController | None:
-        cfg_path = envs.VLLM_ASCEND_DCUT_CONFIG
+        cfg_path = os.getenv("VLLM_ASCEND_DCUT_CONFIG")
         if cfg_path:
             config = VerifyAdaptiveConfig.from_json(cfg_path)
-        elif envs.VLLM_ASCEND_ENABLE_DCUT:
+        elif _env_enabled("VLLM_ASCEND_ENABLE_DCUT"):
             config = VerifyAdaptiveConfig()
         else:
             return None
@@ -174,23 +120,20 @@ class VerifyAdaptiveController:
                 if max_tokens is not None and num_tokens > max_tokens:
                     continue
                 avg_ms = self._measure_runner(runner, num_tokens)
-                self._cost_table[(batch_size, num_tokens)] = avg_ms / 1e3
+                self._cost_table[(batch_size, num_tokens)] = avg_ms / 1000.0
                 self._sorted_sql_per_bs[batch_size].append(num_tokens)
                 self._cost_records.append({
                     "batch_size": batch_size,
                     "query_len_per_req": query_len,
                     "sum_query_len": num_tokens,
                     "avg_ms": avg_ms,
-                    "cost_s": avg_ms / 1e3,
+                    "cost_s": avg_ms / 1000.0,
                 })
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
-        tp_group = get_tp_group()
-        if tp_group.world_size > 1:
-            self._cost_table = tp_group.broadcast_object(self._cost_table, src=0)
-        logger.info("D-Cut: cost table ready (%d entries).", len(self._cost_table))
         self._dump_cost_table_if_requested()
+        logger.info("D-Cut: cost table ready (%d entries).", len(self._cost_table))
 
     def _measure_runner(self, runner: Any, num_tokens: int) -> float:
         for _ in range(self.config.n_warmup_iters):
@@ -223,8 +166,6 @@ class VerifyAdaptiveController:
                                             self.max_query_len_per_req - 1)
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
-        logger.debug("D-Cut: bs_key=%d best_Q=%d best_S=%d score=%.4f draft_lens=%s", bs_key,
-                     result["best_Q"], result["best_S"], result["best_score"], result["draft_lens"])
 
     def get_adaptive_draft_len(self, req_id: str) -> int | None:
         return self._adaptive_draft_lens.get(req_id)
@@ -233,10 +174,10 @@ class VerifyAdaptiveController:
         self._adaptive_draft_lens.pop(req_id, None)
 
     def _dump_cost_table_if_requested(self) -> None:
-        dump_path = envs.VLLM_ASCEND_DCUT_COST_TABLE_OUT or self.config.cost_table_dump_path
+        dump_path = os.getenv("VLLM_ASCEND_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path
         if not dump_path or get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:
             return
-        rows = [{"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1e3}
+        rows = [{"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1000.0}
                 for (bs, q), cost_s in sorted(self._cost_table.items())]
         payload = {"schema_version": 1, "num_spec_tokens": self.num_spec_tokens,
                    "max_batch_size": self.max_batch_size, "cost_table": rows,
