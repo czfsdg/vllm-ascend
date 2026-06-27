@@ -2,13 +2,15 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dcut"))
 
+import dcut.controller as controller_module
 import numpy as np
 import pytest
 from dcut.config import VerifyAdaptiveConfig
-from dcut.controller import choose_query_lens_discrete
+from dcut.controller import VerifyAdaptiveController, choose_query_lens_discrete
 
 
 def test_choose_query_lens_discrete_global_topk():
@@ -103,3 +105,35 @@ def test_verify_adaptive_config_rejects_invalid_batch_size_step():
 
     with pytest.raises(ValueError, match="batch_size_step"):
         cfg.validate(num_speculative_tokens=4)
+
+
+def test_measure_runner_profiles_target_only(monkeypatch):
+    calls = []
+
+    class FakeRunner:
+
+        def _dummy_run(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            n_warmup_iters=2,
+            n_measure_iters=3,
+            warmup_seq_lens=4096,
+        )
+    )
+    monkeypatch.setattr(
+        controller_module.torch,
+        "npu",
+        SimpleNamespace(synchronize=lambda: None),
+        raising=False,
+    )
+
+    VerifyAdaptiveController._measure_runner(controller, FakeRunner(), 17)
+
+    assert len(calls) == 5
+    assert all(args == (17,) for args, _ in calls)
+    assert all(kwargs["skip_drafter"] is True for _, kwargs in calls)
+    assert all(kwargs["is_profile"] is True for _, kwargs in calls)
+    assert all(kwargs["uniform_decode"] is True for _, kwargs in calls)
+    assert all(kwargs["profile_seq_lens"] == 4096 for _, kwargs in calls)

@@ -160,12 +160,12 @@ class VerifyAdaptiveController:
     def _measure_runner(self, runner: Any, num_tokens: int) -> float:
         for _ in range(self.config.n_warmup_iters):
             runner._dummy_run(num_tokens, uniform_decode=True, is_profile=True,
-                              profile_seq_lens=self.config.warmup_seq_lens)
+                              skip_drafter=True, profile_seq_lens=self.config.warmup_seq_lens)
         torch.npu.synchronize()
         start = time.perf_counter()
         for _ in range(self.config.n_measure_iters):
             runner._dummy_run(num_tokens, uniform_decode=True, is_profile=True,
-                              profile_seq_lens=self.config.warmup_seq_lens)
+                              skip_drafter=True, profile_seq_lens=self.config.warmup_seq_lens)
         torch.npu.synchronize()
         return (time.perf_counter() - start) * 1000.0 / self.config.n_measure_iters
 
