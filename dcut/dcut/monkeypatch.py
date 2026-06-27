@@ -80,6 +80,7 @@ def _ensure_runner_state(runner: Any) -> bool:
     runner.dcut_logged_first_truncation = False
     runner.dcut_logged_safe_mode = False
     runner.dcut_logged_safe_apply_bypass = False
+    runner.dcut_collect_draft_probs = False
     runner.dcut_last_concurrency_log_ts = 0.0
 
     config = _load_config()
@@ -277,13 +278,18 @@ def _update_scheduler_output(scheduler_output: Any, **updates: Any) -> Any:
 
 
 def _apply_dcut_draft_lens(runner: Any, scheduler_output: Any) -> Any:
-    if not _ensure_runner_state(runner) or not runner.dcut_next_draft_lens:
+    if not _ensure_runner_state(runner):
         return scheduler_output
     config = getattr(runner, "dcut_config", None)
     if not getattr(config, "apply_adaptive_lengths", False):
+        runner.dcut_collect_draft_probs = False
+        return scheduler_output
+    mutation_allowed = _scheduler_mutation_allowed(runner, scheduler_output)
+    runner.dcut_collect_draft_probs = mutation_allowed
+    if not runner.dcut_next_draft_lens:
         return scheduler_output
     _debug_scheduler_state(runner, scheduler_output, "before_apply")
-    if not _scheduler_mutation_allowed(runner, scheduler_output):
+    if not mutation_allowed:
         runner.dcut_next_draft_lens = {}
         if not getattr(runner, "dcut_logged_safe_apply_bypass", False):
             speculative_config = getattr(runner, "speculative_config", None)
@@ -405,6 +411,9 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
         return
     if not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False):
         return
+    if not getattr(runner, "dcut_collect_draft_probs", True):
+        runner.dcut_next_draft_lens = {}
+        return
     drafter = getattr(runner, "drafter", None)
     drafter_probs = getattr(drafter, "latest_draft_token_probs", None)
     if drafter_probs is None:
@@ -521,6 +530,7 @@ def _patch_proposer_module(module: Any) -> bool:
             runner is None
             or not _ensure_runner_state(runner)
             or not getattr(getattr(runner, "dcut_config", None), "apply_adaptive_lengths", False)
+            or not getattr(runner, "dcut_collect_draft_probs", True)
         ):
             return original_run_merged_draft(self, *args, **kwargs)
 

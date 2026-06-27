@@ -513,6 +513,33 @@ def test_apply_dcut_draft_lens_applies_dflash_specific_minimum(monkeypatch):
     assert scheduler_output.total_num_scheduled_tokens == 7
 
 
+def test_apply_dcut_draft_lens_disables_prob_collection_after_output_limit(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["r0"], num_output_tokens=[33]),
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12, 13, 14, 15, 16]},
+        num_scheduled_tokens={"r0": 8},
+        total_num_scheduled_tokens=8,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={},
+        speculative_config=SimpleNamespace(method="dflash"),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True,
+            mutate_scheduler_output=True,
+            allow_dflash_scheduler_mutation=True,
+            max_dflash_mutation_output_tokens=32,
+        ),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert not runner.dcut_collect_draft_probs
+
+
 def test_apply_dcut_draft_lens_dflash_bypasses_after_output_limit(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
     scheduler_output = SimpleNamespace(
