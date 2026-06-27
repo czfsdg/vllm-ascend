@@ -702,6 +702,10 @@ def test_patch_runner_skips_dflash_proposer_after_output_limit(monkeypatch):
                 max_dflash_mutation_output_tokens=32,
             )
             self.original_proposer_called = False
+            self.zeroed_draft_tokens = False
+
+        def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
+            self.zeroed_draft_tokens = zeros_only
 
         def execute_model(self, scheduler_output, *args, **kwargs):
             return scheduler_output
@@ -726,6 +730,8 @@ def test_patch_runner_skips_dflash_proposer_after_output_limit(monkeypatch):
     assert result is None
     assert not runner.original_proposer_called
     assert runner.dcut_next_draft_lens == {}
+    assert runner.zeroed_draft_tokens
+    assert runner._draft_token_ids is None
 
 
 def test_patch_runner_skips_dflash_proposer_when_mutation_not_allowed(monkeypatch):
@@ -741,6 +747,10 @@ def test_patch_runner_skips_dflash_proposer_when_mutation_not_allowed(monkeypatc
                 allow_dflash_scheduler_mutation=False,
             )
             self.original_proposer_called = False
+            self.zeroed_draft_tokens = False
+
+        def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
+            self.zeroed_draft_tokens = zeros_only
 
         def execute_model(self, scheduler_output, *args, **kwargs):
             return scheduler_output
@@ -765,6 +775,8 @@ def test_patch_runner_skips_dflash_proposer_when_mutation_not_allowed(monkeypatc
     assert result is None
     assert not runner.original_proposer_called
     assert runner.dcut_next_draft_lens == {}
+    assert runner.zeroed_draft_tokens
+    assert runner._draft_token_ids is None
 
 
 def test_patch_runner_skips_dflash_proposer_after_batch_limit(monkeypatch):
@@ -782,6 +794,10 @@ def test_patch_runner_skips_dflash_proposer_after_batch_limit(monkeypatch):
                 max_dflash_proposer_batch_size=8,
             )
             self.original_proposer_called = False
+            self.zeroed_draft_tokens = False
+
+        def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
+            self.zeroed_draft_tokens = zeros_only
 
         def execute_model(self, scheduler_output, *args, **kwargs):
             return scheduler_output
@@ -805,6 +821,8 @@ def test_patch_runner_skips_dflash_proposer_after_batch_limit(monkeypatch):
 
     assert result is None
     assert not runner.original_proposer_called
+    assert runner.zeroed_draft_tokens
+    assert runner._draft_token_ids is None
 
 
 def test_selected_token_probs_from_logits_matches_softmax(monkeypatch):

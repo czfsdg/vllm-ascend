@@ -514,6 +514,18 @@ def _update_dcut_next_draft_lens(runner: Any, draft_token_ids: Any) -> None:
     logger.debug("D-Cut: selected best_Q=%s draft_lens=%s", result["best_Q"], runner.dcut_next_draft_lens)
 
 
+def _clear_dflash_draft_tokens(runner: Any, scheduler_output: Any) -> None:
+    runner.dcut_next_draft_lens = {}
+    runner._draft_token_ids = None
+    copy_draft_token_ids_to_cpu = getattr(runner, "_copy_draft_token_ids_to_cpu", None)
+    if copy_draft_token_ids_to_cpu is None:
+        return
+    try:
+        copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+    except TypeError:
+        copy_draft_token_ids_to_cpu(scheduler_output)
+
+
 def _patch_runner_module(module: Any) -> bool:
     NPUModelRunner = getattr(module, "NPUModelRunner", None)
     if NPUModelRunner is None or getattr(NPUModelRunner, "_dcut_patched", False):
@@ -534,7 +546,7 @@ def _patch_runner_module(module: Any) -> bool:
         config = getattr(self, "dcut_config", None)
         if scheduler_output is not None and getattr(config, "apply_adaptive_lengths", False):
             if _dflash_proposer_disabled(self, scheduler_output):
-                self.dcut_next_draft_lens = {}
+                _clear_dflash_draft_tokens(self, scheduler_output)
                 return None
             if _scheduler_mutation_allowed(self, scheduler_output):
                 _align_scheduled_spec_decode_tokens_with_counts(scheduler_output)
