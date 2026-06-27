@@ -150,7 +150,6 @@ def _patch_runner(cls):
         self._dcut_active = set()
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
-        self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
 
     @wraps(original_execute_model)
@@ -240,16 +239,13 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
         if adaptive_len is not None and adaptive_len < len(draft_toks):
             min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
             if adaptive_len < min_draft_len:
-                warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
-                if warnings < 5:
-                    logger.warning(
-                        "D-Cut: clamping draft cut for req_id=%s from %d to %d "
-                        "to keep the verifier segment compatible with already-accepted tokens.",
-                        req_id,
-                        adaptive_len,
-                        min_draft_len,
-                    )
-                    runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
+                logger.debug(
+                    "D-Cut: clamping draft cut for req_id=%s from %d to %d "
+                    "to keep the verifier segment compatible with already-accepted tokens.",
+                    req_id,
+                    adaptive_len,
+                    min_draft_len,
+                )
                 adaptive_len = min(min_draft_len, len(draft_toks))
             if adaptive_len >= len(draft_toks):
                 continue
@@ -311,6 +307,7 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
     if probs is None:
         fallback_prob = _get_fallback_prob()
         if fallback_prob is None:
+            _dcut_clear_active_plans(runner)
             warnings = getattr(runner, "_dcut_missing_probs_warnings", 0)
             if warnings < 5:
                 logger.warning(
@@ -337,13 +334,28 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
     runner._dcut_probs_pending = True
     runner._dcut_num_reqs = num_reqs
     runner._dcut_req_ids = runner.input_batch.req_ids.copy()
-    runner._dcut_active = {
-        runner.input_batch.req_ids[i]
-        for i in range(num_reqs)
-        if runner.input_batch.num_computed_tokens_cpu[i] >= runner.input_batch.num_prompt_tokens[i]
-    }
+    runner._dcut_active = _dcut_active_decode_req_ids(runner)
     runner._dcut_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
     runner._dcut_probs_event.record()
+
+
+def _dcut_active_decode_req_ids(runner) -> set[str]:
+    input_batch = getattr(runner, "input_batch", None)
+    if input_batch is None:
+        return set()
+    return {
+        input_batch.req_ids[i]
+        for i in range(input_batch.num_reqs)
+        if input_batch.num_computed_tokens_cpu[i] >= input_batch.num_prompt_tokens[i]
+    }
+
+
+def _dcut_clear_active_plans(runner) -> None:
+    controller = getattr(runner, "_dcut_controller", None)
+    if controller is None:
+        return
+    for req_id in _dcut_active_decode_req_ids(runner):
+        controller.invalidate(req_id)
 
 
 def _get_fallback_prob() -> float | None:
