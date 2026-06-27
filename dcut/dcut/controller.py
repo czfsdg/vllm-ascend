@@ -172,7 +172,7 @@ class VerifyAdaptiveController:
                                             self.max_query_len_per_req - 1)
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
-        logger.debug(
+        logger.info(
             "D-Cut: planned adaptive draft lengths batch_size=%d active_reqs=%d best_Q=%d best_S=%d draft_lens=%s",
             batch_size,
             len(active_req_ids),

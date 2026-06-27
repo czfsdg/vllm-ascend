@@ -262,7 +262,7 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
                 new_spec[req_id] = draft_toks[:adaptive_len]
     if tokens_delta <= 0:
         return scheduler_output
-    logger.debug(
+    logger.info(
         "D-Cut: cut scheduled speculative tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
         len(scheduler_output.scheduled_spec_decode_tokens),
         scheduler_output.total_num_scheduled_tokens,
@@ -365,7 +365,7 @@ def _dcut_maybe_process_probs(runner) -> None:
         runner._dcut_probs_event.synchronize()
     runner._dcut_probs_pending = False
     if runner._dcut_active and runner._dcut_controller is not None:
-        logger.debug(
+        logger.info(
             "D-Cut: processing draft probabilities batch_size=%d active_decode_reqs=%d",
             runner._dcut_num_reqs,
             len(runner._dcut_active),

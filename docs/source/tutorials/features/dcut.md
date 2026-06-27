@@ -90,21 +90,13 @@ D-Cut patched module: vllm_ascend.worker.model_runner_v1
 D-Cut patched module: vllm_ascend.worker.worker
 D-Cut adaptive verifier enabled
 D-Cut: cost table ready
-```
-
-Per-step D-Cut planning and cut logs are emitted at `DEBUG` level to avoid log
-spam in normal serving. Temporarily set `VLLM_LOGGING_LEVEL=DEBUG` when you need
-to verify the exact cut behavior:
-
-```text
 D-Cut: processing draft probabilities
 D-Cut: planned adaptive draft lengths
 D-Cut: cut scheduled speculative tokens
 ```
 
-The `cut scheduled speculative tokens` line is the direct evidence that scheduled
-speculative tokens were truncated. It includes `tokens_before`, `tokens_after`,
-and `delta`.
+The last line is the direct evidence that scheduled speculative tokens were
+truncated. It includes `tokens_before`, `tokens_after`, and `delta`.
 
 For DFlash, if you see `D-Cut adaptive verifier enabled` and `D-Cut: cost table
 ready` but never see `D-Cut: processing draft probabilities`, then D-Cut has not
