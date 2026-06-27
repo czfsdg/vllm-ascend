@@ -59,7 +59,6 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
   "min_score_improvement_ratio": 0.01,
-  "uniform_draft_len": true,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
 JSON
@@ -127,8 +126,3 @@ If full-length choices such as `[7, 7, ...]` come from only a tiny score
 improvement over a shorter candidate, increase `min_score_improvement_ratio`
 (for example, `0.02`). The planner then keeps the shorter candidate unless a
 longer candidate improves score by at least that relative ratio.
-
-By default, `uniform_draft_len=true` applies one draft length to every active
-request in the batch. This avoids mixed per-request draft lengths that can cause
-extra padding or less stable graph shapes on Ascend. Set it to `false` only when
-you want the original per-request top-k allocation.

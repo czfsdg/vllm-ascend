@@ -28,7 +28,6 @@ class VerifyAdaptiveConfig:
     log_decision_interval: int = 1
     log_decision_max_records: int = 8
     min_score_improvement_ratio: float = 0.01
-    uniform_draft_len: bool = True
     enabled: bool = True
 
     @classmethod
