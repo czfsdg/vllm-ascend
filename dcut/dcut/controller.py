@@ -86,7 +86,8 @@ class VerifyAdaptiveController:
         self._adaptive_draft_lens: dict[str, int] = {}
         self._decision_count = 0
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
-            logger.info("D-Cut: bs_levels=%s ql_levels=%s", self._batch_size_levels, self._query_len_levels)
+            logger.info("D-Cut: bs_levels=%s ql_levels=%s budget_ratios=%s",
+                        self._batch_size_levels, self._query_len_levels, self.config.budget_ratios)
 
     @classmethod
     def from_env(cls, num_spec_tokens: int, max_batch_size: int) -> VerifyAdaptiveController | None:
@@ -117,14 +118,24 @@ class VerifyAdaptiveController:
             levels.append(self.max_query_len_per_req)
         return sorted(set(levels))
 
+    def _build_sum_query_len_levels(self, batch_size: int) -> list[int]:
+        max_draft_tokens = batch_size * (self.max_query_len_per_req - 1)
+        if self.config.budget_ratios:
+            levels = [batch_size + math.ceil(ratio * max_draft_tokens)
+                      for ratio in self.config.budget_ratios]
+            full_budget = batch_size + max_draft_tokens
+            if full_budget not in levels:
+                levels.append(full_budget)
+            return sorted(set(levels))
+        return sorted(set(batch_size * query_len for query_len in self._query_len_levels))
+
     def profile_cost_table(self, runner: Any) -> None:
         if not self.config.enabled:
             return
         max_tokens = getattr(runner, "max_num_tokens", None)
         for batch_size in self._batch_size_levels:
             self._sorted_sql_per_bs[batch_size] = []
-            for query_len in self._query_len_levels:
-                num_tokens = batch_size * query_len
+            for num_tokens in self._build_sum_query_len_levels(batch_size):
                 if max_tokens is not None and num_tokens > max_tokens:
                     continue
                 avg_ms = self._measure_runner(runner, num_tokens)
@@ -132,8 +143,11 @@ class VerifyAdaptiveController:
                 self._sorted_sql_per_bs[batch_size].append(num_tokens)
                 self._cost_records.append({
                     "batch_size": batch_size,
-                    "query_len_per_req": query_len,
+                    "query_len_per_req": num_tokens / batch_size,
                     "sum_query_len": num_tokens,
+                    "draft_budget_tokens": max(num_tokens - batch_size, 0),
+                    "draft_budget_ratio": max(num_tokens - batch_size, 0) /
+                    max(batch_size * (self.max_query_len_per_req - 1), 1),
                     "avg_ms": avg_ms,
                     "cost_s": avg_ms / 1000.0,
                 })

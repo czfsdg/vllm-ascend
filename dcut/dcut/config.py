@@ -15,6 +15,7 @@ class VerifyAdaptiveConfig:
     """
 
     warmup_batch_sizes: list[int] = field(default_factory=list)
+    budget_ratios: list[float] = field(default_factory=lambda: [0.25, 0.5, 0.75, 1.0])
     min_warmup_batch_size: int = 2
     max_warmup_batch_size: int | None = None
     query_len_step_per_req: int = 2
@@ -62,6 +63,8 @@ class VerifyAdaptiveConfig:
             raise ValueError("log_decision_max_records must be >= 1.")
         if self.min_score_improvement_ratio < 0.0:
             raise ValueError("min_score_improvement_ratio must be >= 0.0.")
+        if any(ratio <= 0.0 or ratio > 1.0 for ratio in self.budget_ratios):
+            raise ValueError("budget_ratios entries must be in (0.0, 1.0].")
         if self.min_warmup_batch_size < 1:
             raise ValueError("min_warmup_batch_size must be >= 1.")
         if self.max_warmup_batch_size is not None and self.max_warmup_batch_size < 1:
