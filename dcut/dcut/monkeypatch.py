@@ -89,6 +89,7 @@ def _patch_proposer(cls):
         original_init(self, *args, **kwargs)
         self.needs_draft_probs = False
         self._last_selected_probs = None
+        self._dcut_step_selected_probs = []
 
     def take_last_selected_probs(self):
         probs = getattr(self, "_last_selected_probs", None)
@@ -99,11 +100,13 @@ def _patch_proposer(cls):
     def compute_draft_token_ids(self, hidden_states):
         logits = self.model.logits_processor(self.model.lm_head, hidden_states)
         next_token = _greedy_sample_from_tp_logits(logits)
-        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
+        if getattr(self, "needs_draft_probs", False):
             chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
-                -1, self.num_speculative_tokens
-            ).contiguous()
+            selected_probs = (chosen - logits.logsumexp(dim=-1)).exp()
+            if getattr(self, "parallel_drafting", False):
+                self._last_selected_probs = selected_probs.view(-1, self.num_speculative_tokens).contiguous()
+            else:
+                _dcut_accumulate_step_probs(self, selected_probs)
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -115,6 +118,18 @@ def _patch_proposer(cls):
     cls.take_last_selected_probs = take_last_selected_probs
     cls.compute_draft_token_ids = compute_draft_token_ids
     cls._dcut_patched = True
+
+
+def _dcut_accumulate_step_probs(proposer, selected_probs: torch.Tensor) -> None:
+    step_probs = getattr(proposer, "_dcut_step_selected_probs", [])
+    if step_probs and step_probs[-1].shape != selected_probs.shape:
+        step_probs = []
+    step_probs.append(selected_probs)
+    num_speculative_tokens = proposer.num_speculative_tokens
+    if len(step_probs) >= num_speculative_tokens:
+        proposer._last_selected_probs = torch.stack(step_probs[-num_speculative_tokens:], dim=1).contiguous()
+        step_probs = []
+    proposer._dcut_step_selected_probs = step_probs
 
 
 def _greedy_sample_from_tp_logits(logits: torch.Tensor) -> torch.Tensor:
