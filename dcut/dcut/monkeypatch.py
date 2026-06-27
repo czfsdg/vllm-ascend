@@ -119,6 +119,11 @@ def _max_cached_output_tokens(scheduler_output: Any | None) -> int:
     return max((int(value) for value in getattr(cached, "num_output_tokens", []) or []), default=0)
 
 
+def _cached_batch_size(scheduler_output: Any | None) -> int:
+    cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
+    return len(getattr(cached, "req_ids", []) or [])
+
+
 def _dflash_output_limit_exceeded(runner: Any, scheduler_output: Any | None) -> bool:
     speculative_config = getattr(runner, "speculative_config", None)
     if getattr(speculative_config, "method", None) != "dflash":
@@ -126,6 +131,21 @@ def _dflash_output_limit_exceeded(runner: Any, scheduler_output: Any | None) -> 
     config = getattr(runner, "dcut_config", None)
     max_output_tokens = int(getattr(config, "max_dflash_mutation_output_tokens", 32))
     return max_output_tokens > 0 and _max_cached_output_tokens(scheduler_output) > max_output_tokens
+
+
+def _dflash_proposer_batch_limit_exceeded(runner: Any, scheduler_output: Any | None) -> bool:
+    speculative_config = getattr(runner, "speculative_config", None)
+    if getattr(speculative_config, "method", None) != "dflash":
+        return False
+    config = getattr(runner, "dcut_config", None)
+    max_batch_size = int(getattr(config, "max_dflash_proposer_batch_size", 8))
+    return max_batch_size > 0 and _cached_batch_size(scheduler_output) > max_batch_size
+
+
+def _dflash_proposer_disabled(runner: Any, scheduler_output: Any | None) -> bool:
+    return _dflash_output_limit_exceeded(runner, scheduler_output) or _dflash_proposer_batch_limit_exceeded(
+        runner, scheduler_output
+    )
 
 
 def _scheduler_mutation_allowed(runner: Any, scheduler_output: Any | None = None) -> bool:
@@ -137,7 +157,7 @@ def _scheduler_mutation_allowed(runner: Any, scheduler_output: Any | None = None
         return True
     if not getattr(config, "allow_dflash_scheduler_mutation", False):
         return False
-    return not _dflash_output_limit_exceeded(runner, scheduler_output)
+    return not _dflash_proposer_disabled(runner, scheduler_output)
 
 
 def _get_concurrency_log_interval(runner: Any) -> float:
@@ -508,7 +528,7 @@ def _patch_runner_module(module: Any) -> bool:
         scheduler_output = args[2] if len(args) > 2 else kwargs.get("scheduler_output")
         config = getattr(self, "dcut_config", None)
         if scheduler_output is not None and getattr(config, "apply_adaptive_lengths", False):
-            if _dflash_output_limit_exceeded(self, scheduler_output):
+            if _dflash_proposer_disabled(self, scheduler_output):
                 self.dcut_next_draft_lens = {}
                 return None
             if _scheduler_mutation_allowed(self, scheduler_output):

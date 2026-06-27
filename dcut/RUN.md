@@ -44,7 +44,10 @@ dormant.
   path can still reduce work while avoiding very short Ascend/GDN verifier
   segments. It also stops mutating DFlash after any scheduled request exceeds
   `max_dflash_mutation_output_tokens` (default `32`) because long decode GDN
-  paths have shown proposer/metadata instability after scheduler rewrites.
+  paths have shown proposer/metadata instability after scheduler rewrites, and
+  skips DFlash proposal when the cached decode batch exceeds
+  `max_dflash_proposer_batch_size` (default `8`) because high-concurrency DFlash
+  acceptance can collapse and waste draft-model work.
   Lower the DFlash floor or raise the long-decode limit only when explicitly
   testing aggressive truncation on the exact model/kernel combination.
 - `uniform_adaptive_lengths` defaults to `true`, so each batch applies one
@@ -54,8 +57,9 @@ dormant.
 - `mutate_scheduler_output` defaults to `true`, and DFlash scheduler mutation is
   enabled by default through `allow_dflash_scheduler_mutation=true`. The DFlash
   path is guarded by `min_dflash_adaptive_draft_len=6` and
-  `max_dflash_mutation_output_tokens=32`, so it only applies conservative
-  early-decode truncation by default. Set `allow_dflash_scheduler_mutation=false`
+  `max_dflash_mutation_output_tokens=32`, and the DFlash proposer is skipped
+  above `max_dflash_proposer_batch_size=8`, so it only applies conservative
+  early-decode/low-concurrency speculation by default. Set `allow_dflash_scheduler_mutation=false`
   for observe-only/debug runs if a model/kernel combination still shows Ascend
   metadata or GDN tiling instability. Set `mutate_scheduler_output=false` for
   observe-only/debug runs on every speculative method.
@@ -106,7 +110,9 @@ Ascend modules load normally. The `ENABLED` line proves the runner accepted the
 config and speculative method. The `ACTIVE`, `plan`, and `apply` lines appear after traffic starts. For
 DFlash, the default `allow_dflash_scheduler_mutation=true` applies guarded
 early-decode mutation with `min_dflash_adaptive_draft_len=6` and
-`max_dflash_mutation_output_tokens=32`; set the allow flag to `false` only when
+`max_dflash_mutation_output_tokens=32`; the proposer is also skipped above
+`max_dflash_proposer_batch_size=8` to avoid very low-acceptance high-concurrency
+drafting. Set the allow flag to `false` only when
 collecting observe-only logs or isolating a model/kernel instability.
 `log_runtime_events` should normally remain `false` for throughput benchmarks;
 enable it only for short validation runs if these per-step logs are needed.

@@ -17,6 +17,7 @@
   "allow_dflash_scheduler_mutation": true,
   "min_dflash_adaptive_draft_len": 6,
   "max_dflash_mutation_output_tokens": 32,
+  "max_dflash_proposer_batch_size": 8,
   "log_concurrency_interval_s": 5.0,
   "log_runtime_events": false,
   "debug_scheduler_state": false,

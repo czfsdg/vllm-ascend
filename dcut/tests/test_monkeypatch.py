@@ -540,6 +540,34 @@ def test_apply_dcut_draft_lens_disables_prob_collection_after_output_limit(monke
     assert not runner.dcut_collect_draft_probs
 
 
+def test_apply_dcut_draft_lens_disables_prob_collection_after_batch_limit(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[f"r{i}" for i in range(9)], num_output_tokens=[1] * 9),
+        scheduled_spec_decode_tokens={"r0": [10, 11, 12, 13, 14, 15, 16]},
+        num_scheduled_tokens={"r0": 8},
+        total_num_scheduled_tokens=8,
+    )
+    runner = SimpleNamespace(
+        _dcut_state_initialized=True,
+        dcut_adaptive_enabled=True,
+        dcut_next_draft_lens={},
+        speculative_config=SimpleNamespace(method="dflash"),
+        dcut_config=SimpleNamespace(
+            apply_adaptive_lengths=True,
+            mutate_scheduler_output=True,
+            allow_dflash_scheduler_mutation=True,
+            max_dflash_mutation_output_tokens=32,
+            max_dflash_proposer_batch_size=8,
+        ),
+    )
+
+    updated = monkeypatch_module._apply_dcut_draft_lens(runner, scheduler_output)
+
+    assert updated is scheduler_output
+    assert not runner.dcut_collect_draft_probs
+
+
 def test_apply_dcut_draft_lens_dflash_bypasses_after_output_limit(monkeypatch):
     monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
     scheduler_output = SimpleNamespace(
@@ -698,6 +726,46 @@ def test_patch_runner_skips_dflash_proposer_after_output_limit(monkeypatch):
     assert result is None
     assert not runner.original_proposer_called
     assert runner.dcut_next_draft_lens == {}
+
+
+def test_patch_runner_skips_dflash_proposer_after_batch_limit(monkeypatch):
+    monkeypatch_module = import_monkeypatch_with_fake_vllm(monkeypatch)
+
+    class FakeRunner:
+        def __init__(self):
+            self.dcut_next_draft_lens = {}
+            self.speculative_config = SimpleNamespace(method="dflash")
+            self.dcut_config = SimpleNamespace(
+                apply_adaptive_lengths=True,
+                mutate_scheduler_output=True,
+                allow_dflash_scheduler_mutation=True,
+                max_dflash_mutation_output_tokens=32,
+                max_dflash_proposer_batch_size=8,
+            )
+            self.original_proposer_called = False
+
+        def execute_model(self, scheduler_output, *args, **kwargs):
+            return scheduler_output
+
+        def propose_draft_token_ids(self, *args, **kwargs):
+            self.original_proposer_called = True
+            raise AssertionError("DFlash proposer should be skipped above the batch cutoff")
+
+    module = SimpleNamespace(NPUModelRunner=FakeRunner)
+    assert monkeypatch_module._patch_runner_module(module)
+
+    runner = FakeRunner()
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[f"r{i}" for i in range(9)], num_output_tokens=[1] * 9),
+        scheduled_spec_decode_tokens={"r0": [1, 2, 3, 4, 5, 6, 7]},
+        num_scheduled_tokens={"r0": 8},
+        total_num_scheduled_tokens=8,
+    )
+
+    result = runner.propose_draft_token_ids(None, None, scheduler_output)
+
+    assert result is None
+    assert not runner.original_proposer_called
 
 
 def test_selected_token_probs_from_logits_matches_softmax(monkeypatch):
