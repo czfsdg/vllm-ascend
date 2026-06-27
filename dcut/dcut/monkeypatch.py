@@ -1,36 +1,81 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import importlib.abc
+import importlib.machinery
+import sys
 from dataclasses import replace
 from functools import wraps
+from types import ModuleType
 
 import torch
 from vllm.logger import logger
 
 from dcut.controller import VerifyAdaptiveController, dcut_enabled
 
-_PATCHED = False
+_PATCHED_MODULES: set[str] = set()
+_HOOK_INSTALLED = False
+_TARGET_MODULES = {
+    "vllm_ascend.spec_decode.llm_base_proposer",
+    "vllm_ascend.worker.model_runner_v1",
+    "vllm_ascend.worker.worker",
+}
+
+
+class _DcutPatchLoader(importlib.abc.Loader):
+    def __init__(self, fullname: str, wrapped_loader: importlib.abc.Loader) -> None:
+        self.fullname = fullname
+        self.wrapped_loader = wrapped_loader
+
+    def create_module(self, spec):
+        create_module = getattr(self.wrapped_loader, "create_module", None)
+        if create_module is None:
+            return None
+        return create_module(spec)
+
+    def exec_module(self, module: ModuleType) -> None:
+        self.wrapped_loader.exec_module(module)
+        _patch_module(module.__name__, module)
+
+
+class _DcutPatchFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname: str, path, target=None):
+        if fullname not in _TARGET_MODULES or fullname in _PATCHED_MODULES:
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is None or spec.loader is None:
+            return None
+        spec.loader = _DcutPatchLoader(fullname, spec.loader)
+        return spec
 
 
 def apply_patch() -> None:
-    """Install D-Cut monkeypatches into the already-installed vllm-ascend."""
-    global _PATCHED
-    if _PATCHED:
-        return
+    """Install lazy D-Cut monkeypatches into the already-installed vllm-ascend."""
+    global _HOOK_INSTALLED
     if not dcut_enabled():
         logger.info("D-Cut plugin loaded but disabled. Set DCUT_ENABLE=1 or VLLM_ASCEND_ENABLE_DCUT=1 to enable it.")
-        _PATCHED = True
         return
+    if not _HOOK_INSTALLED:
+        sys.meta_path.insert(0, _DcutPatchFinder())
+        _HOOK_INSTALLED = True
+        logger.info("D-Cut lazy monkeypatch hook installed. Enable flag detected.")
+    for module_name in _TARGET_MODULES:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            _patch_module(module_name, module)
 
-    from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-    from vllm_ascend.worker.worker import NPUWorker
 
-    _patch_proposer(AscendSpecDecodeBaseProposer)
-    _patch_runner(NPUModelRunner)
-    _patch_worker(NPUWorker)
-    _PATCHED = True
-    logger.info("D-Cut plugin monkeypatches installed. Enable flag detected.")
+def _patch_module(module_name: str, module: ModuleType) -> None:
+    if module_name in _PATCHED_MODULES:
+        return
+    if module_name == "vllm_ascend.spec_decode.llm_base_proposer":
+        _patch_proposer(module.AscendSpecDecodeBaseProposer)
+    elif module_name == "vllm_ascend.worker.model_runner_v1":
+        _patch_runner(module.NPUModelRunner)
+    elif module_name == "vllm_ascend.worker.worker":
+        _patch_worker(module.NPUWorker)
+    _PATCHED_MODULES.add(module_name)
+    logger.info("D-Cut patched module: %s", module_name)
 
 
 def _patch_proposer(cls):
@@ -113,14 +158,7 @@ def _patch_runner(cls):
     @wraps(original_sample_tokens)
     def sample_tokens(self, grammar_output):
         _dcut_maybe_process_probs(self)
-        output = original_sample_tokens(self, grammar_output)
-        controller = getattr(self, "_dcut_controller", None)
-        if controller is not None and hasattr(self, "execute_model_state"):
-            # Best-effort cleanup happens in execute_model wrapper for scheduled outputs;
-            # finished request ids are not available after original_sample_tokens returns
-            # on all vLLM versions, so stale entries are also harmlessly overwritten.
-            pass
-        return output
+        return original_sample_tokens(self, grammar_output)
 
     @wraps(original_copy_draft)
     def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):

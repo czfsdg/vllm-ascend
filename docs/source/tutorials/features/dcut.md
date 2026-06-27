@@ -15,8 +15,9 @@ pip install -e .
 ```
 
 This installs the `vllm-ascend-dcut` package and exposes both `dcut` and
-`dcut_adaptive_verify` vLLM general-plugin entrypoints. It does **not** reinstall
-`vllm-ascend`.
+`dcut_adaptive_verify` vLLM general-plugin entrypoints. The package provides both
+`register()` and `install()` entrypoint functions for compatibility with existing
+D-Cut launch scripts. It does **not** reinstall `vllm-ascend`.
 
 ## Enable in the startup script
 
@@ -79,10 +80,14 @@ export DCUT_CONFIG=/path/to/vllm-ascend/dcut/verify_adaptive_config.example.json
 
 ## Confirm D-Cut is actually cutting
 
-Check the server log for these lines:
+Check the server log for these lines. The plugin first installs a lazy import hook,
+then patches `vllm_ascend` modules after vLLM imports them normally:
 
 ```text
-D-Cut plugin monkeypatches installed
+D-Cut lazy monkeypatch hook installed
+D-Cut patched module: vllm_ascend.spec_decode.llm_base_proposer
+D-Cut patched module: vllm_ascend.worker.model_runner_v1
+D-Cut patched module: vllm_ascend.worker.worker
 D-Cut adaptive verifier enabled
 D-Cut: cost table ready
 D-Cut: processing draft probabilities

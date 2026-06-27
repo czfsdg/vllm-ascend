@@ -10,3 +10,8 @@ def register() -> None:
 
     apply_patch()
     logger.info("D-Cut plugin registered.")
+
+
+def install() -> None:
+    """Compatibility entrypoint used by some D-Cut launch scripts."""
+    register()
