@@ -635,6 +635,12 @@ class NPUWorker(WorkerBase):
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
+        if hasattr(self.model_runner, "profile_adaptive_cost"):
+            try:
+                self.model_runner.profile_adaptive_cost()
+            except Exception as exc:
+                logger.error("D-Cut: cost profiling failed; falling back to full verification: %s", exc)
+
         if get_ascend_device_type() != AscendDeviceType.A5:
             self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the

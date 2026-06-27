@@ -110,6 +110,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Optional path to a non-sensitive JSON config that enables D-Cut adaptive verifier
+    # step-length for DFlash/PARD speculative decoding. If unset, D-Cut is disabled.
+    "VLLM_ASCEND_DCUT_CONFIG": lambda: os.getenv("VLLM_ASCEND_DCUT_CONFIG", None),
+    # Optional non-sensitive JSON output path for the profiled D-Cut verifier cost table.
+    # If unset, no D-Cut cost table is written.
+    "VLLM_ASCEND_DCUT_COST_TABLE_OUT": lambda: os.getenv("VLLM_ASCEND_DCUT_COST_TABLE_OUT", None),
 }
 
 # end-env-vars-definition
