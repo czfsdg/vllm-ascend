@@ -31,6 +31,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     cfg = VerifyAdaptiveConfig.from_dict({
         "min_warmup_batch_size": 1,
         "query_len_step_per_req": 1,
+        "batch_size_step": 1,
         "budget_ratios": [0.25, 0.5, 1.0],
         "log_decision_details": True,
         "log_decision_interval": 2,
@@ -39,6 +40,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
 
     cfg.validate(num_speculative_tokens=4)
     assert cfg.min_warmup_batch_size == 1
+    assert cfg.batch_size_step == 1
     assert cfg.budget_ratios == [0.25, 0.5, 1.0]
     assert cfg.log_decision_details is True
     assert cfg.log_decision_interval == 2
@@ -93,4 +95,11 @@ def test_verify_adaptive_config_rejects_invalid_budget_ratio():
     cfg = VerifyAdaptiveConfig(budget_ratios=[0.25, 1.5])
 
     with pytest.raises(ValueError, match="budget_ratios"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_batch_size_step():
+    cfg = VerifyAdaptiveConfig(batch_size_step=0)
+
+    with pytest.raises(ValueError, match="batch_size_step"):
         cfg.validate(num_speculative_tokens=4)

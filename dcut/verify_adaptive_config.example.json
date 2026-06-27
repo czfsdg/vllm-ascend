@@ -1,5 +1,6 @@
 {
-  "min_warmup_batch_size": 2,
+  "min_warmup_batch_size": 1,
+  "batch_size_step": 1,
   "budget_ratios": [0.25, 0.5, 0.75, 1.0],
   "max_warmup_batch_size": 64,
   "query_len_step_per_req": 2,

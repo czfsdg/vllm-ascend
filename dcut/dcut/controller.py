@@ -106,7 +106,7 @@ class VerifyAdaptiveController:
         if self.config.warmup_batch_sizes:
             return sorted(set(self.config.warmup_batch_sizes))
         cap = self.config.max_warmup_batch_size or self.max_batch_size
-        levels = list(range(self.config.min_warmup_batch_size, cap + 1, 2))
+        levels = list(range(self.config.min_warmup_batch_size, cap + 1, self.config.batch_size_step))
         if not levels or levels[-1] < cap:
             levels.append(cap)
         return levels

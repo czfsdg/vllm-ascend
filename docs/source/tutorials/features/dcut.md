@@ -49,7 +49,8 @@ used. To override profiling levels or dump the cost table:
 ```bash
 cat > /tmp/dcut_config.json <<'JSON'
 {
-  "min_warmup_batch_size": 2,
+  "min_warmup_batch_size": 1,
+  "batch_size_step": 1,
   "budget_ratios": [0.25, 0.5, 0.75, 1.0],
   "max_warmup_batch_size": 64,
   "query_len_step_per_req": 2,
@@ -122,6 +123,10 @@ To inspect why D-Cut often keeps full draft lengths, set
 selected probabilities and every measured candidate's `(Q, S, cost_ms, score)`.
 Use `log_decision_interval` to print every Nth decision and
 `log_decision_max_records` to cap the number of candidate rows in each log.
+
+`batch_size_step=1` profiles every batch size by default, so a runtime batch
+size of 3 uses budget buckets built for batch size 3 instead of being rounded up
+to the next profiled batch size.
 
 D-Cut uses `budget_ratios` to build batch-level verify budget candidates. For
 example, with `num_speculative_tokens=7`, `batch_size=16`, and
