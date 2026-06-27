@@ -20,19 +20,22 @@ This installs the `vllm-ascend-dcut` package and exposes both `dcut` and
 
 ## Enable in the startup script
 
-D-Cut is disabled by default. Add the enable flag before starting vLLM:
+D-Cut is disabled by default. Add the enable flag before starting vLLM. The
+`DCUT_*` variables avoid vLLM's unknown-environment-variable warning:
 
 ```bash
-export VLLM_ASCEND_ENABLE_DCUT=1
+export DCUT_ENABLE=1
 vllm serve <model> --speculative-config '<your speculative config>'
 ```
 
-If your environment restricts vLLM plugins through `VLLM_PLUGINS`, append either
-`dcut` or `dcut_adaptive_verify` to the existing list instead of replacing the
-Ascend plugin entries, for example:
+`VLLM_ASCEND_ENABLE_DCUT=1` is also accepted for compatibility.
+
+If your environment restricts vLLM plugins through `VLLM_PLUGINS`, include either
+`dcut` or `dcut_adaptive_verify` together with the existing Ascend plugin entries.
+For example, `VLLM_PLUGINS=ascend` is not enough because it filters out D-Cut:
 
 ```bash
-export VLLM_PLUGINS="${VLLM_PLUGINS},dcut_adaptive_verify"
+export VLLM_PLUGINS=ascend,dcut_adaptive_verify
 ```
 
 In normal vLLM plugin discovery, setting `VLLM_PLUGINS` is not required.
@@ -55,15 +58,24 @@ cat > /tmp/dcut_config.json <<'JSON'
 }
 JSON
 
-export VLLM_ASCEND_ENABLE_DCUT=1
-export VLLM_ASCEND_DCUT_CONFIG=/tmp/dcut_config.json
+export DCUT_ENABLE=1
+export DCUT_CONFIG=/tmp/dcut_config.json
 vllm serve <model> --speculative-config '<your speculative config>'
 ```
 
-For compatibility with the reference implementation, `VLLM_DCUT_CONFIG` is also
-accepted as an alias for `VLLM_ASCEND_DCUT_CONFIG`. `VLLM_ASCEND_DCUT_COST_TABLE_OUT`
-and `VLLM_DCUT_COST_TABLE_OUT` can override the cost-table output path without
+For compatibility with the reference implementation, `VLLM_DCUT_CONFIG` and
+`VLLM_ASCEND_DCUT_CONFIG` are also accepted as aliases for `DCUT_CONFIG`.
+`DCUT_COST_TABLE_OUT`, `VLLM_ASCEND_DCUT_COST_TABLE_OUT`, and
+`VLLM_DCUT_COST_TABLE_OUT` can override the cost-table output path without
 changing the JSON file.
+
+## Example startup exports
+
+```bash
+export VLLM_PLUGINS=ascend,dcut_adaptive_verify
+export DCUT_ENABLE=1
+export DCUT_CONFIG=/path/to/vllm-ascend/dcut/verify_adaptive_config.example.json
+```
 
 ## Confirm D-Cut is actually cutting
 

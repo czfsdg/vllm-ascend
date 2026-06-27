@@ -21,6 +21,10 @@ def _env_enabled(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
 
 
+def dcut_enabled() -> bool:
+    return _env_enabled("VLLM_ASCEND_ENABLE_DCUT") or _env_enabled("DCUT_ENABLE")
+
+
 def choose_query_lens_discrete(
     probs: list[list[float]] | np.ndarray,
     base_batch_size: int,
@@ -84,11 +88,11 @@ class VerifyAdaptiveController:
 
     @classmethod
     def from_env(cls, num_spec_tokens: int, max_batch_size: int) -> VerifyAdaptiveController | None:
-        cfg_path = os.getenv("VLLM_ASCEND_DCUT_CONFIG") or os.getenv("VLLM_DCUT_CONFIG")
+        cfg_path = os.getenv("VLLM_ASCEND_DCUT_CONFIG") or os.getenv("VLLM_DCUT_CONFIG") or os.getenv("DCUT_CONFIG")
         if cfg_path:
             config = VerifyAdaptiveConfig.from_json(cfg_path)
             logger.info("D-Cut: loaded config from %s", cfg_path)
-        elif _env_enabled("VLLM_ASCEND_ENABLE_DCUT"):
+        elif dcut_enabled():
             config = VerifyAdaptiveConfig()
             logger.info("D-Cut: using built-in default config")
         else:
@@ -187,6 +191,7 @@ class VerifyAdaptiveController:
         dump_path = (
             os.getenv("VLLM_ASCEND_DCUT_COST_TABLE_OUT")
             or os.getenv("VLLM_DCUT_COST_TABLE_OUT")
+            or os.getenv("DCUT_COST_TABLE_OUT")
             or self.config.cost_table_dump_path
         )
         if not dump_path or get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:

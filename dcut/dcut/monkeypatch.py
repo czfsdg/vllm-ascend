@@ -7,7 +7,7 @@ from functools import wraps
 import torch
 from vllm.logger import logger
 
-from dcut.controller import VerifyAdaptiveController, _env_enabled
+from dcut.controller import VerifyAdaptiveController, dcut_enabled
 
 _PATCHED = False
 
@@ -17,8 +17,8 @@ def apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
-    if not _env_enabled("VLLM_ASCEND_ENABLE_DCUT"):
-        logger.info("D-Cut plugin loaded but disabled. Set VLLM_ASCEND_ENABLE_DCUT=1 to enable it.")
+    if not dcut_enabled():
+        logger.info("D-Cut plugin loaded but disabled. Set DCUT_ENABLE=1 or VLLM_ASCEND_ENABLE_DCUT=1 to enable it.")
         _PATCHED = True
         return
 
@@ -30,7 +30,7 @@ def apply_patch() -> None:
     _patch_runner(NPUModelRunner)
     _patch_worker(NPUWorker)
     _PATCHED = True
-    logger.info("D-Cut plugin monkeypatches installed. Enable flag VLLM_ASCEND_ENABLE_DCUT=1 detected.")
+    logger.info("D-Cut plugin monkeypatches installed. Enable flag detected.")
 
 
 def _patch_proposer(cls):
