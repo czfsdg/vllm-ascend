@@ -97,3 +97,17 @@ D-Cut: cut scheduled speculative tokens
 
 The last line is the direct evidence that scheduled speculative tokens were
 truncated. It includes `tokens_before`, `tokens_after`, and `delta`.
+
+For DFlash, if you see `D-Cut adaptive verifier enabled` and `D-Cut: cost table
+ready` but never see `D-Cut: processing draft probabilities`, then D-Cut has not
+received drafter probabilities yet. In that case enable reduce sampling so the
+plugin can capture real selected-token probabilities:
+
+```bash
+# pass through vLLM additional config
+--additional-config '{"enable_reduce_sample": true}'
+```
+
+For diagnosis only, `DCUT_FALLBACK_PROB=0.5` can force cost-only fallback planning
+when real probabilities are unavailable. Real D-Cut decisions should use
+`enable_reduce_sample=true`.

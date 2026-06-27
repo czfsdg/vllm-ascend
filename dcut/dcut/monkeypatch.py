@@ -148,6 +148,7 @@ def _patch_runner(cls):
         self._dcut_num_reqs = 0
         self._dcut_req_ids = []
         self._dcut_active = set()
+        self._dcut_missing_probs_warnings = 0
         _dcut_init_controller(self)
 
     @wraps(original_execute_model)
@@ -201,6 +202,16 @@ def _dcut_init_controller(runner) -> None:
     runner._dcut_probs_event = torch.npu.Event()
     runner._dcut_probs_pinned = torch.empty(
         (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory)
+    if (
+        getattr(runner.speculative_config, "method", None) == "dflash"
+        and not getattr(getattr(runner, "ascend_config", None), "enable_reduce_sample", False)
+    ):
+        logger.warning(
+            "D-Cut: dflash is running with enable_reduce_sample=False. "
+            "Selected draft probabilities may be unavailable, so D-Cut cannot plan/cut. "
+            "Enable it with --additional-config '{\"enable_reduce_sample\": true}' "
+            "or set DCUT_FALLBACK_PROB for cost-only fallback diagnostics."
+        )
     logger.info(
         "D-Cut adaptive verifier enabled: method=%s num_spec_tokens=%d max_num_seqs=%d",
         getattr(runner.speculative_config, "method", None),
@@ -259,7 +270,27 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
         return
     probs = drafter.take_last_selected_probs()
     if probs is None:
-        return
+        fallback_prob = _get_fallback_prob()
+        if fallback_prob is None:
+            warnings = getattr(runner, "_dcut_missing_probs_warnings", 0)
+            if warnings < 5:
+                logger.warning(
+                    "D-Cut: no selected draft probabilities captured for this step; skip adaptive cut. "
+                    "For dflash, enable --additional-config '{\"enable_reduce_sample\": true}' "
+                    "to use real probabilities, or set DCUT_FALLBACK_PROB to test cost-only cutting."
+                )
+                runner._dcut_missing_probs_warnings = warnings + 1
+            return
+        probs = torch.full(
+            (runner.input_batch.num_reqs, runner.num_spec_tokens),
+            fallback_prob,
+            dtype=torch.float32,
+            device=runner.device,
+        )
+        logger.warning(
+            "D-Cut: using fallback draft probability %.4f because real selected probabilities were unavailable.",
+            fallback_prob,
+        )
     num_reqs = runner.input_batch.num_reqs
     runner._dcut_probs_pending = True
     runner._dcut_num_reqs = num_reqs
@@ -271,6 +302,18 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
     }
     runner._dcut_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
     runner._dcut_probs_event.record()
+
+
+def _get_fallback_prob() -> float | None:
+    import os
+
+    raw_value = os.getenv("DCUT_FALLBACK_PROB")
+    if raw_value is None:
+        return None
+    value = float(raw_value)
+    if value <= 0.0 or value > 1.0:
+        raise ValueError("DCUT_FALLBACK_PROB must be in the range (0, 1].")
+    return value
 
 
 def _dcut_maybe_process_probs(runner) -> None:
