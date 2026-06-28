@@ -87,6 +87,7 @@ class VerifyAdaptiveController:
         self._decision_count = 0
         self._verifier_timing_count = 0
         self._attention_query_shape_count = 0
+        self._attention_timing_count = 0
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
             logger.info("D-Cut: bs_levels=%s ql_levels=%s budget_ratios=%s",
                         self._batch_size_levels, self._query_len_levels, self.config.budget_ratios)
@@ -271,6 +272,12 @@ class VerifyAdaptiveController:
             return False
         self._attention_query_shape_count += 1
         return (self._attention_query_shape_count - 1) % self.config.log_attention_query_shape_interval == 0
+
+    def should_log_attention_timing(self) -> bool:
+        if not self.config.log_attention_timing:
+            return False
+        self._attention_timing_count += 1
+        return (self._attention_timing_count - 1) % self.config.log_attention_timing_interval == 0
 
     def _should_log_decision_details(self) -> bool:
         if not self.config.log_decision_details:

@@ -64,6 +64,8 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_verifier_timing_interval": 1,
   "log_attention_query_shape": true,
   "log_attention_query_shape_interval": 1,
+  "log_attention_timing": true,
+  "log_attention_timing_interval": 1,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -95,6 +97,7 @@ then patches `vllm_ascend` modules after vLLM imports them normally:
 
 ```text
 D-Cut lazy monkeypatch hook installed
+D-Cut patched module: vllm_ascend.attention.attention_v1
 D-Cut patched module: vllm_ascend.spec_decode.llm_base_proposer
 D-Cut patched module: vllm_ascend.worker.model_runner_v1
 D-Cut patched module: vllm_ascend.worker.worker
@@ -137,6 +140,12 @@ Set `log_attention_query_shape=true` to print the query lengths passed into
 attention metadata (`num_tokens`, `num_tokens_padded`, `max_query_len`, and
 `query_lens`). Use this to verify whether the attention path still computes a
 fixed or padded query shape after D-Cut truncates speculative tokens.
+
+Set `log_attention_timing=true` to synchronize around each Ascend attention
+backend call and print aggregate attention time for the verifier step. This is
+heavier than verifier-step timing because it synchronizes per attention layer,
+so only enable it for short diagnostics and increase
+`log_attention_timing_interval` for longer runs.
 
 `batch_size_step=1` profiles every batch size by default, so a runtime batch
 size of 3 uses budget buckets built for batch size 3 instead of being rounded up

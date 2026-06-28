@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import contextvars
 import importlib.abc
 import importlib.machinery
 import sys
@@ -17,10 +18,14 @@ from dcut.controller import VerifyAdaptiveController, dcut_enabled
 _PATCHED_MODULES: set[str] = set()
 _HOOK_INSTALLED = False
 _TARGET_MODULES = {
+    "vllm_ascend.attention.attention_v1",
     "vllm_ascend.spec_decode.llm_base_proposer",
     "vllm_ascend.worker.model_runner_v1",
     "vllm_ascend.worker.worker",
 }
+_ATTENTION_TIMING_CONTEXT: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "dcut_attention_timing_context", default=None
+)
 
 
 class _DcutPatchLoader(importlib.abc.Loader):
@@ -69,7 +74,9 @@ def apply_patch() -> None:
 def _patch_module(module_name: str, module: ModuleType) -> None:
     if module_name in _PATCHED_MODULES:
         return
-    if module_name == "vllm_ascend.spec_decode.llm_base_proposer":
+    if module_name == "vllm_ascend.attention.attention_v1":
+        _patch_attention_backend(module)
+    elif module_name == "vllm_ascend.spec_decode.llm_base_proposer":
         _patch_proposer(module.AscendSpecDecodeBaseProposer)
     elif module_name == "vllm_ascend.worker.model_runner_v1":
         _patch_runner(module.NPUModelRunner)
@@ -118,6 +125,21 @@ def _patch_proposer(cls):
     cls._dcut_patched = True
 
 
+def _patch_attention_backend(module: ModuleType) -> None:
+    for class_name in ("AscendAttentionBackendImpl", "AscendC8AttentionBackendImpl"):
+        cls = getattr(module, class_name, None)
+        if cls is None or getattr(cls, "_dcut_attention_timing_patched", False):
+            continue
+        original_forward = cls.forward
+
+        @wraps(original_forward)
+        def forward(self, *args, __dcut_original=original_forward, __dcut_class_name=class_name, **kwargs):
+            return _dcut_time_attention_forward(__dcut_original, __dcut_class_name, self, args, kwargs)
+
+        cls.forward = forward
+        cls._dcut_attention_timing_patched = True
+
+
 def _greedy_sample_from_tp_logits(logits: torch.Tensor) -> torch.Tensor:
     from vllm.distributed.parallel_state import get_tp_group
 
@@ -159,14 +181,19 @@ def _patch_runner(cls):
     @wraps(original_execute_model)
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
-        if _dcut_should_time_verifier(self, scheduler_output):
+        time_verifier = _dcut_should_time_verifier(self, scheduler_output)
+        attention_timing_token = _dcut_start_attention_timing(self, scheduler_output)
+        if time_verifier:
             torch.npu.synchronize()
             start = time.perf_counter()
+        try:
             result = original_execute_model(self, scheduler_output, intermediate_tensors)
-            torch.npu.synchronize()
-            _dcut_log_verifier_timing(scheduler_output, (time.perf_counter() - start) * 1000.0)
-            return result
-        return original_execute_model(self, scheduler_output, intermediate_tensors)
+        finally:
+            if time_verifier:
+                torch.npu.synchronize()
+                _dcut_log_verifier_timing(scheduler_output, (time.perf_counter() - start) * 1000.0)
+            _dcut_finish_attention_timing(scheduler_output, attention_timing_token)
+        return result
 
     @wraps(original_sample_tokens)
     def sample_tokens(self, grammar_output):
@@ -224,6 +251,72 @@ def _dcut_to_int_list(values) -> list[int]:
     if hasattr(values, "tolist"):
         values = values.tolist()
     return [int(value) for value in values]
+
+
+def _dcut_start_attention_timing(runner, scheduler_output):
+    controller = getattr(runner, "_dcut_controller", None)
+    if (
+        controller is None
+        or not scheduler_output.scheduled_spec_decode_tokens
+        or not controller.should_log_attention_timing()
+    ):
+        return None
+    spec_lens = [len(tokens) for tokens in scheduler_output.scheduled_spec_decode_tokens.values()]
+    context = {
+        "elapsed_ms": 0.0,
+        "calls": 0,
+        "query_tokens": 0,
+        "max_query_tokens": 0,
+        "impls": {},
+        "spec_tokens": sum(spec_lens),
+        "spec_reqs": len(spec_lens),
+    }
+    return _ATTENTION_TIMING_CONTEXT.set(context)
+
+
+def _dcut_finish_attention_timing(scheduler_output, token) -> None:
+    if token is None:
+        return
+    context = _ATTENTION_TIMING_CONTEXT.get()
+    _ATTENTION_TIMING_CONTEXT.reset(token)
+    if context is None:
+        return
+    spec_reqs = context["spec_reqs"]
+    avg_spec_len = context["spec_tokens"] / spec_reqs if spec_reqs else 0.0
+    logger.info(
+        "D-Cut attention timing: elapsed_ms=%.3f calls=%d query_tokens=%d "
+        "max_query_tokens=%d total_tokens=%d spec_reqs=%d spec_tokens=%d "
+        "avg_spec_len=%.2f num_reqs=%d impls=%s",
+        context["elapsed_ms"],
+        context["calls"],
+        context["query_tokens"],
+        context["max_query_tokens"],
+        scheduler_output.total_num_scheduled_tokens,
+        spec_reqs,
+        context["spec_tokens"],
+        avg_spec_len,
+        len(scheduler_output.num_scheduled_tokens),
+        context["impls"],
+    )
+
+
+def _dcut_time_attention_forward(original_forward, class_name: str, attention_impl, args, kwargs):
+    context = _ATTENTION_TIMING_CONTEXT.get()
+    if context is None:
+        return original_forward(attention_impl, *args, **kwargs)
+    query = _dcut_get_call_value(args, kwargs, 1, "query")
+    query_tokens = int(query.shape[0]) if query is not None and hasattr(query, "shape") else 0
+    torch.npu.synchronize()
+    start = time.perf_counter()
+    result = original_forward(attention_impl, *args, **kwargs)
+    torch.npu.synchronize()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    context["elapsed_ms"] += elapsed_ms
+    context["calls"] += 1
+    context["query_tokens"] += query_tokens
+    context["max_query_tokens"] = max(context["max_query_tokens"], query_tokens)
+    context["impls"][class_name] = context["impls"].get(class_name, 0) + 1
+    return result
 
 
 def _dcut_log_attention_query_shape(runner, args, kwargs) -> None:

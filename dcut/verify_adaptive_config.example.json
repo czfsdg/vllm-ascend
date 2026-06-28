@@ -14,6 +14,8 @@
   "log_verifier_timing_interval": 1,
   "log_attention_query_shape": true,
   "log_attention_query_shape_interval": 1,
+  "log_attention_timing": true,
+  "log_attention_timing_interval": 1,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
