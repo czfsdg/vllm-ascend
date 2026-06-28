@@ -18,6 +18,8 @@
   "log_attention_timing_interval": 1,
   "log_verifier_breakdown": true,
   "log_verifier_breakdown_interval": 1,
+  "log_model_forward_module_breakdown": true,
+  "log_model_forward_module_top_k": 12,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }

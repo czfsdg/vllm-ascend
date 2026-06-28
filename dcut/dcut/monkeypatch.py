@@ -187,10 +187,12 @@ def _patch_runner(cls):
         self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
         _dcut_patch_model_compute_logits(self)
+        _dcut_patch_model_forward_modules(self)
 
     @wraps(original_execute_model)
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         _dcut_patch_model_compute_logits(self)
+        _dcut_patch_model_forward_modules(self)
         scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
         time_verifier = _dcut_should_time_verifier(self, scheduler_output)
         breakdown_token = _dcut_start_verifier_breakdown(self, scheduler_output)
@@ -336,6 +338,78 @@ def _dcut_patch_model_compute_logits(runner) -> None:
     model._dcut_compute_logits_patched = True
 
 
+def _dcut_patch_model_forward_modules(runner) -> None:
+    controller = getattr(runner, "_dcut_controller", None)
+    model = getattr(runner, "model", None)
+    if (
+        controller is None
+        or model is None
+        or not controller.config.log_model_forward_module_breakdown
+        or getattr(model, "_dcut_module_timing_patched", False)
+    ):
+        return
+    handles = []
+    for name, module in model.named_modules():
+        if not name or not _dcut_should_time_module(module):
+            continue
+        handles.append(module.register_forward_pre_hook(_dcut_make_module_pre_hook(name)))
+        handles.append(module.register_forward_hook(_dcut_make_module_post_hook(name)))
+    model._dcut_module_timing_handles = handles
+    model._dcut_module_timing_patched = True
+    logger.info("D-Cut: installed model-forward module timing hooks count=%d", len(handles) // 2)
+
+
+def _dcut_should_time_module(module) -> bool:
+    try:
+        next(module.children())
+        return False
+    except StopIteration:
+        return True
+
+
+def _dcut_make_module_pre_hook(name: str):
+    def pre_hook(module, _inputs):
+        context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+        if context is None:
+            return
+        torch.npu.synchronize()
+        context["module_stack"].setdefault(id(module), []).append(time.perf_counter())
+
+    return pre_hook
+
+
+def _dcut_make_module_post_hook(name: str):
+    def post_hook(module, _inputs, _output):
+        context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+        if context is None:
+            return
+        stack = context["module_stack"].get(id(module))
+        if not stack:
+            return
+        torch.npu.synchronize()
+        elapsed_ms = (time.perf_counter() - stack.pop()) * 1000.0
+        class_name = module.__class__.__name__
+        module_name = f"{name}:{class_name}"
+        context["module_classes"][class_name] = context["module_classes"].get(class_name, 0.0) + elapsed_ms
+        context["module_names"][module_name] = context["module_names"].get(module_name, 0.0) + elapsed_ms
+
+    return post_hook
+
+
+def _dcut_verifier_breakdown_top_k() -> int:
+    context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+    if context is None:
+        return 0
+    return context["module_top_k"]
+
+
+def _dcut_top_timing_items(values: dict[str, float], top_k: int) -> list[tuple[str, float]]:
+    if not values or top_k < 1:
+        return []
+    top_items = sorted(values.items(), key=lambda item: item[1], reverse=True)[:top_k]
+    return [(name, round(value, 3)) for name, value in top_items]
+
+
 def _dcut_start_verifier_breakdown(runner, scheduler_output):
     controller = getattr(runner, "_dcut_controller", None)
     if (
@@ -346,7 +420,11 @@ def _dcut_start_verifier_breakdown(runner, scheduler_output):
         return None
     spec_lens = [len(tokens) for tokens in scheduler_output.scheduled_spec_decode_tokens.values()]
     context = {
+        "module_classes": {},
+        "module_names": {},
+        "module_stack": {},
         "phases": {},
+        "module_top_k": controller.config.log_model_forward_module_top_k,
         "spec_tokens": sum(spec_lens),
         "spec_reqs": len(spec_lens),
     }
@@ -365,9 +443,11 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
     untracked_ms = total_elapsed_ms - phase_sum_ms
     spec_reqs = context["spec_reqs"]
     avg_spec_len = context["spec_tokens"] / spec_reqs if spec_reqs else 0.0
+    top_k = _dcut_verifier_breakdown_top_k()
     logger.info(
         "D-Cut verifier breakdown: total_ms=%.3f tracked_ms=%.3f untracked_ms=%.3f "
-        "total_tokens=%d spec_reqs=%d spec_tokens=%d avg_spec_len=%.2f num_reqs=%d phases=%s",
+        "total_tokens=%d spec_reqs=%d spec_tokens=%d avg_spec_len=%.2f num_reqs=%d "
+        "phases=%s module_classes=%s module_names=%s",
         total_elapsed_ms,
         phase_sum_ms,
         untracked_ms,
@@ -377,6 +457,8 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
         avg_spec_len,
         len(scheduler_output.num_scheduled_tokens),
         {name: round(value, 3) for name, value in sorted(phases.items())},
+        _dcut_top_timing_items(context["module_classes"], top_k),
+        _dcut_top_timing_items(context["module_names"], top_k),
     )
 
 

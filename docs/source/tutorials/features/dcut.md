@@ -68,6 +68,8 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_attention_timing_interval": 1,
   "log_verifier_breakdown": true,
   "log_verifier_breakdown_interval": 1,
+  "log_model_forward_module_breakdown": true,
+  "log_model_forward_module_top_k": 12,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -153,7 +155,11 @@ Set `log_verifier_breakdown=true` to synchronize and time selected runner
 phases inside the verifier step (`update_states`, input preparation, attention
 metadata building, preprocessing, model forward, and logits computation). The log also reports
 tracked and untracked time so you can identify whether latency is dominated by
-model forward, metadata/preprocessing, or code outside the patched phases.
+model forward, metadata/preprocessing, or code outside the patched phases. If
+`log_model_forward_module_breakdown=true`, D-Cut also installs leaf-module
+forward hooks and prints the top module classes/names inside model forward; this
+is very expensive because it synchronizes per module call, so use it only for
+short single-run diagnostics.
 
 `batch_size_step=1` profiles every batch size by default, so a runtime batch
 size of 3 uses budget buckets built for batch size 3 instead of being rounded up

@@ -45,6 +45,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_attention_timing_interval": 5,
         "log_verifier_breakdown": True,
         "log_verifier_breakdown_interval": 6,
+        "log_model_forward_module_breakdown": True,
+        "log_model_forward_module_top_k": 7,
         "unknown": "ignored",
     })
 
@@ -62,6 +64,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_attention_timing_interval == 5
     assert cfg.log_verifier_breakdown is True
     assert cfg.log_verifier_breakdown_interval == 6
+    assert cfg.log_model_forward_module_breakdown is True
+    assert cfg.log_model_forward_module_top_k == 7
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -127,6 +131,13 @@ def test_verify_adaptive_config_rejects_invalid_verifier_breakdown_interval():
     cfg = VerifyAdaptiveConfig(log_verifier_breakdown=True, log_verifier_breakdown_interval=0)
 
     with pytest.raises(ValueError, match="log_verifier_breakdown_interval"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_model_forward_module_top_k():
+    cfg = VerifyAdaptiveConfig(log_model_forward_module_breakdown=True, log_model_forward_module_top_k=0)
+
+    with pytest.raises(ValueError, match="log_model_forward_module_top_k"):
         cfg.validate(num_speculative_tokens=4)
 
 
