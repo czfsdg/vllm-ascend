@@ -138,6 +138,7 @@ def _patch_runner(cls):
     original_execute_model = cls.execute_model
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
+    original_dummy_run = getattr(cls, "_dummy_run", None)
 
     @wraps(original_init)
     def __init__(self, *args, **kwargs):
@@ -176,10 +177,25 @@ def _patch_runner(cls):
         original_copy_draft(self, scheduler_output, zeros_only=zeros_only)
         _dcut_queue_probs(self, zeros_only)
 
+    if original_dummy_run is not None:
+
+        @wraps(original_dummy_run)
+        def _dummy_run(self, *args, skip_drafter=False, **kwargs):
+            if not skip_drafter:
+                return original_dummy_run(self, *args, **kwargs)
+            drafter = getattr(self, "drafter", None)
+            self.drafter = None
+            try:
+                return original_dummy_run(self, *args, **kwargs)
+            finally:
+                self.drafter = drafter
+
     cls.__init__ = __init__
     cls.execute_model = execute_model
     cls.sample_tokens = sample_tokens
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
+    if original_dummy_run is not None:
+        cls._dummy_run = _dummy_run
     cls.profile_dcut_cost = _dcut_profile_cost
     cls._dcut_patched = True
 
