@@ -10,6 +10,8 @@
   "log_decision_details": true,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
+  "log_verifier_timing": true,
+  "log_verifier_timing_interval": 1,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }

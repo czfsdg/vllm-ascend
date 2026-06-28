@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.abc
 import importlib.machinery
 import sys
+import time
 from dataclasses import replace
 from functools import wraps
 from types import ModuleType
@@ -156,6 +157,13 @@ def _patch_runner(cls):
     @wraps(original_execute_model)
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
+        if _dcut_should_time_verifier(self, scheduler_output):
+            torch.npu.synchronize()
+            start = time.perf_counter()
+            result = original_execute_model(self, scheduler_output, intermediate_tensors)
+            torch.npu.synchronize()
+            _dcut_log_verifier_timing(scheduler_output, (time.perf_counter() - start) * 1000.0)
+            return result
         return original_execute_model(self, scheduler_output, intermediate_tensors)
 
     @wraps(original_sample_tokens)
@@ -174,6 +182,31 @@ def _patch_runner(cls):
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     cls.profile_dcut_cost = _dcut_profile_cost
     cls._dcut_patched = True
+
+
+def _dcut_should_time_verifier(runner, scheduler_output) -> bool:
+    controller = getattr(runner, "_dcut_controller", None)
+    if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
+        return False
+    return controller.should_log_verifier_timing()
+
+
+def _dcut_log_verifier_timing(scheduler_output, elapsed_ms: float) -> None:
+    spec_lens = [len(tokens) for tokens in scheduler_output.scheduled_spec_decode_tokens.values()]
+    spec_tokens = sum(spec_lens)
+    spec_reqs = len(spec_lens)
+    avg_spec_len = spec_tokens / spec_reqs if spec_reqs else 0.0
+    logger.info(
+        "D-Cut verifier timing: elapsed_ms=%.3f total_tokens=%d spec_reqs=%d "
+        "spec_tokens=%d avg_spec_len=%.2f max_spec_len=%d num_reqs=%d",
+        elapsed_ms,
+        scheduler_output.total_num_scheduled_tokens,
+        spec_reqs,
+        spec_tokens,
+        avg_spec_len,
+        max(spec_lens, default=0),
+        len(scheduler_output.num_scheduled_tokens),
+    )
 
 
 def _supports_dcut(runner) -> bool:

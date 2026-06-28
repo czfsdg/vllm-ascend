@@ -85,6 +85,7 @@ class VerifyAdaptiveController:
         self._sorted_sql_per_bs: dict[int, list[int]] = {}
         self._adaptive_draft_lens: dict[str, int] = {}
         self._decision_count = 0
+        self._verifier_timing_count = 0
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
             logger.info("D-Cut: bs_levels=%s ql_levels=%s budget_ratios=%s",
                         self._batch_size_levels, self._query_len_levels, self.config.budget_ratios)
@@ -257,6 +258,12 @@ class VerifyAdaptiveController:
             json.dump(payload, f, indent=2, sort_keys=True)
             f.write("\n")
         os.replace(tmp_path, dump_path)
+
+    def should_log_verifier_timing(self) -> bool:
+        if not self.config.log_verifier_timing:
+            return False
+        self._verifier_timing_count += 1
+        return (self._verifier_timing_count - 1) % self.config.log_verifier_timing_interval == 0
 
     def _should_log_decision_details(self) -> bool:
         if not self.config.log_decision_details:

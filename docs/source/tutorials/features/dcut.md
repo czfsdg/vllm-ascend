@@ -60,6 +60,8 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_decision_details": true,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
+  "log_verifier_timing": true,
+  "log_verifier_timing_interval": 1,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -123,6 +125,11 @@ To inspect why D-Cut often keeps full draft lengths, set
 selected probabilities and every measured candidate's `(Q, S, cost_ms, score)`.
 Use `log_decision_interval` to print every Nth decision and
 `log_decision_max_records` to cap the number of candidate rows in each log.
+
+Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
+logs with the post-cut scheduled token count and speculative token count. This
+adds an NPU synchronization around each logged step, so use
+`log_verifier_timing_interval` to reduce overhead during longer benchmark runs.
 
 `batch_size_step=1` profiles every batch size by default, so a runtime batch
 size of 3 uses budget buckets built for batch size 3 instead of being rounded up

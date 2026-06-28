@@ -37,6 +37,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "budget_ratios": [0.25, 0.5, 1.0],
         "log_decision_details": True,
         "log_decision_interval": 2,
+        "log_verifier_timing": True,
+        "log_verifier_timing_interval": 3,
         "unknown": "ignored",
     })
 
@@ -46,6 +48,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.budget_ratios == [0.25, 0.5, 1.0]
     assert cfg.log_decision_details is True
     assert cfg.log_decision_interval == 2
+    assert cfg.log_verifier_timing is True
+    assert cfg.log_verifier_timing_interval == 3
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -86,6 +90,13 @@ def test_verify_adaptive_config_rejects_invalid_decision_log_interval():
         cfg.validate(num_speculative_tokens=4)
 
 
+def test_verify_adaptive_config_rejects_invalid_verifier_timing_interval():
+    cfg = VerifyAdaptiveConfig(log_verifier_timing=True, log_verifier_timing_interval=0)
+
+    with pytest.raises(ValueError, match="log_verifier_timing_interval"):
+        cfg.validate(num_speculative_tokens=4)
+
+
 def test_verify_adaptive_config_rejects_invalid_min_score_improvement_ratio():
     cfg = VerifyAdaptiveConfig(min_score_improvement_ratio=-0.1)
 
@@ -106,6 +117,33 @@ def test_verify_adaptive_config_rejects_invalid_batch_size_step():
     with pytest.raises(ValueError, match="batch_size_step"):
         cfg.validate(num_speculative_tokens=4)
 
+
+
+def test_should_log_verifier_timing_respects_interval():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            log_verifier_timing=True,
+            log_verifier_timing_interval=2,
+        ),
+        _verifier_timing_count=0,
+    )
+
+    assert VerifyAdaptiveController.should_log_verifier_timing(controller) is True
+    assert VerifyAdaptiveController.should_log_verifier_timing(controller) is False
+    assert VerifyAdaptiveController.should_log_verifier_timing(controller) is True
+
+
+def test_should_log_verifier_timing_disabled():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            log_verifier_timing=False,
+            log_verifier_timing_interval=1,
+        ),
+        _verifier_timing_count=0,
+    )
+
+    assert VerifyAdaptiveController.should_log_verifier_timing(controller) is False
+    assert controller._verifier_timing_count == 0
 
 def test_measure_runner_profiles_target_only(monkeypatch):
     calls = []

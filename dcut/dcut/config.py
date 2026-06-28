@@ -29,6 +29,8 @@ class VerifyAdaptiveConfig:
     log_decision_details: bool = False
     log_decision_interval: int = 1
     log_decision_max_records: int = 8
+    log_verifier_timing: bool = False
+    log_verifier_timing_interval: int = 1
     min_score_improvement_ratio: float = 0.0
     enabled: bool = True
 
@@ -62,6 +64,8 @@ class VerifyAdaptiveConfig:
             raise ValueError("log_decision_interval must be >= 1.")
         if self.log_decision_max_records < 1:
             raise ValueError("log_decision_max_records must be >= 1.")
+        if self.log_verifier_timing_interval < 1:
+            raise ValueError("log_verifier_timing_interval must be >= 1.")
         if self.min_score_improvement_ratio < 0.0:
             raise ValueError("min_score_improvement_ratio must be >= 0.0.")
         if any(ratio <= 0.0 or ratio > 1.0 for ratio in self.budget_ratios):
