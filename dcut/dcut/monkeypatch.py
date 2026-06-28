@@ -138,6 +138,7 @@ def _patch_runner(cls):
     original_execute_model = cls.execute_model
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
+    original_build_attention_metadata = getattr(cls, "_build_attention_metadata", None)
     original_dummy_run = getattr(cls, "_dummy_run", None)
 
     @wraps(original_init)
@@ -177,6 +178,13 @@ def _patch_runner(cls):
         original_copy_draft(self, scheduler_output, zeros_only=zeros_only)
         _dcut_queue_probs(self, zeros_only)
 
+    if original_build_attention_metadata is not None:
+
+        @wraps(original_build_attention_metadata)
+        def _build_attention_metadata(self, *args, **kwargs):
+            _dcut_log_attention_query_shape(self, args, kwargs)
+            return original_build_attention_metadata(self, *args, **kwargs)
+
     if original_dummy_run is not None:
 
         @wraps(original_dummy_run)
@@ -194,10 +202,55 @@ def _patch_runner(cls):
     cls.execute_model = execute_model
     cls.sample_tokens = sample_tokens
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
+    if original_build_attention_metadata is not None:
+        cls._build_attention_metadata = _build_attention_metadata
     if original_dummy_run is not None:
         cls._dummy_run = _dummy_run
     cls.profile_dcut_cost = _dcut_profile_cost
     cls._dcut_patched = True
+
+
+def _dcut_get_call_value(args, kwargs, index: int, name: str, default=None):
+    if name in kwargs:
+        return kwargs[name]
+    if len(args) > index:
+        return args[index]
+    return default
+
+
+def _dcut_to_int_list(values) -> list[int]:
+    if values is None:
+        return []
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    return [int(value) for value in values]
+
+
+def _dcut_log_attention_query_shape(runner, args, kwargs) -> None:
+    use_spec_decode = bool(_dcut_get_call_value(args, kwargs, 7, "use_spec_decode", False))
+    controller = getattr(runner, "_dcut_controller", None)
+    if controller is None or not use_spec_decode or not controller.should_log_attention_query_shape():
+        return
+    num_tokens = _dcut_get_call_value(args, kwargs, 0, "num_tokens")
+    num_reqs = _dcut_get_call_value(args, kwargs, 1, "num_reqs")
+    max_query_len = _dcut_get_call_value(args, kwargs, 2, "max_query_len")
+    num_tokens_padded = _dcut_get_call_value(args, kwargs, 3, "num_tokens_padded", num_tokens)
+    num_reqs_padded = _dcut_get_call_value(args, kwargs, 4, "num_reqs_padded", num_reqs)
+    query_lens = _dcut_to_int_list(_dcut_get_call_value(args, kwargs, 10, "num_scheduled_tokens_np"))
+    max_records = controller.config.log_decision_max_records
+    logger.info(
+        "D-Cut attention query shape: num_tokens=%s num_tokens_padded=%s num_reqs=%s "
+        "num_reqs_padded=%s max_query_len=%s query_lens_sum=%d query_lens_max=%d "
+        "query_lens=%s",
+        num_tokens,
+        num_tokens_padded,
+        num_reqs,
+        num_reqs_padded,
+        max_query_len,
+        sum(query_lens),
+        max(query_lens, default=0),
+        query_lens[:max_records],
+    )
 
 
 def _dcut_should_time_verifier(runner, scheduler_output) -> bool:

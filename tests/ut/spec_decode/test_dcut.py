@@ -39,6 +39,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_decision_interval": 2,
         "log_verifier_timing": True,
         "log_verifier_timing_interval": 3,
+        "log_attention_query_shape": True,
+        "log_attention_query_shape_interval": 4,
         "unknown": "ignored",
     })
 
@@ -50,6 +52,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_decision_interval == 2
     assert cfg.log_verifier_timing is True
     assert cfg.log_verifier_timing_interval == 3
+    assert cfg.log_attention_query_shape is True
+    assert cfg.log_attention_query_shape_interval == 4
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -97,6 +101,13 @@ def test_verify_adaptive_config_rejects_invalid_verifier_timing_interval():
         cfg.validate(num_speculative_tokens=4)
 
 
+def test_verify_adaptive_config_rejects_invalid_attention_query_shape_interval():
+    cfg = VerifyAdaptiveConfig(log_attention_query_shape=True, log_attention_query_shape_interval=0)
+
+    with pytest.raises(ValueError, match="log_attention_query_shape_interval"):
+        cfg.validate(num_speculative_tokens=4)
+
+
 def test_verify_adaptive_config_rejects_invalid_min_score_improvement_ratio():
     cfg = VerifyAdaptiveConfig(min_score_improvement_ratio=-0.1)
 
@@ -117,6 +128,33 @@ def test_verify_adaptive_config_rejects_invalid_batch_size_step():
     with pytest.raises(ValueError, match="batch_size_step"):
         cfg.validate(num_speculative_tokens=4)
 
+
+
+def test_should_log_attention_query_shape_respects_interval():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            log_attention_query_shape=True,
+            log_attention_query_shape_interval=2,
+        ),
+        _attention_query_shape_count=0,
+    )
+
+    assert VerifyAdaptiveController.should_log_attention_query_shape(controller) is True
+    assert VerifyAdaptiveController.should_log_attention_query_shape(controller) is False
+    assert VerifyAdaptiveController.should_log_attention_query_shape(controller) is True
+
+
+def test_should_log_attention_query_shape_disabled():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            log_attention_query_shape=False,
+            log_attention_query_shape_interval=1,
+        ),
+        _attention_query_shape_count=0,
+    )
+
+    assert VerifyAdaptiveController.should_log_attention_query_shape(controller) is False
+    assert controller._attention_query_shape_count == 0
 
 
 def test_should_log_verifier_timing_respects_interval():
