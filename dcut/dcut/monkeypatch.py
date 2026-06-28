@@ -26,6 +26,9 @@ _TARGET_MODULES = {
 _ATTENTION_TIMING_CONTEXT: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "dcut_attention_timing_context", default=None
 )
+_VERIFIER_BREAKDOWN_CONTEXT: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "dcut_verifier_breakdown_context", default=None
+)
 
 
 class _DcutPatchLoader(importlib.abc.Loader):
@@ -161,6 +164,12 @@ def _patch_runner(cls):
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
     original_build_attention_metadata = getattr(cls, "_build_attention_metadata", None)
+    original_determine_batch_execution_and_padding = getattr(cls, "_determine_batch_execution_and_padding", None)
+    original_model_forward = getattr(cls, "_model_forward", None)
+    original_prepare_inputs = getattr(cls, "_prepare_inputs", None)
+    original_preprocess = getattr(cls, "_preprocess", None)
+    original_sanitize_placeholder_input_ids = getattr(cls, "_sanitize_placeholder_input_ids_for_forward", None)
+    original_update_states = getattr(cls, "_update_states", None)
     original_dummy_run = getattr(cls, "_dummy_run", None)
 
     @wraps(original_init)
@@ -177,21 +186,27 @@ def _patch_runner(cls):
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
+        _dcut_patch_model_compute_logits(self)
 
     @wraps(original_execute_model)
     def execute_model(self, scheduler_output, intermediate_tensors=None):
+        _dcut_patch_model_compute_logits(self)
         scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
         time_verifier = _dcut_should_time_verifier(self, scheduler_output)
+        breakdown_token = _dcut_start_verifier_breakdown(self, scheduler_output)
         attention_timing_token = _dcut_start_attention_timing(self, scheduler_output)
-        if time_verifier:
+        if time_verifier or breakdown_token is not None:
             torch.npu.synchronize()
             start = time.perf_counter()
         try:
             result = original_execute_model(self, scheduler_output, intermediate_tensors)
         finally:
-            if time_verifier:
+            if time_verifier or breakdown_token is not None:
                 torch.npu.synchronize()
-                _dcut_log_verifier_timing(scheduler_output, (time.perf_counter() - start) * 1000.0)
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                if time_verifier:
+                    _dcut_log_verifier_timing(scheduler_output, elapsed_ms)
+                _dcut_finish_verifier_breakdown(scheduler_output, breakdown_token, elapsed_ms)
             _dcut_finish_attention_timing(scheduler_output, attention_timing_token)
         return result
 
@@ -210,7 +225,49 @@ def _patch_runner(cls):
         @wraps(original_build_attention_metadata)
         def _build_attention_metadata(self, *args, **kwargs):
             _dcut_log_attention_query_shape(self, args, kwargs)
-            return original_build_attention_metadata(self, *args, **kwargs)
+            return _dcut_time_runner_phase(
+                "build_attention_metadata", original_build_attention_metadata, self, args, kwargs
+            )
+
+    if original_determine_batch_execution_and_padding is not None:
+
+        @wraps(original_determine_batch_execution_and_padding)
+        def _determine_batch_execution_and_padding(self, *args, **kwargs):
+            return _dcut_time_runner_phase(
+                "determine_batch_execution", original_determine_batch_execution_and_padding, self, args, kwargs
+            )
+
+    if original_model_forward is not None:
+
+        @wraps(original_model_forward)
+        def _model_forward(self, *args, **kwargs):
+            return _dcut_time_runner_phase("model_forward", original_model_forward, self, args, kwargs)
+
+    if original_prepare_inputs is not None:
+
+        @wraps(original_prepare_inputs)
+        def _prepare_inputs(self, *args, **kwargs):
+            return _dcut_time_runner_phase("prepare_inputs", original_prepare_inputs, self, args, kwargs)
+
+    if original_preprocess is not None:
+
+        @wraps(original_preprocess)
+        def _preprocess(self, *args, **kwargs):
+            return _dcut_time_runner_phase("preprocess", original_preprocess, self, args, kwargs)
+
+    if original_sanitize_placeholder_input_ids is not None:
+
+        @wraps(original_sanitize_placeholder_input_ids)
+        def _sanitize_placeholder_input_ids_for_forward(self, *args, **kwargs):
+            return _dcut_time_runner_phase(
+                "sanitize_placeholder_input_ids", original_sanitize_placeholder_input_ids, self, args, kwargs
+            )
+
+    if original_update_states is not None:
+
+        @wraps(original_update_states)
+        def _update_states(self, *args, **kwargs):
+            return _dcut_time_runner_phase("update_states", original_update_states, self, args, kwargs)
 
     if original_dummy_run is not None:
 
@@ -231,6 +288,18 @@ def _patch_runner(cls):
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     if original_build_attention_metadata is not None:
         cls._build_attention_metadata = _build_attention_metadata
+    if original_determine_batch_execution_and_padding is not None:
+        cls._determine_batch_execution_and_padding = _determine_batch_execution_and_padding
+    if original_model_forward is not None:
+        cls._model_forward = _model_forward
+    if original_prepare_inputs is not None:
+        cls._prepare_inputs = _prepare_inputs
+    if original_preprocess is not None:
+        cls._preprocess = _preprocess
+    if original_sanitize_placeholder_input_ids is not None:
+        cls._sanitize_placeholder_input_ids_for_forward = _sanitize_placeholder_input_ids_for_forward
+    if original_update_states is not None:
+        cls._update_states = _update_states
     if original_dummy_run is not None:
         cls._dummy_run = _dummy_run
     cls.profile_dcut_cost = _dcut_profile_cost
@@ -251,6 +320,92 @@ def _dcut_to_int_list(values) -> list[int]:
     if hasattr(values, "tolist"):
         values = values.tolist()
     return [int(value) for value in values]
+
+
+def _dcut_patch_model_compute_logits(runner) -> None:
+    model = getattr(runner, "model", None)
+    if model is None or not hasattr(model, "compute_logits") or getattr(model, "_dcut_compute_logits_patched", False):
+        return
+    original_compute_logits = model.compute_logits
+
+    @wraps(original_compute_logits)
+    def compute_logits(*args, **kwargs):
+        return _dcut_time_callable_phase("compute_logits", original_compute_logits, args, kwargs)
+
+    model.compute_logits = compute_logits
+    model._dcut_compute_logits_patched = True
+
+
+def _dcut_start_verifier_breakdown(runner, scheduler_output):
+    controller = getattr(runner, "_dcut_controller", None)
+    if (
+        controller is None
+        or not scheduler_output.scheduled_spec_decode_tokens
+        or not controller.should_log_verifier_breakdown()
+    ):
+        return None
+    spec_lens = [len(tokens) for tokens in scheduler_output.scheduled_spec_decode_tokens.values()]
+    context = {
+        "phases": {},
+        "spec_tokens": sum(spec_lens),
+        "spec_reqs": len(spec_lens),
+    }
+    return _VERIFIER_BREAKDOWN_CONTEXT.set(context)
+
+
+def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: float) -> None:
+    if token is None:
+        return
+    context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+    _VERIFIER_BREAKDOWN_CONTEXT.reset(token)
+    if context is None:
+        return
+    phases = context["phases"]
+    phase_sum_ms = sum(phases.values())
+    untracked_ms = total_elapsed_ms - phase_sum_ms
+    spec_reqs = context["spec_reqs"]
+    avg_spec_len = context["spec_tokens"] / spec_reqs if spec_reqs else 0.0
+    logger.info(
+        "D-Cut verifier breakdown: total_ms=%.3f tracked_ms=%.3f untracked_ms=%.3f "
+        "total_tokens=%d spec_reqs=%d spec_tokens=%d avg_spec_len=%.2f num_reqs=%d phases=%s",
+        total_elapsed_ms,
+        phase_sum_ms,
+        untracked_ms,
+        scheduler_output.total_num_scheduled_tokens,
+        spec_reqs,
+        context["spec_tokens"],
+        avg_spec_len,
+        len(scheduler_output.num_scheduled_tokens),
+        {name: round(value, 3) for name, value in sorted(phases.items())},
+    )
+
+
+def _dcut_time_callable_phase(phase_name: str, original_callable, args, kwargs):
+    context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+    if context is None:
+        return original_callable(*args, **kwargs)
+    torch.npu.synchronize()
+    start = time.perf_counter()
+    result = original_callable(*args, **kwargs)
+    torch.npu.synchronize()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    phases = context["phases"]
+    phases[phase_name] = phases.get(phase_name, 0.0) + elapsed_ms
+    return result
+
+
+def _dcut_time_runner_phase(phase_name: str, original_method, runner, args, kwargs):
+    context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+    if context is None:
+        return original_method(runner, *args, **kwargs)
+    torch.npu.synchronize()
+    start = time.perf_counter()
+    result = original_method(runner, *args, **kwargs)
+    torch.npu.synchronize()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    phases = context["phases"]
+    phases[phase_name] = phases.get(phase_name, 0.0) + elapsed_ms
+    return result
 
 
 def _dcut_start_attention_timing(runner, scheduler_output):

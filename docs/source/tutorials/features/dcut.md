@@ -66,6 +66,8 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_attention_query_shape_interval": 1,
   "log_attention_timing": true,
   "log_attention_timing_interval": 1,
+  "log_verifier_breakdown": true,
+  "log_verifier_breakdown_interval": 1,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -146,6 +148,12 @@ backend call and print aggregate attention time for the verifier step. This is
 heavier than verifier-step timing because it synchronizes per attention layer,
 so only enable it for short diagnostics and increase
 `log_attention_timing_interval` for longer runs.
+
+Set `log_verifier_breakdown=true` to synchronize and time selected runner
+phases inside the verifier step (`update_states`, input preparation, attention
+metadata building, preprocessing, model forward, and logits computation). The log also reports
+tracked and untracked time so you can identify whether latency is dominated by
+model forward, metadata/preprocessing, or code outside the patched phases.
 
 `batch_size_step=1` profiles every batch size by default, so a runtime batch
 size of 3 uses budget buckets built for batch size 3 instead of being rounded up

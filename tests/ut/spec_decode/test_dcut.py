@@ -43,6 +43,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_attention_query_shape_interval": 4,
         "log_attention_timing": True,
         "log_attention_timing_interval": 5,
+        "log_verifier_breakdown": True,
+        "log_verifier_breakdown_interval": 6,
         "unknown": "ignored",
     })
 
@@ -58,6 +60,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_attention_query_shape_interval == 4
     assert cfg.log_attention_timing is True
     assert cfg.log_attention_timing_interval == 5
+    assert cfg.log_verifier_breakdown is True
+    assert cfg.log_verifier_breakdown_interval == 6
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -116,6 +120,13 @@ def test_verify_adaptive_config_rejects_invalid_attention_timing_interval():
     cfg = VerifyAdaptiveConfig(log_attention_timing=True, log_attention_timing_interval=0)
 
     with pytest.raises(ValueError, match="log_attention_timing_interval"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_verifier_breakdown_interval():
+    cfg = VerifyAdaptiveConfig(log_verifier_breakdown=True, log_verifier_breakdown_interval=0)
+
+    with pytest.raises(ValueError, match="log_verifier_breakdown_interval"):
         cfg.validate(num_speculative_tokens=4)
 
 
@@ -193,6 +204,33 @@ def test_should_log_attention_timing_disabled():
 
     assert VerifyAdaptiveController.should_log_attention_timing(controller) is False
     assert controller._attention_timing_count == 0
+
+
+def test_should_log_verifier_breakdown_respects_interval():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            log_verifier_breakdown=True,
+            log_verifier_breakdown_interval=2,
+        ),
+        _verifier_breakdown_count=0,
+    )
+
+    assert VerifyAdaptiveController.should_log_verifier_breakdown(controller) is True
+    assert VerifyAdaptiveController.should_log_verifier_breakdown(controller) is False
+    assert VerifyAdaptiveController.should_log_verifier_breakdown(controller) is True
+
+
+def test_should_log_verifier_breakdown_disabled():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            log_verifier_breakdown=False,
+            log_verifier_breakdown_interval=1,
+        ),
+        _verifier_breakdown_count=0,
+    )
+
+    assert VerifyAdaptiveController.should_log_verifier_breakdown(controller) is False
+    assert controller._verifier_breakdown_count == 0
 
 
 def test_should_log_verifier_timing_respects_interval():
