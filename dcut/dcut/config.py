@@ -25,6 +25,7 @@ class VerifyAdaptiveConfig:
     warmup_seq_lens: int = 4096
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
+    profile_in_profile_run: bool = False
     cost_table_dump_path: str | None = None
     log_decision_details: bool = False
     log_decision_interval: int = 1

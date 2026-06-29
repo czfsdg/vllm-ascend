@@ -49,6 +49,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_model_forward_module_top_k": 7,
         "log_function_input_shapes": True,
         "log_function_input_shapes_max_items": 5,
+        "profile_in_profile_run": True,
         "unknown": "ignored",
     })
 
@@ -70,6 +71,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_model_forward_module_top_k == 7
     assert cfg.log_function_input_shapes is True
     assert cfg.log_function_input_shapes_max_items == 5
+    assert cfg.profile_in_profile_run is True
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -294,6 +296,7 @@ def test_measure_runner_profiles_target_only(monkeypatch):
             n_warmup_iters=2,
             n_measure_iters=3,
             warmup_seq_lens=4096,
+            profile_in_profile_run=False,
         )
     )
     monkeypatch.setattr(
@@ -308,6 +311,6 @@ def test_measure_runner_profiles_target_only(monkeypatch):
     assert len(calls) == 5
     assert all(args == (17,) for args, _ in calls)
     assert all(kwargs["skip_drafter"] is True for _, kwargs in calls)
-    assert all(kwargs["is_profile"] is True for _, kwargs in calls)
+    assert all(kwargs["is_profile"] is False for _, kwargs in calls)
     assert all(kwargs["uniform_decode"] is True for _, kwargs in calls)
     assert all(kwargs["profile_seq_lens"] == 4096 for _, kwargs in calls)

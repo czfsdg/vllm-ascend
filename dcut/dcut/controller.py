@@ -163,15 +163,24 @@ class VerifyAdaptiveController:
 
     def _measure_runner(self, runner: Any, num_tokens: int) -> float:
         for _ in range(self.config.n_warmup_iters):
-            runner._dummy_run(num_tokens, uniform_decode=True, is_profile=True,
-                              skip_drafter=True, profile_seq_lens=self.config.warmup_seq_lens)
-        torch.npu.synchronize()
-        start = time.perf_counter()
+            self._run_profile_iteration(runner, num_tokens)
+        samples_ms: list[float] = []
         for _ in range(self.config.n_measure_iters):
-            runner._dummy_run(num_tokens, uniform_decode=True, is_profile=True,
-                              skip_drafter=True, profile_seq_lens=self.config.warmup_seq_lens)
-        torch.npu.synchronize()
-        return (time.perf_counter() - start) * 1000.0 / self.config.n_measure_iters
+            torch.npu.synchronize()
+            start = time.perf_counter()
+            self._run_profile_iteration(runner, num_tokens)
+            torch.npu.synchronize()
+            samples_ms.append((time.perf_counter() - start) * 1000.0)
+        return float(np.median(samples_ms))
+
+    def _run_profile_iteration(self, runner: Any, num_tokens: int) -> None:
+        runner._dummy_run(
+            num_tokens,
+            uniform_decode=True,
+            is_profile=self.config.profile_in_profile_run,
+            skip_drafter=True,
+            profile_seq_lens=self.config.warmup_seq_lens,
+        )
 
     def process_draft_output(self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str],
                              batch_size: int) -> None:

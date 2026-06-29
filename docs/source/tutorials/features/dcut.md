@@ -57,6 +57,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "min_query_len_per_req": 2,
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
+  "profile_in_profile_run": false,
   "log_decision_details": true,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
@@ -174,6 +175,14 @@ arguments printed per function.
 `batch_size_step=1` profiles every batch size by default, so a runtime batch
 size of 3 uses budget buckets built for batch size 3 instead of being rounded up
 to the next profiled batch size.
+
+Cost profiling runs target-model dummy decode with the normal runtime forward path
+by default (`profile_in_profile_run=false`) and skips the drafter. This makes the
+profiled verifier cost closer to online decode latency than vLLM memory-profile
+mode. Set `profile_in_profile_run=true` only when you intentionally want the old
+memory-profile-style behavior for debugging. Each profiled budget is measured
+individually and D-Cut records the median of `n_measure_iters` samples to reduce
+noise from one-off NPU scheduling spikes.
 
 D-Cut uses `budget_ratios` to build batch-level verify budget candidates. For
 example, with `num_speculative_tokens=7`, `batch_size=16`, and
