@@ -14,5 +14,6 @@ long_sequence_context_parallel_multi_node
 dynamic_chunked_pipeline_parallel
 suffix_speculative_decoding
 dcut
+dcut-performance-investigation
 ray
 :::
