@@ -142,7 +142,7 @@ class VerifyAdaptiveController:
             for num_tokens in self._build_sum_query_len_levels(batch_size):
                 if max_tokens is not None and num_tokens > max_tokens:
                     continue
-                avg_ms = self._measure_runner(runner, num_tokens)
+                avg_ms = self._measure_runner(runner, batch_size, num_tokens)
                 self._cost_table[(batch_size, num_tokens)] = avg_ms / 1000.0
                 self._sorted_sql_per_bs[batch_size].append(num_tokens)
                 self._cost_records.append({
@@ -161,25 +161,45 @@ class VerifyAdaptiveController:
         self._dump_cost_table_if_requested()
         logger.info("D-Cut: cost table ready (%d entries).", len(self._cost_table))
 
-    def _measure_runner(self, runner: Any, num_tokens: int) -> float:
+    def _measure_runner(self, runner: Any, batch_size: int, num_tokens: int) -> float:
+        profile_query_lens = self._build_profile_query_lens(batch_size, num_tokens)
         for _ in range(self.config.n_warmup_iters):
-            self._run_profile_iteration(runner, num_tokens)
+            self._run_profile_iteration(runner, num_tokens, profile_query_lens)
         samples_ms: list[float] = []
         for _ in range(self.config.n_measure_iters):
             torch.npu.synchronize()
             start = time.perf_counter()
-            self._run_profile_iteration(runner, num_tokens)
+            self._run_profile_iteration(runner, num_tokens, profile_query_lens)
             torch.npu.synchronize()
             samples_ms.append((time.perf_counter() - start) * 1000.0)
         return float(np.median(samples_ms))
 
-    def _run_profile_iteration(self, runner: Any, num_tokens: int) -> None:
+    def _build_profile_query_lens(self, batch_size: int, num_tokens: int) -> list[int]:
+        if num_tokens < batch_size:
+            raise ValueError(
+                f"D-Cut profile num_tokens ({num_tokens}) must be >= batch_size ({batch_size}).")
+        max_query_len = self.max_query_len_per_req
+        max_tokens = batch_size * max_query_len
+        if num_tokens > max_tokens:
+            raise ValueError(
+                f"D-Cut profile num_tokens ({num_tokens}) exceeds batch capacity ({max_tokens}).")
+        base_len = num_tokens // batch_size
+        remainder = num_tokens % batch_size
+        query_lens = [base_len + (1 if idx < remainder else 0) for idx in range(batch_size)]
+        if any(query_len < 1 or query_len > max_query_len for query_len in query_lens):
+            raise ValueError(
+                f"D-Cut generated invalid profile query lengths for batch_size={batch_size}, "
+                f"num_tokens={num_tokens}: {query_lens}")
+        return query_lens
+
+    def _run_profile_iteration(self, runner: Any, num_tokens: int, profile_query_lens: list[int]) -> None:
         runner._dummy_run(
             num_tokens,
             uniform_decode=True,
             is_profile=self.config.profile_in_profile_run,
             skip_drafter=True,
             profile_seq_lens=self.config.warmup_seq_lens,
+            profile_num_scheduled_tokens=profile_query_lens,
         )
 
     def process_draft_output(self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str],

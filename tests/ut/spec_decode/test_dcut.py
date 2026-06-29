@@ -306,7 +306,9 @@ def test_measure_runner_profiles_target_only(monkeypatch):
         raising=False,
     )
 
-    VerifyAdaptiveController._measure_runner(controller, FakeRunner(), 17)
+    controller.max_query_len_per_req = 8
+
+    VerifyAdaptiveController._measure_runner(controller, FakeRunner(), 3, 17)
 
     assert len(calls) == 5
     assert all(args == (17,) for args, _ in calls)
@@ -314,3 +316,20 @@ def test_measure_runner_profiles_target_only(monkeypatch):
     assert all(kwargs["is_profile"] is False for _, kwargs in calls)
     assert all(kwargs["uniform_decode"] is True for _, kwargs in calls)
     assert all(kwargs["profile_seq_lens"] == 4096 for _, kwargs in calls)
+    assert all(kwargs["profile_num_scheduled_tokens"] == [6, 6, 5] for _, kwargs in calls)
+
+
+def test_build_profile_query_lens_uses_requested_batch_size():
+    controller = SimpleNamespace(max_query_len_per_req=8)
+
+    assert VerifyAdaptiveController._build_profile_query_lens(controller, 9, 57) == [7, 7, 7, 6, 6, 6, 6, 6, 6]
+    assert VerifyAdaptiveController._build_profile_query_lens(controller, 12, 96) == [8] * 12
+
+
+def test_build_profile_query_lens_rejects_invalid_token_count():
+    controller = SimpleNamespace(max_query_len_per_req=8)
+
+    with pytest.raises(ValueError, match=">= batch_size"):
+        VerifyAdaptiveController._build_profile_query_lens(controller, 4, 3)
+    with pytest.raises(ValueError, match="exceeds batch capacity"):
+        VerifyAdaptiveController._build_profile_query_lens(controller, 4, 33)

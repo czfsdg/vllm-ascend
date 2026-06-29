@@ -3312,6 +3312,7 @@ class NPUModelRunner(GPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        profile_num_scheduled_tokens: list[int] | np.ndarray | None = None,
         profile_cpp: bool = False,
         skip_drafter: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -3338,6 +3339,11 @@ class NPUModelRunner(GPUModelRunner):
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             raise NotImplementedError("create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it")
+        elif profile_num_scheduled_tokens is not None:
+            num_scheduled_tokens_list = [int(token) for token in profile_num_scheduled_tokens]
+            num_reqs = len(num_scheduled_tokens_list)
+            assert num_reqs <= max_num_reqs
+            assert all(0 < token <= max_query_len for token in num_scheduled_tokens_list)
         elif uniform_decode:
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs

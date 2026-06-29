@@ -177,9 +177,12 @@ size of 3 uses budget buckets built for batch size 3 instead of being rounded up
 to the next profiled batch size.
 
 Cost profiling runs target-model dummy decode with the normal runtime forward path
-by default (`profile_in_profile_run=false`) and skips the drafter. This makes the
-profiled verifier cost closer to online decode latency than vLLM memory-profile
-mode. Set `profile_in_profile_run=true` only when you intentionally want the old
+by default (`profile_in_profile_run=false`) and skips the drafter. It also passes
+an explicit `profile_num_scheduled_tokens` list so each profiled budget preserves
+the intended batch size instead of letting `_dummy_run` infer fewer full-length
+requests from `sum_query_len`. This makes the profiled verifier cost closer to
+online decode latency than vLLM memory-profile mode. Set
+`profile_in_profile_run=true` only when you intentionally want the old
 memory-profile-style behavior for debugging. Each profiled budget is measured
 individually and D-Cut records the median of `n_measure_iters` samples to reduce
 noise from one-off NPU scheduling spikes.
