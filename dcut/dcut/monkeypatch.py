@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextvars
 import importlib.abc
 import importlib.machinery
+import inspect
 import sys
 import time
 from dataclasses import replace
@@ -273,9 +274,22 @@ def _patch_runner(cls):
             return _dcut_time_runner_phase("update_states", original_update_states, self, args, kwargs)
 
     if original_dummy_run is not None:
+        original_dummy_params = inspect.signature(original_dummy_run).parameters
+        supports_profile_num_scheduled_tokens = "profile_num_scheduled_tokens" in original_dummy_params
 
         @wraps(original_dummy_run)
         def _dummy_run(self, *args, skip_drafter=False, **kwargs):
+            profile_num_scheduled_tokens = kwargs.get("profile_num_scheduled_tokens")
+            if profile_num_scheduled_tokens is not None and not supports_profile_num_scheduled_tokens:
+                kwargs.pop("profile_num_scheduled_tokens")
+                if not getattr(self, "_dcut_warned_dummy_run_profile_shape_unsupported", False):
+                    logger.warning(
+                        "D-Cut: installed NPUModelRunner._dummy_run does not accept "
+                        "profile_num_scheduled_tokens; profiling will fall back to the runner's "
+                        "default uniform_decode shape inference. Update vllm-ascend to preserve "
+                        "the intended profiling batch shape."
+                    )
+                    self._dcut_warned_dummy_run_profile_shape_unsupported = True
             if not skip_drafter:
                 return original_dummy_run(self, *args, **kwargs)
             drafter = getattr(self, "drafter", None)

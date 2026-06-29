@@ -412,3 +412,38 @@ def test_log_verifier_timing_groups_stats_by_shape(monkeypatch):
     assert "query_lens=[4, 3]" in records[-1]
     assert "shape_count=2" in records[-1]
     assert "shape_avg_ms=17.500" in records[-1]
+
+
+def test_patch_runner_drops_profile_shape_for_older_dummy_run(monkeypatch):
+    calls = []
+    warnings = []
+
+    class FakeRunner:
+
+        def __init__(self):
+            self.drafter = "drafter"
+
+        def execute_model(self, scheduler_output, intermediate_tensors=None):
+            return None
+
+        def sample_tokens(self, grammar_output):
+            return None
+
+        def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
+            return None
+
+        def _dummy_run(self, *args, uniform_decode=False):
+            calls.append((args, uniform_decode, getattr(self, "drafter", None)))
+
+    monkeypatch.setattr(dcut_monkeypatch, "_dcut_init_controller", lambda runner: None)
+    monkeypatch.setattr(dcut_monkeypatch, "_dcut_patch_model_compute_logits", lambda runner: None)
+    monkeypatch.setattr(dcut_monkeypatch, "_dcut_patch_model_forward_modules", lambda runner: None)
+    monkeypatch.setattr(dcut_monkeypatch.logger, "warning", lambda message, *args: warnings.append(message % args))
+
+    dcut_monkeypatch._patch_runner(FakeRunner)
+    runner = FakeRunner()
+
+    runner._dummy_run(8, uniform_decode=True, skip_drafter=True, profile_num_scheduled_tokens=[4, 4])
+
+    assert calls == [((8,), True, None)]
+    assert "does not accept profile_num_scheduled_tokens" in warnings[0]
