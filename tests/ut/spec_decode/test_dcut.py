@@ -414,9 +414,7 @@ def test_log_verifier_timing_groups_stats_by_shape(monkeypatch):
     assert "shape_avg_ms=17.500" in records[-1]
 
 
-def test_patch_runner_drops_profile_shape_for_older_dummy_run(monkeypatch):
-    calls = []
-    warnings = []
+def test_patch_runner_rejects_profile_shape_for_older_dummy_run(monkeypatch):
 
     class FakeRunner:
 
@@ -433,17 +431,30 @@ def test_patch_runner_drops_profile_shape_for_older_dummy_run(monkeypatch):
             return None
 
         def _dummy_run(self, *args, uniform_decode=False):
-            calls.append((args, uniform_decode, getattr(self, "drafter", None)))
+            return None
 
     monkeypatch.setattr(dcut_monkeypatch, "_dcut_init_controller", lambda runner: None)
     monkeypatch.setattr(dcut_monkeypatch, "_dcut_patch_model_compute_logits", lambda runner: None)
     monkeypatch.setattr(dcut_monkeypatch, "_dcut_patch_model_forward_modules", lambda runner: None)
-    monkeypatch.setattr(dcut_monkeypatch.logger, "warning", lambda message, *args: warnings.append(message % args))
 
     dcut_monkeypatch._patch_runner(FakeRunner)
     runner = FakeRunner()
 
-    runner._dummy_run(8, uniform_decode=True, skip_drafter=True, profile_num_scheduled_tokens=[4, 4])
+    assert runner._dcut_profile_num_scheduled_tokens_supported is False
+    with pytest.raises(RuntimeError, match="misleading flat cost table"):
+        runner._dummy_run(8, uniform_decode=True, skip_drafter=True, profile_num_scheduled_tokens=[4, 4])
 
-    assert calls == [((8,), True, None)]
-    assert "does not accept profile_num_scheduled_tokens" in warnings[0]
+
+def test_profile_cost_skips_older_dummy_run_signature(monkeypatch):
+    errors = []
+    controller = SimpleNamespace(profile_cost_table=lambda runner: pytest.fail("profile_cost_table should be skipped"))
+    runner = SimpleNamespace(
+        _dcut_controller=controller,
+        _dcut_profile_num_scheduled_tokens_supported=False,
+    )
+
+    monkeypatch.setattr(dcut_monkeypatch.logger, "error", lambda message, *args: errors.append(message % args))
+
+    dcut_monkeypatch._dcut_profile_cost(runner)
+
+    assert "skip cost profiling" in errors[0]

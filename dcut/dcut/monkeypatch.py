@@ -172,6 +172,10 @@ def _patch_runner(cls):
     original_sanitize_placeholder_input_ids = getattr(cls, "_sanitize_placeholder_input_ids_for_forward", None)
     original_update_states = getattr(cls, "_update_states", None)
     original_dummy_run = getattr(cls, "_dummy_run", None)
+    supports_profile_num_scheduled_tokens = False
+    if original_dummy_run is not None:
+        original_dummy_params = inspect.signature(original_dummy_run).parameters
+        supports_profile_num_scheduled_tokens = "profile_num_scheduled_tokens" in original_dummy_params
 
     @wraps(original_init)
     def __init__(self, *args, **kwargs):
@@ -184,6 +188,7 @@ def _patch_runner(cls):
         self._dcut_req_ids = []
         self._dcut_active = set()
         self._dcut_verifier_timing_stats = {}
+        self._dcut_profile_num_scheduled_tokens_supported = supports_profile_num_scheduled_tokens
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
@@ -274,22 +279,17 @@ def _patch_runner(cls):
             return _dcut_time_runner_phase("update_states", original_update_states, self, args, kwargs)
 
     if original_dummy_run is not None:
-        original_dummy_params = inspect.signature(original_dummy_run).parameters
-        supports_profile_num_scheduled_tokens = "profile_num_scheduled_tokens" in original_dummy_params
 
         @wraps(original_dummy_run)
         def _dummy_run(self, *args, skip_drafter=False, **kwargs):
             profile_num_scheduled_tokens = kwargs.get("profile_num_scheduled_tokens")
             if profile_num_scheduled_tokens is not None and not supports_profile_num_scheduled_tokens:
-                kwargs.pop("profile_num_scheduled_tokens")
-                if not getattr(self, "_dcut_warned_dummy_run_profile_shape_unsupported", False):
-                    logger.warning(
-                        "D-Cut: installed NPUModelRunner._dummy_run does not accept "
-                        "profile_num_scheduled_tokens; profiling will fall back to the runner's "
-                        "default uniform_decode shape inference. Update vllm-ascend to preserve "
-                        "the intended profiling batch shape."
-                    )
-                    self._dcut_warned_dummy_run_profile_shape_unsupported = True
+                raise RuntimeError(
+                    "D-Cut cost profiling requires NPUModelRunner._dummy_run(profile_num_scheduled_tokens=...) "
+                    "to preserve the intended batch/query shape. The installed vllm-ascend runtime does not "
+                    "support that keyword, so profiling with default uniform_decode shape inference would produce "
+                    "a misleading flat cost table. Update vllm-ascend or disable D-Cut cost profiling."
+                )
             if not skip_drafter:
                 return original_dummy_run(self, *args, **kwargs)
             drafter = getattr(self, "drafter", None)
@@ -769,8 +769,17 @@ def _dcut_init_controller(runner) -> None:
 
 def _dcut_profile_cost(runner) -> None:
     controller = getattr(runner, "_dcut_controller", None)
-    if controller is not None:
-        controller.profile_cost_table(runner)
+    if controller is None:
+        return
+    if not getattr(runner, "_dcut_profile_num_scheduled_tokens_supported", True):
+        logger.error(
+            "D-Cut: skip cost profiling because installed NPUModelRunner._dummy_run does not accept "
+            "profile_num_scheduled_tokens. Profiling without explicit scheduled-token shapes is misleading "
+            "because lower-Q rows can be measured as fewer near-full requests. Update vllm-ascend to use "
+            "batch-shape-preserving profiling."
+        )
+        return
+    controller.profile_cost_table(runner)
 
 
 def _dcut_truncate_scheduler_output(runner, scheduler_output):
