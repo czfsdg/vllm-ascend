@@ -31,30 +31,32 @@ def test_choose_query_lens_discrete_global_topk():
 
 
 def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
-    cfg = VerifyAdaptiveConfig.from_dict({
-        "min_warmup_batch_size": 1,
-        "query_len_step_per_req": 1,
-        "batch_size_step": 1,
-        "budget_ratios": [0.25, 0.5, 1.0],
-        "log_decision_details": True,
-        "log_decision_interval": 2,
-        "log_verifier_timing": True,
-        "log_verifier_timing_interval": 3,
-        "log_attention_query_shape": True,
-        "log_attention_query_shape_interval": 4,
-        "log_attention_timing": True,
-        "log_attention_timing_interval": 5,
-        "log_verifier_breakdown": True,
-        "log_verifier_breakdown_interval": 6,
-        "log_model_forward_module_breakdown": True,
-        "log_model_forward_module_top_k": 7,
-        "log_function_input_shapes": True,
-        "log_function_input_shapes_max_items": 5,
-        "profile_in_profile_run": True,
-        "n_profile_presweep_iters": 2,
-        "min_cost_reduction_ratio": 0.07,
-        "unknown": "ignored",
-    })
+    cfg = VerifyAdaptiveConfig.from_dict(
+        {
+            "min_warmup_batch_size": 1,
+            "query_len_step_per_req": 1,
+            "batch_size_step": 1,
+            "budget_ratios": [0.25, 0.5, 1.0],
+            "log_decision_details": True,
+            "log_decision_interval": 2,
+            "log_verifier_timing": True,
+            "log_verifier_timing_interval": 3,
+            "log_attention_query_shape": True,
+            "log_attention_query_shape_interval": 4,
+            "log_attention_timing": True,
+            "log_attention_timing_interval": 5,
+            "log_verifier_breakdown": True,
+            "log_verifier_breakdown_interval": 6,
+            "log_model_forward_module_breakdown": True,
+            "log_model_forward_module_top_k": 7,
+            "log_function_input_shapes": True,
+            "log_function_input_shapes_max_items": 5,
+            "profile_in_profile_run": True,
+            "n_profile_presweep_iters": 2,
+            "min_cost_reduction_ratio": 0.07,
+            "unknown": "ignored",
+        }
+    )
 
     cfg.validate(num_speculative_tokens=4)
     assert cfg.min_warmup_batch_size == 1
@@ -194,7 +196,6 @@ def test_verify_adaptive_config_rejects_invalid_batch_size_step():
         cfg.validate(num_speculative_tokens=4)
 
 
-
 def test_should_log_attention_query_shape_respects_interval():
     controller = SimpleNamespace(
         config=SimpleNamespace(
@@ -302,11 +303,11 @@ def test_should_log_verifier_timing_disabled():
     assert VerifyAdaptiveController.should_log_verifier_timing(controller) is False
     assert controller._verifier_timing_count == 0
 
+
 def test_measure_runner_profiles_target_only(monkeypatch):
     calls = []
 
     class FakeRunner:
-
         def _dummy_run(self, *args, **kwargs):
             calls.append((args, kwargs))
 
@@ -452,10 +453,50 @@ def test_log_verifier_timing_groups_stats_by_shape(monkeypatch):
     assert "shape_avg_ms=17.500" in records[-1]
 
 
+def test_verifier_breakdown_logs_model_forward_shape_stats(monkeypatch):
+    records = []
+    runner = SimpleNamespace(_dcut_model_forward_timing_stats={})
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={
+            "req0": [1, 2, 3],
+            "req1": [4, 5, 6],
+        },
+        num_scheduled_tokens={
+            "req0": 4,
+            "req1": 4,
+        },
+        total_num_scheduled_tokens=8,
+    )
+    context = {
+        "module_classes": {"FakeLayer": 3.0},
+        "module_names": {"layers.0:FakeLayer": 3.0},
+        "module_stack": {},
+        "phases": {"model_forward": 20.0, "compute_logits": 2.0},
+        "module_top_k": 2,
+        "spec_tokens": 6,
+        "spec_reqs": 2,
+        "runner": runner,
+    }
+    token = dcut_monkeypatch._VERIFIER_BREAKDOWN_CONTEXT.set(context)
+
+    monkeypatch.setattr(
+        dcut_monkeypatch.logger,
+        "info",
+        lambda message, *args: records.append(message % args),
+    )
+
+    dcut_monkeypatch._dcut_finish_verifier_breakdown(scheduler_output, token, 25.0)
+
+    assert runner._dcut_model_forward_timing_stats[(2, 8, 6, 4)] == (1, 20.0, 20.0, 20.0)
+    assert "model_forward_shape_stats={'elapsed_ms': 20.0" in records[-1]
+    assert "'ms_per_token': 2.5" in records[-1]
+    assert "'shape_count': 1" in records[-1]
+    assert "module_classes=[('FakeLayer', 3.0)]" in records[-1]
+
+
 def test_patch_runner_rejects_profile_shape_for_older_dummy_run(monkeypatch):
 
     class FakeRunner:
-
         def __init__(self):
             self.drafter = "drafter"
 
@@ -491,7 +532,7 @@ def test_profile_cost_skips_older_dummy_run_signature(monkeypatch):
         _dcut_profile_num_scheduled_tokens_supported=False,
     )
 
-    monkeypatch.setattr(dcut_monkeypatch.logger, "error", lambda message, *args: errors.append(message % args))
+    monkeypatch.setattr(dcut_monkeypatch.logger, "warning", lambda message, *args: errors.append(message % args))
 
     dcut_monkeypatch._dcut_profile_cost(runner)
 

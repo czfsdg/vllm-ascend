@@ -113,9 +113,9 @@ def _patch_proposer(cls):
         next_token = _greedy_sample_from_tp_logits(logits)
         if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
             chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
-                -1, self.num_speculative_tokens
-            ).contiguous()
+            self._last_selected_probs = (
+                (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
+            )
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -188,6 +188,7 @@ def _patch_runner(cls):
         self._dcut_req_ids = []
         self._dcut_active = set()
         self._dcut_verifier_timing_stats = {}
+        self._dcut_model_forward_timing_stats = {}
         self._dcut_profile_num_scheduled_tokens_supported = supports_profile_num_scheduled_tokens
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
@@ -444,6 +445,7 @@ def _dcut_start_verifier_breakdown(runner, scheduler_output):
         "input_shapes_max_items": controller.config.log_function_input_shapes_max_items,
         "spec_tokens": sum(spec_lens),
         "spec_reqs": len(spec_lens),
+        "runner": runner,
     }
     return _VERIFIER_BREAKDOWN_CONTEXT.set(context)
 
@@ -460,11 +462,14 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
     untracked_ms = total_elapsed_ms - phase_sum_ms
     spec_reqs = context["spec_reqs"]
     avg_spec_len = context["spec_tokens"] / spec_reqs if spec_reqs else 0.0
-    top_k = _dcut_verifier_breakdown_top_k()
+    top_k = context["module_top_k"]
+    model_forward_stats = _dcut_update_model_forward_stats(
+        context.get("runner"), scheduler_output, context["spec_tokens"], phases.get("model_forward", 0.0)
+    )
     logger.info(
         "D-Cut verifier breakdown: total_ms=%.3f tracked_ms=%.3f untracked_ms=%.3f "
         "total_tokens=%d spec_reqs=%d spec_tokens=%d avg_spec_len=%.2f num_reqs=%d "
-        "phases=%s module_classes=%s module_names=%s",
+        "phases=%s model_forward_shape_stats=%s module_classes=%s module_names=%s",
         total_elapsed_ms,
         phase_sum_ms,
         untracked_ms,
@@ -474,10 +479,38 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
         avg_spec_len,
         len(scheduler_output.num_scheduled_tokens),
         {name: round(value, 3) for name, value in sorted(phases.items())},
+        model_forward_stats,
         _dcut_top_timing_items(context["module_classes"], top_k),
         _dcut_top_timing_items(context["module_names"], top_k),
     )
 
+
+def _dcut_update_model_forward_stats(
+    runner, scheduler_output, spec_tokens: int, elapsed_ms: float
+) -> dict[str, float | int]:
+    total_tokens = scheduler_output.total_num_scheduled_tokens
+    query_lens = _dcut_scheduler_query_lens(scheduler_output)
+    shape_key = (len(query_lens), total_tokens, spec_tokens, max(query_lens, default=0))
+    stats = getattr(runner, "_dcut_model_forward_timing_stats", None) if runner is not None else None
+    if stats is None:
+        return {
+            "elapsed_ms": round(elapsed_ms, 3),
+            "ms_per_token": round(elapsed_ms / total_tokens, 4) if total_tokens else 0.0,
+        }
+    count, total_ms, min_ms, max_ms = stats.get(shape_key, (0, 0.0, float("inf"), 0.0))
+    count += 1
+    total_ms += elapsed_ms
+    min_ms = min(min_ms, elapsed_ms)
+    max_ms = max(max_ms, elapsed_ms)
+    stats[shape_key] = (count, total_ms, min_ms, max_ms)
+    return {
+        "elapsed_ms": round(elapsed_ms, 3),
+        "ms_per_token": round(elapsed_ms / total_tokens, 4) if total_tokens else 0.0,
+        "shape_count": count,
+        "shape_avg_ms": round(total_ms / count, 3),
+        "shape_min_ms": round(min_ms, 3),
+        "shape_max_ms": round(max_ms, 3),
+    }
 
 
 def _dcut_log_function_input_shapes(phase_name: str, args, kwargs, context: dict) -> None:
@@ -494,10 +527,7 @@ def _dcut_log_function_input_shapes(phase_name: str, args, kwargs, context: dict
 
 def _dcut_summarize_call_values(values, max_items: int):
     if isinstance(values, dict):
-        return {
-            str(key): _dcut_summarize_value(value)
-            for key, value in list(values.items())[:max_items]
-        }
+        return {str(key): _dcut_summarize_value(value) for key, value in list(values.items())[:max_items]}
     return [_dcut_summarize_value(value) for value in list(values)[:max_items]]
 
 
@@ -520,10 +550,7 @@ def _dcut_summarize_value(value):
         return {
             "type": "dict",
             "len": len(value),
-            "items": {
-                str(key): _dcut_summarize_value(item)
-                for key, item in list(value.items())[:4]
-            },
+            "items": {str(key): _dcut_summarize_value(item) for key, item in list(value.items())[:4]},
         }
     shape = getattr(value, "shape", None)
     if shape is not None:
@@ -534,6 +561,7 @@ def _dcut_summarize_value(value):
         except TypeError:
             pass
     return {"type": value.__class__.__name__}
+
 
 def _dcut_time_callable_phase(phase_name: str, original_callable, args, kwargs):
     context = _VERIFIER_BREAKDOWN_CONTEXT.get()
@@ -748,10 +776,10 @@ def _dcut_init_controller(runner) -> None:
         drafter.needs_draft_probs = True
     runner._dcut_probs_event = torch.npu.Event()
     runner._dcut_probs_pinned = torch.empty(
-        (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory)
-    if (
-        getattr(runner.speculative_config, "method", None) == "dflash"
-        and not getattr(getattr(runner, "ascend_config", None), "enable_reduce_sample", False)
+        (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory
+    )
+    if getattr(runner.speculative_config, "method", None) == "dflash" and not getattr(
+        getattr(runner, "ascend_config", None), "enable_reduce_sample", False
     ):
         logger.warning(
             "D-Cut: dflash is running with enable_reduce_sample=False. "
