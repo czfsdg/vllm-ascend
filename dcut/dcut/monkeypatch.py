@@ -171,6 +171,8 @@ def _patch_runner(cls):
     original_preprocess = getattr(cls, "_preprocess", None)
     original_sanitize_placeholder_input_ids = getattr(cls, "_sanitize_placeholder_input_ids_for_forward", None)
     original_update_states = getattr(cls, "_update_states", None)
+    original_update_full_graph_params = getattr(cls, "_update_full_graph_params_if_needed", None)
+    original_all_gather_hidden_states_and_aux = getattr(cls, "_all_gather_hidden_states_and_aux", None)
     original_dummy_run = getattr(cls, "_dummy_run", None)
     supports_profile_num_scheduled_tokens = False
     if original_dummy_run is not None:
@@ -195,11 +197,13 @@ def _patch_runner(cls):
         self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
         _dcut_patch_model_compute_logits(self)
+        _dcut_patch_model_forward_call(self)
         _dcut_patch_model_forward_modules(self)
 
     @wraps(original_execute_model)
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         _dcut_patch_model_compute_logits(self)
+        _dcut_patch_model_forward_call(self)
         _dcut_patch_model_forward_modules(self)
         scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
         time_verifier = _dcut_should_time_verifier(self, scheduler_output)
@@ -279,6 +283,25 @@ def _patch_runner(cls):
         def _update_states(self, *args, **kwargs):
             return _dcut_time_runner_phase("update_states", original_update_states, self, args, kwargs)
 
+    if original_update_full_graph_params is not None:
+
+        @wraps(original_update_full_graph_params)
+        def _update_full_graph_params_if_needed(self, *args, **kwargs):
+            return _dcut_time_runner_phase(
+                "model_forward.update_full_graph_params", original_update_full_graph_params, self, args, kwargs
+            )
+
+    if original_all_gather_hidden_states_and_aux is not None:
+
+        @wraps(original_all_gather_hidden_states_and_aux)
+        def _all_gather_hidden_states_and_aux(hidden_states):
+            return _dcut_time_callable_phase(
+                "model_forward.all_gather_hidden_states",
+                original_all_gather_hidden_states_and_aux,
+                (hidden_states,),
+                {},
+            )
+
     if original_dummy_run is not None:
 
         @wraps(original_dummy_run)
@@ -318,6 +341,10 @@ def _patch_runner(cls):
         cls._sanitize_placeholder_input_ids_for_forward = _sanitize_placeholder_input_ids_for_forward
     if original_update_states is not None:
         cls._update_states = _update_states
+    if original_update_full_graph_params is not None:
+        cls._update_full_graph_params_if_needed = _update_full_graph_params_if_needed
+    if original_all_gather_hidden_states_and_aux is not None:
+        cls._all_gather_hidden_states_and_aux = staticmethod(_all_gather_hidden_states_and_aux)
     if original_dummy_run is not None:
         cls._dummy_run = _dummy_run
     cls.profile_dcut_cost = _dcut_profile_cost
@@ -352,6 +379,20 @@ def _dcut_patch_model_compute_logits(runner) -> None:
 
     model.compute_logits = compute_logits
     model._dcut_compute_logits_patched = True
+
+
+def _dcut_patch_model_forward_call(runner) -> None:
+    model = getattr(runner, "model", None)
+    if model is None or not hasattr(model, "forward") or getattr(model, "_dcut_forward_call_patched", False):
+        return
+    original_forward = model.forward
+
+    @wraps(original_forward)
+    def forward(*args, **kwargs):
+        return _dcut_time_callable_phase("model_forward.model_call", original_forward, args, kwargs)
+
+    model.forward = forward
+    model._dcut_forward_call_patched = True
 
 
 def _dcut_patch_model_forward_modules(runner) -> None:
@@ -419,6 +460,10 @@ def _dcut_verifier_breakdown_top_k() -> int:
     return context["module_top_k"]
 
 
+def _dcut_top_level_phase_sum(phases: dict[str, float]) -> float:
+    return sum(value for name, value in phases.items() if "." not in name)
+
+
 def _dcut_top_timing_items(values: dict[str, float], top_k: int) -> list[tuple[str, float]]:
     if not values or top_k < 1:
         return []
@@ -458,7 +503,7 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
     if context is None:
         return
     phases = context["phases"]
-    phase_sum_ms = sum(phases.values())
+    phase_sum_ms = _dcut_top_level_phase_sum(phases)
     untracked_ms = total_elapsed_ms - phase_sum_ms
     spec_reqs = context["spec_reqs"]
     avg_spec_len = context["spec_tokens"] / spec_reqs if spec_reqs else 0.0

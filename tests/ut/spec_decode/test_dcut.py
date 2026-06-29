@@ -453,6 +453,50 @@ def test_log_verifier_timing_groups_stats_by_shape(monkeypatch):
     assert "shape_avg_ms=17.500" in records[-1]
 
 
+def test_top_level_phase_sum_excludes_nested_model_forward_details():
+    assert (
+        dcut_monkeypatch._dcut_top_level_phase_sum(
+            {
+                "model_forward": 10.0,
+                "model_forward.model_call": 8.0,
+                "model_forward.update_full_graph_params": 0.5,
+                "compute_logits": 2.0,
+            }
+        )
+        == 12.0
+    )
+
+
+def test_model_forward_call_patch_records_nested_phase(monkeypatch):
+    class FakeModel:
+        def forward(self, value):
+            return value + 1
+
+    model = FakeModel()
+    runner = SimpleNamespace(model=model)
+    context = {
+        "phases": {},
+        "log_input_shapes": False,
+    }
+
+    monkeypatch.setattr(
+        dcut_monkeypatch.torch,
+        "npu",
+        SimpleNamespace(synchronize=lambda: None),
+        raising=False,
+    )
+
+    dcut_monkeypatch._dcut_patch_model_forward_call(runner)
+    token = dcut_monkeypatch._VERIFIER_BREAKDOWN_CONTEXT.set(context)
+    try:
+        assert model.forward(1) == 2
+    finally:
+        dcut_monkeypatch._VERIFIER_BREAKDOWN_CONTEXT.reset(token)
+
+    assert "model_forward.model_call" in context["phases"]
+    assert context["phases"]["model_forward.model_call"] >= 0.0
+
+
 def test_verifier_breakdown_logs_model_forward_shape_stats(monkeypatch):
     records = []
     runner = SimpleNamespace(_dcut_model_forward_timing_stats={})
