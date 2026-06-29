@@ -7,6 +7,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "dcut"))
 
 import dcut.controller as controller_module
+import dcut.monkeypatch as dcut_monkeypatch
 import numpy as np
 import pytest
 from dcut.config import VerifyAdaptiveConfig
@@ -378,3 +379,36 @@ def test_filter_query_levels_without_cost_gain_keeps_lower_budgets_when_useful()
     VerifyAdaptiveController._filter_query_levels_without_cost_gain(controller)
 
     assert controller._sorted_sql_per_bs[4] == [11, 18, 25, 32]
+
+
+def test_log_verifier_timing_groups_stats_by_shape(monkeypatch):
+    records = []
+    runner = SimpleNamespace(
+        _dcut_controller=SimpleNamespace(config=SimpleNamespace(log_decision_max_records=2)),
+        _dcut_verifier_timing_stats={},
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={
+            "req0": [1, 2, 3],
+            "req1": [4, 5],
+        },
+        num_scheduled_tokens={
+            "req0": 4,
+            "req1": 3,
+        },
+        total_num_scheduled_tokens=7,
+    )
+
+    monkeypatch.setattr(
+        dcut_monkeypatch.logger,
+        "info",
+        lambda message, *args: records.append(message % args),
+    )
+
+    dcut_monkeypatch._dcut_log_verifier_timing(runner, scheduler_output, 14.0)
+    dcut_monkeypatch._dcut_log_verifier_timing(runner, scheduler_output, 21.0)
+
+    assert runner._dcut_verifier_timing_stats[(2, 7, 5, 3)] == (2, 35.0, 14.0, 21.0)
+    assert "query_lens=[4, 3]" in records[-1]
+    assert "shape_count=2" in records[-1]
+    assert "shape_avg_ms=17.500" in records[-1]

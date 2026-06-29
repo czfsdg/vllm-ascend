@@ -182,6 +182,7 @@ def _patch_runner(cls):
         self._dcut_num_reqs = 0
         self._dcut_req_ids = []
         self._dcut_active = set()
+        self._dcut_verifier_timing_stats = {}
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
@@ -207,7 +208,7 @@ def _patch_runner(cls):
                 torch.npu.synchronize()
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 if time_verifier:
-                    _dcut_log_verifier_timing(scheduler_output, elapsed_ms)
+                    _dcut_log_verifier_timing(self, scheduler_output, elapsed_ms)
                 _dcut_finish_verifier_breakdown(scheduler_output, breakdown_token, elapsed_ms)
             _dcut_finish_attention_timing(scheduler_output, attention_timing_token)
         return result
@@ -650,22 +651,60 @@ def _dcut_should_time_verifier(runner, scheduler_output) -> bool:
     return controller.should_log_verifier_timing()
 
 
-def _dcut_log_verifier_timing(scheduler_output, elapsed_ms: float) -> None:
+def _dcut_log_verifier_timing(runner, scheduler_output, elapsed_ms: float) -> None:
     spec_lens = [len(tokens) for tokens in scheduler_output.scheduled_spec_decode_tokens.values()]
     spec_tokens = sum(spec_lens)
     spec_reqs = len(spec_lens)
     avg_spec_len = spec_tokens / spec_reqs if spec_reqs else 0.0
+    query_lens = _dcut_scheduler_query_lens(scheduler_output)
+    num_reqs = len(query_lens)
+    shape_key = (num_reqs, scheduler_output.total_num_scheduled_tokens, spec_tokens, max(spec_lens, default=0))
+    stats = getattr(runner, "_dcut_verifier_timing_stats", None)
+    if stats is None:
+        stats = {}
+        runner._dcut_verifier_timing_stats = stats
+    count, total_ms, min_ms, max_ms = stats.get(shape_key, (0, 0.0, float("inf"), 0.0))
+    count += 1
+    total_ms += elapsed_ms
+    min_ms = min(min_ms, elapsed_ms)
+    max_ms = max(max_ms, elapsed_ms)
+    stats[shape_key] = (count, total_ms, min_ms, max_ms)
+    avg_ms = total_ms / count
+    total_tokens = scheduler_output.total_num_scheduled_tokens
+    ms_per_token = elapsed_ms / total_tokens if total_tokens else 0.0
+    ms_per_spec_token = elapsed_ms / spec_tokens if spec_tokens else 0.0
+    max_records = getattr(getattr(runner, "_dcut_controller", None), "config", None)
+    max_records = getattr(max_records, "log_decision_max_records", 8)
     logger.info(
         "D-Cut verifier timing: elapsed_ms=%.3f total_tokens=%d spec_reqs=%d "
-        "spec_tokens=%d avg_spec_len=%.2f max_spec_len=%d num_reqs=%d",
+        "spec_tokens=%d avg_spec_len=%.2f max_spec_len=%d num_reqs=%d "
+        "query_lens_sum=%d query_lens_max=%d query_lens=%s ms_per_token=%.4f "
+        "ms_per_spec_token=%.4f shape_count=%d shape_avg_ms=%.3f shape_min_ms=%.3f "
+        "shape_max_ms=%.3f timing_mode=execute_model_wall",
         elapsed_ms,
         scheduler_output.total_num_scheduled_tokens,
         spec_reqs,
         spec_tokens,
         avg_spec_len,
         max(spec_lens, default=0),
-        len(scheduler_output.num_scheduled_tokens),
+        num_reqs,
+        sum(query_lens),
+        max(query_lens, default=0),
+        query_lens[:max_records],
+        ms_per_token,
+        ms_per_spec_token,
+        count,
+        avg_ms,
+        min_ms,
+        max_ms,
     )
+
+
+def _dcut_scheduler_query_lens(scheduler_output) -> list[int]:
+    num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+    if hasattr(num_scheduled_tokens, "values"):
+        return [int(value) for value in num_scheduled_tokens.values()]
+    return _dcut_to_int_list(num_scheduled_tokens)
 
 
 def _supports_dcut(runner) -> bool:

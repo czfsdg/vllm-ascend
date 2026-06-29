@@ -187,6 +187,16 @@ memory-profile-style behavior for debugging. Each profiled budget is measured
 individually and D-Cut records the median of `n_measure_iters` samples to reduce
 noise from one-off NPU scheduling spikes.
 
+For the first pass of a performance investigation, enable
+`log_verifier_timing=true` and `log_attention_query_shape=true` only. This keeps
+the online verifier measurement to one synchronize before and after
+`execute_model`, reports `timing_mode=execute_model_wall`, prints the query lens
+that were actually sent to the verifier, and accumulates per-shape min/average/max
+latency so you can compare whether lower Q changes verifier time. Enable
+`log_verifier_breakdown`, `log_attention_timing`, and module-level breakdown only
+after the low-overhead timing confirms which shapes are flat or slow, because
+those diagnostics insert additional synchronization.
+
 Before using a profiled batch size for adaptive cuts, D-Cut checks whether any
 lower-Q budget actually reduces verifier cost relative to the full budget by at
 least `min_cost_reduction_ratio` (default `0.05`). If Q reduction is effectively
