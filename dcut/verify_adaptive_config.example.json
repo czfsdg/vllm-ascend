@@ -20,6 +20,8 @@
   "log_verifier_breakdown_interval": 1,
   "log_model_forward_module_breakdown": true,
   "log_model_forward_module_top_k": 12,
+  "log_function_input_shapes": true,
+  "log_function_input_shapes_max_items": 8,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }

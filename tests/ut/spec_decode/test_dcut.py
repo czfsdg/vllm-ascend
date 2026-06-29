@@ -47,6 +47,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_verifier_breakdown_interval": 6,
         "log_model_forward_module_breakdown": True,
         "log_model_forward_module_top_k": 7,
+        "log_function_input_shapes": True,
+        "log_function_input_shapes_max_items": 5,
         "unknown": "ignored",
     })
 
@@ -66,6 +68,8 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_verifier_breakdown_interval == 6
     assert cfg.log_model_forward_module_breakdown is True
     assert cfg.log_model_forward_module_top_k == 7
+    assert cfg.log_function_input_shapes is True
+    assert cfg.log_function_input_shapes_max_items == 5
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -138,6 +142,13 @@ def test_verify_adaptive_config_rejects_invalid_model_forward_module_top_k():
     cfg = VerifyAdaptiveConfig(log_model_forward_module_breakdown=True, log_model_forward_module_top_k=0)
 
     with pytest.raises(ValueError, match="log_model_forward_module_top_k"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_function_input_shapes_max_items():
+    cfg = VerifyAdaptiveConfig(log_function_input_shapes=True, log_function_input_shapes_max_items=0)
+
+    with pytest.raises(ValueError, match="log_function_input_shapes_max_items"):
         cfg.validate(num_speculative_tokens=4)
 
 

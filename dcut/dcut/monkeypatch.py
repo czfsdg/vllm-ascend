@@ -425,6 +425,8 @@ def _dcut_start_verifier_breakdown(runner, scheduler_output):
         "module_stack": {},
         "phases": {},
         "module_top_k": controller.config.log_model_forward_module_top_k,
+        "log_input_shapes": controller.config.log_function_input_shapes,
+        "input_shapes_max_items": controller.config.log_function_input_shapes_max_items,
         "spec_tokens": sum(spec_lens),
         "spec_reqs": len(spec_lens),
     }
@@ -462,10 +464,67 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
     )
 
 
+
+def _dcut_log_function_input_shapes(phase_name: str, args, kwargs, context: dict) -> None:
+    if not context.get("log_input_shapes", False):
+        return
+    max_items = context.get("input_shapes_max_items", 8)
+    logger.info(
+        "D-Cut function input shapes: phase=%s args=%s kwargs=%s",
+        phase_name,
+        _dcut_summarize_call_values(args, max_items),
+        _dcut_summarize_call_values(kwargs, max_items),
+    )
+
+
+def _dcut_summarize_call_values(values, max_items: int):
+    if isinstance(values, dict):
+        return {
+            str(key): _dcut_summarize_value(value)
+            for key, value in list(values.items())[:max_items]
+        }
+    return [_dcut_summarize_value(value) for value in list(values)[:max_items]]
+
+
+def _dcut_summarize_value(value):
+    if value is None:
+        return "None"
+    if isinstance(value, torch.Tensor):
+        return {
+            "type": "Tensor",
+            "shape": tuple(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+        }
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        items = [_dcut_summarize_value(item) for item in list(value)[:4]]
+        return {"type": type(value).__name__, "len": len(value), "items": items}
+    if isinstance(value, dict):
+        return {
+            "type": "dict",
+            "len": len(value),
+            "items": {
+                str(key): _dcut_summarize_value(item)
+                for key, item in list(value.items())[:4]
+            },
+        }
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return {"type": value.__class__.__name__, "shape": tuple(shape)}
+    if hasattr(value, "__len__"):
+        try:
+            return {"type": value.__class__.__name__, "len": len(value)}
+        except TypeError:
+            pass
+    return {"type": value.__class__.__name__}
+
 def _dcut_time_callable_phase(phase_name: str, original_callable, args, kwargs):
     context = _VERIFIER_BREAKDOWN_CONTEXT.get()
     if context is None:
         return original_callable(*args, **kwargs)
+    _dcut_log_function_input_shapes(phase_name, args, kwargs, context)
     torch.npu.synchronize()
     start = time.perf_counter()
     result = original_callable(*args, **kwargs)
@@ -480,6 +539,7 @@ def _dcut_time_runner_phase(phase_name: str, original_method, runner, args, kwar
     context = _VERIFIER_BREAKDOWN_CONTEXT.get()
     if context is None:
         return original_method(runner, *args, **kwargs)
+    _dcut_log_function_input_shapes(phase_name, args, kwargs, context)
     torch.npu.synchronize()
     start = time.perf_counter()
     result = original_method(runner, *args, **kwargs)

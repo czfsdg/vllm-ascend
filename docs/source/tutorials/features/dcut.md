@@ -70,6 +70,8 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_verifier_breakdown_interval": 1,
   "log_model_forward_module_breakdown": true,
   "log_model_forward_module_top_k": 12,
+  "log_function_input_shapes": true,
+  "log_function_input_shapes_max_items": 8,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -160,6 +162,14 @@ model forward, metadata/preprocessing, or code outside the patched phases. If
 forward hooks and prints the top module classes/names inside model forward; this
 is very expensive because it synchronizes per module call, so use it only for
 short single-run diagnostics.
+
+Set `log_function_input_shapes=true` together with `log_verifier_breakdown=true`
+to print a compact type/shape summary for patched function entry arguments,
+including runner phases such as `_model_forward`, input preparation, attention
+metadata building, preprocessing, and logits computation. Tensor summaries include
+shape, dtype, and device without calling `item()`. Use
+`log_function_input_shapes_max_items` to cap the number of positional or keyword
+arguments printed per function.
 
 `batch_size_step=1` profiles every batch size by default, so a runtime batch
 size of 3 uses budget buckets built for batch size 3 instead of being rounded up
