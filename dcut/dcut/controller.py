@@ -158,6 +158,7 @@ class VerifyAdaptiveController:
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
+        self._filter_query_levels_without_cost_gain()
         self._dump_cost_table_if_requested()
         logger.info("D-Cut: cost table ready (%d entries).", len(self._cost_table))
 
@@ -201,6 +202,39 @@ class VerifyAdaptiveController:
             profile_seq_lens=self.config.warmup_seq_lens,
             profile_num_scheduled_tokens=profile_query_lens,
         )
+
+    def _filter_query_levels_without_cost_gain(self) -> None:
+        min_ratio = self.config.min_cost_reduction_ratio
+        if min_ratio <= 0.0:
+            return
+        filtered_bs: list[int] = []
+        for batch_size in self._sorted_bs:
+            q_levels = self._sorted_sql_per_bs.get(batch_size) or []
+            if len(q_levels) < 2:
+                filtered_bs.append(batch_size)
+                continue
+            full_q = q_levels[-1]
+            full_cost = self._cost_table[(batch_size, full_q)]
+            if full_cost <= 0.0:
+                filtered_bs.append(batch_size)
+                continue
+            best_reduction = max((full_cost - self._cost_table[(batch_size, q)]) / full_cost
+                                 for q in q_levels[:-1])
+            if best_reduction >= min_ratio:
+                filtered_bs.append(batch_size)
+                continue
+            self._sorted_sql_per_bs[batch_size] = [full_q]
+            logger.warning(
+                "D-Cut: disable adaptive query cuts for batch_size=%d because profiled lower-Q budgets "
+                "do not reduce verifier cost enough: best_reduction=%.4f required=%.4f full_Q=%d full_cost_ms=%.3f",
+                batch_size,
+                best_reduction,
+                min_ratio,
+                full_q,
+                full_cost * 1000.0,
+            )
+            filtered_bs.append(batch_size)
+        self._sorted_bs = filtered_bs
 
     def process_draft_output(self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str],
                              batch_size: int) -> None:

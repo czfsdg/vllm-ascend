@@ -187,6 +187,14 @@ memory-profile-style behavior for debugging. Each profiled budget is measured
 individually and D-Cut records the median of `n_measure_iters` samples to reduce
 noise from one-off NPU scheduling spikes.
 
+Before using a profiled batch size for adaptive cuts, D-Cut checks whether any
+lower-Q budget actually reduces verifier cost relative to the full budget by at
+least `min_cost_reduction_ratio` (default `0.05`). If Q reduction is effectively
+flat on the current NPU/kernel shape, D-Cut keeps only the full-budget candidate
+for that batch size and logs a warning. This prevents the planner from cutting
+speculative tokens when the measured cost table says the cut has no meaningful
+latency benefit.
+
 D-Cut uses `budget_ratios` to build batch-level verify budget candidates. For
 example, with `num_speculative_tokens=7`, `batch_size=16`, and
 `budget_ratios=[0.25, 0.5, 0.75, 1.0]`, the speculative budgets are

@@ -50,6 +50,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_function_input_shapes": True,
         "log_function_input_shapes_max_items": 5,
         "profile_in_profile_run": True,
+        "min_cost_reduction_ratio": 0.07,
         "unknown": "ignored",
     })
 
@@ -72,6 +73,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_function_input_shapes is True
     assert cfg.log_function_input_shapes_max_items == 5
     assert cfg.profile_in_profile_run is True
+    assert cfg.min_cost_reduction_ratio == 0.07
 
 
 def test_choose_query_lens_discrete_requires_meaningful_score_gain():
@@ -158,6 +160,13 @@ def test_verify_adaptive_config_rejects_invalid_min_score_improvement_ratio():
     cfg = VerifyAdaptiveConfig(min_score_improvement_ratio=-0.1)
 
     with pytest.raises(ValueError, match="min_score_improvement_ratio"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_min_cost_reduction_ratio():
+    cfg = VerifyAdaptiveConfig(min_cost_reduction_ratio=-0.1)
+
+    with pytest.raises(ValueError, match="min_cost_reduction_ratio"):
         cfg.validate(num_speculative_tokens=4)
 
 
@@ -333,3 +342,39 @@ def test_build_profile_query_lens_rejects_invalid_token_count():
         VerifyAdaptiveController._build_profile_query_lens(controller, 4, 3)
     with pytest.raises(ValueError, match="exceeds batch capacity"):
         VerifyAdaptiveController._build_profile_query_lens(controller, 4, 33)
+
+
+def test_filter_query_levels_without_cost_gain_keeps_full_budget_when_flat():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(min_cost_reduction_ratio=0.05),
+        _sorted_bs=[4],
+        _sorted_sql_per_bs={4: [11, 18, 25, 32]},
+        _cost_table={
+            (4, 11): 0.028,
+            (4, 18): 0.0275,
+            (4, 25): 0.0278,
+            (4, 32): 0.0282,
+        },
+    )
+
+    VerifyAdaptiveController._filter_query_levels_without_cost_gain(controller)
+
+    assert controller._sorted_sql_per_bs[4] == [32]
+
+
+def test_filter_query_levels_without_cost_gain_keeps_lower_budgets_when_useful():
+    controller = SimpleNamespace(
+        config=SimpleNamespace(min_cost_reduction_ratio=0.05),
+        _sorted_bs=[4],
+        _sorted_sql_per_bs={4: [11, 18, 25, 32]},
+        _cost_table={
+            (4, 11): 0.020,
+            (4, 18): 0.024,
+            (4, 25): 0.026,
+            (4, 32): 0.028,
+        },
+    )
+
+    VerifyAdaptiveController._filter_query_levels_without_cost_gain(controller)
+
+    assert controller._sorted_sql_per_bs[4] == [11, 18, 25, 32]
