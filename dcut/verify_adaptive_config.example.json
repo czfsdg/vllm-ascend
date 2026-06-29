@@ -5,6 +5,7 @@
   "max_warmup_batch_size": 64,
   "query_len_step_per_req": 2,
   "min_query_len_per_req": 2,
+  "n_profile_presweep_iters": 1,
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
   "profile_in_profile_run": false,

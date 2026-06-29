@@ -136,31 +136,49 @@ class VerifyAdaptiveController:
     def profile_cost_table(self, runner: Any) -> None:
         if not self.config.enabled:
             return
+        profile_shapes: list[tuple[int, int]] = []
         max_tokens = getattr(runner, "max_num_tokens", None)
         for batch_size in self._batch_size_levels:
             self._sorted_sql_per_bs[batch_size] = []
             for num_tokens in self._build_sum_query_len_levels(batch_size):
                 if max_tokens is not None and num_tokens > max_tokens:
                     continue
-                avg_ms = self._measure_runner(runner, batch_size, num_tokens)
-                self._cost_table[(batch_size, num_tokens)] = avg_ms / 1000.0
-                self._sorted_sql_per_bs[batch_size].append(num_tokens)
-                self._cost_records.append({
-                    "batch_size": batch_size,
-                    "query_len_per_req": num_tokens / batch_size,
-                    "sum_query_len": num_tokens,
-                    "draft_budget_tokens": max(num_tokens - batch_size, 0),
-                    "draft_budget_ratio": max(num_tokens - batch_size, 0) /
-                    max(batch_size * (self.max_query_len_per_req - 1), 1),
-                    "avg_ms": avg_ms,
-                    "cost_s": avg_ms / 1000.0,
-                })
+                profile_shapes.append((batch_size, num_tokens))
+        self._presweep_profile_shapes(runner, profile_shapes)
+        for batch_size, num_tokens in profile_shapes:
+            avg_ms = self._measure_runner(runner, batch_size, num_tokens)
+            self._cost_table[(batch_size, num_tokens)] = avg_ms / 1000.0
+            self._sorted_sql_per_bs[batch_size].append(num_tokens)
+            self._cost_records.append({
+                "batch_size": batch_size,
+                "query_len_per_req": num_tokens / batch_size,
+                "sum_query_len": num_tokens,
+                "draft_budget_tokens": max(num_tokens - batch_size, 0),
+                "draft_budget_ratio": max(num_tokens - batch_size, 0) /
+                max(batch_size * (self.max_query_len_per_req - 1), 1),
+                "avg_ms": avg_ms,
+                "cost_s": avg_ms / 1000.0,
+            })
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
         self._filter_query_levels_without_cost_gain()
         self._dump_cost_table_if_requested()
         logger.info("D-Cut: cost table ready (%d entries).", len(self._cost_table))
+
+    def _presweep_profile_shapes(self, runner: Any, profile_shapes: list[tuple[int, int]]) -> None:
+        if self.config.n_profile_presweep_iters <= 0 or not profile_shapes:
+            return
+        logger.info(
+            "D-Cut: pre-sweeping %d verifier profile shapes for %d iterations before measured cost collection.",
+            len(profile_shapes),
+            self.config.n_profile_presweep_iters,
+        )
+        for _ in range(self.config.n_profile_presweep_iters):
+            for batch_size, num_tokens in profile_shapes:
+                profile_query_lens = self._build_profile_query_lens(batch_size, num_tokens)
+                self._run_profile_iteration(runner, num_tokens, profile_query_lens)
+        torch.npu.synchronize()
 
     def _measure_runner(self, runner: Any, batch_size: int, num_tokens: int) -> float:
         profile_query_lens = self._build_profile_query_lens(batch_size, num_tokens)

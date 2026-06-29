@@ -772,7 +772,7 @@ def _dcut_profile_cost(runner) -> None:
     if controller is None:
         return
     if not getattr(runner, "_dcut_profile_num_scheduled_tokens_supported", True):
-        logger.error(
+        logger.warning(
             "D-Cut: skip cost profiling because installed NPUModelRunner._dummy_run does not accept "
             "profile_num_scheduled_tokens. Profiling without explicit scheduled-token shapes is misleading "
             "because lower-Q rows can be measured as fewer near-full requests. Update vllm-ascend to use "

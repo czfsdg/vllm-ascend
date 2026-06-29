@@ -23,6 +23,7 @@ class VerifyAdaptiveConfig:
     max_query_len_per_req: int | None = None
     min_query_len_per_req: int = 2
     warmup_seq_lens: int = 4096
+    n_profile_presweep_iters: int = 1
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
     profile_in_profile_run: bool = False
@@ -68,6 +69,8 @@ class VerifyAdaptiveConfig:
                 f"effective max_query_len_per_req ({max_query_len}).")
         if self.warmup_seq_lens < 1:
             raise ValueError("warmup_seq_lens must be >= 1.")
+        if self.n_profile_presweep_iters < 0:
+            raise ValueError("n_profile_presweep_iters must be >= 0.")
         if self.n_warmup_iters < 0:
             raise ValueError("n_warmup_iters must be >= 0.")
         if self.n_measure_iters < 1:

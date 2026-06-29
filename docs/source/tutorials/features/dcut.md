@@ -187,6 +187,12 @@ memory-profile-style behavior for debugging. Each profiled budget is measured
 individually and D-Cut records the median of `n_measure_iters` samples to reduce
 noise from one-off NPU scheduling spikes.
 
+Because Ascend/NPU warmup can materially change the first execution time for a
+shape, D-Cut runs a full pre-sweep over every planned profiling shape before
+collecting measured samples. Tune `n_profile_presweep_iters` to control this
+global shape warmup pass; keep the per-shape `n_warmup_iters` for additional
+local warmup immediately before each measured budget.
+
 For the first pass of a performance investigation, enable
 `log_verifier_timing=true` and `log_attention_query_shape=true` only. This keeps
 the online verifier measurement to one synchronize before and after

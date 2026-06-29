@@ -51,6 +51,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
         "log_function_input_shapes": True,
         "log_function_input_shapes_max_items": 5,
         "profile_in_profile_run": True,
+        "n_profile_presweep_iters": 2,
         "min_cost_reduction_ratio": 0.07,
         "unknown": "ignored",
     })
@@ -74,6 +75,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_function_input_shapes is True
     assert cfg.log_function_input_shapes_max_items == 5
     assert cfg.profile_in_profile_run is True
+    assert cfg.n_profile_presweep_iters == 2
     assert cfg.min_cost_reduction_ratio == 0.07
 
 
@@ -161,6 +163,13 @@ def test_verify_adaptive_config_rejects_invalid_min_score_improvement_ratio():
     cfg = VerifyAdaptiveConfig(min_score_improvement_ratio=-0.1)
 
     with pytest.raises(ValueError, match="min_score_improvement_ratio"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_profile_presweep_iters():
+    cfg = VerifyAdaptiveConfig(n_profile_presweep_iters=-1)
+
+    with pytest.raises(ValueError, match="n_profile_presweep_iters"):
         cfg.validate(num_speculative_tokens=4)
 
 
@@ -343,6 +352,35 @@ def test_build_profile_query_lens_rejects_invalid_token_count():
         VerifyAdaptiveController._build_profile_query_lens(controller, 4, 3)
     with pytest.raises(ValueError, match="exceeds batch capacity"):
         VerifyAdaptiveController._build_profile_query_lens(controller, 4, 33)
+
+
+def test_presweep_profile_shapes_runs_before_measurement(monkeypatch):
+    calls = []
+    controller = SimpleNamespace(
+        config=SimpleNamespace(n_profile_presweep_iters=2),
+        max_query_len_per_req=8,
+    )
+    monkeypatch.setattr(
+        controller_module.torch,
+        "npu",
+        SimpleNamespace(synchronize=lambda: calls.append(("sync",))),
+        raising=False,
+    )
+
+    def fake_run_profile_iteration(_runner, num_tokens, profile_query_lens):
+        calls.append((num_tokens, profile_query_lens))
+
+    controller._run_profile_iteration = fake_run_profile_iteration
+
+    VerifyAdaptiveController._presweep_profile_shapes(controller, object(), [(2, 9), (3, 17)])
+
+    assert calls == [
+        (9, [5, 4]),
+        (17, [6, 6, 5]),
+        (9, [5, 4]),
+        (17, [6, 6, 5]),
+        ("sync",),
+    ]
 
 
 def test_filter_query_levels_without_cost_gain_keeps_full_budget_when_flat():
