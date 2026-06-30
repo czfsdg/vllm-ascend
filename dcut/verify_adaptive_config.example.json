@@ -25,7 +25,7 @@
   "log_function_input_shapes": true,
   "log_function_input_shapes_max_items": 8,
   "fixed_cut_ratio": 0.25,
-  "apply_runtime_cuts": false,
+  "apply_runtime_cuts": true,
   "min_score_improvement_ratio": 0.0,
   "min_cost_reduction_ratio": 0.05,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
