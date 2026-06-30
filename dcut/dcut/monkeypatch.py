@@ -1056,6 +1056,8 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
     tokens_delta = 0
     for req_id, draft_toks in list(new_spec.items()):
         adaptive_len = controller.get_adaptive_draft_len(req_id)
+        if adaptive_len is not None:
+            controller.invalidate(req_id)
         if adaptive_len is not None and adaptive_len < len(draft_toks):
             min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
             if adaptive_len < min_draft_len:

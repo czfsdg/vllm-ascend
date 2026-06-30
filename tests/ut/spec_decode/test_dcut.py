@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -177,6 +178,59 @@ def test_process_draft_output_fixed_cut_ratio_uses_batch_budget():
         "req1": 7,
         "req2": 1,
     }
+
+
+def test_truncate_scheduler_output_consumes_adaptive_plan():
+    @dataclass
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    class FakeController:
+        config = SimpleNamespace(log_decision_details=False)
+
+        def __init__(self):
+            self.plans = {
+                "req0": 1,
+                "req1": 2,
+            }
+            self.invalidated = []
+
+        def get_adaptive_draft_len(self, req_id):
+            return self.plans.get(req_id)
+
+        def invalidate(self, req_id):
+            self.invalidated.append(req_id)
+            self.plans.pop(req_id, None)
+
+    controller = FakeController()
+    runner = SimpleNamespace(_dcut_controller=controller)
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={
+            "req0": [10, 11, 12],
+            "req1": [20, 21],
+        },
+        num_scheduled_tokens={
+            "req0": 4,
+            "req1": 3,
+        },
+        total_num_scheduled_tokens=7,
+    )
+
+    truncated = dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output)
+
+    assert truncated.scheduled_spec_decode_tokens == {
+        "req0": [10],
+        "req1": [20, 21],
+    }
+    assert truncated.num_scheduled_tokens == {
+        "req0": 2,
+        "req1": 3,
+    }
+    assert truncated.total_num_scheduled_tokens == 5
+    assert controller.invalidated == ["req0", "req1"]
+    assert controller.plans == {}
 
 
 def test_verify_adaptive_config_rejects_invalid_attention_query_shape_interval():
