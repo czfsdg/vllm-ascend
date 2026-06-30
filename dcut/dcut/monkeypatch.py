@@ -1051,6 +1051,9 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
     controller = getattr(runner, "_dcut_controller", None)
     if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
         return scheduler_output
+    if not controller.config.apply_runtime_cuts:
+        _dcut_clear_scheduler_plans(controller, scheduler_output)
+        return scheduler_output
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
@@ -1105,6 +1108,12 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
         num_scheduled_tokens=new_num_sched,
         total_num_scheduled_tokens=tokens_after,
     )
+
+
+def _dcut_clear_scheduler_plans(controller, scheduler_output) -> None:
+    for req_id in scheduler_output.scheduled_spec_decode_tokens:
+        if controller.get_adaptive_draft_len(req_id) is not None:
+            controller.invalidate(req_id)
 
 
 def _dcut_min_safe_draft_len(runner, req_id: str) -> int:

@@ -74,6 +74,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_function_input_shapes": true,
   "log_function_input_shapes_max_items": 8,
   "fixed_cut_ratio": 0.25,
+  "apply_runtime_cuts": false,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -145,7 +146,10 @@ For diagnostic runs that need a deterministic post-cut verifier shape, set
 of the whole batch's verifier query tokens, subject to `min_query_len_per_req`.
 The kept draft slots are assigned by the same cumulative-probability ordering as
 normal D-Cut, so different requests in the same batch can be cut by different
-amounts while the batch-level token budget is fixed.
+amounts while the batch-level token budget is fixed. Runtime truncation is guarded
+by `apply_runtime_cuts`; keep it `false` for correctness-focused runs because
+late scheduler-output truncation is only a diagnostic path until the cut can be
+moved into an earlier scheduler/proposer integration point.
 
 Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
 logs with the post-cut scheduled token count and speculative token count. This

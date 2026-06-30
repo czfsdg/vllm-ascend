@@ -55,6 +55,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
             "profile_in_profile_run": True,
             "n_profile_presweep_iters": 2,
             "fixed_cut_ratio": 0.25,
+            "apply_runtime_cuts": True,
             "min_cost_reduction_ratio": 0.07,
             "unknown": "ignored",
         }
@@ -81,6 +82,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.profile_in_profile_run is True
     assert cfg.n_profile_presweep_iters == 2
     assert cfg.fixed_cut_ratio == 0.25
+    assert cfg.apply_runtime_cuts is True
     assert cfg.min_cost_reduction_ratio == 0.07
 
 
@@ -188,7 +190,7 @@ def test_truncate_scheduler_output_consumes_adaptive_plan():
         total_num_scheduled_tokens: int
 
     class FakeController:
-        config = SimpleNamespace(log_decision_details=False)
+        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True)
 
         def __init__(self):
             self.plans = {
@@ -230,6 +232,37 @@ def test_truncate_scheduler_output_consumes_adaptive_plan():
     }
     assert truncated.total_num_scheduled_tokens == 5
     assert controller.invalidated == ["req0", "req1"]
+    assert controller.plans == {}
+
+
+def test_truncate_scheduler_output_skips_cut_when_runtime_cuts_disabled():
+    @dataclass
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    class FakeController:
+        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=False)
+
+        def __init__(self):
+            self.plans = {"req0": 1}
+
+        def get_adaptive_draft_len(self, req_id):
+            return self.plans.get(req_id)
+
+        def invalidate(self, req_id):
+            self.plans.pop(req_id, None)
+
+    controller = FakeController()
+    runner = SimpleNamespace(_dcut_controller=controller)
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"req0": [10, 11, 12]},
+        num_scheduled_tokens={"req0": 4},
+        total_num_scheduled_tokens=4,
+    )
+
+    assert dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
     assert controller.plans == {}
 
 
