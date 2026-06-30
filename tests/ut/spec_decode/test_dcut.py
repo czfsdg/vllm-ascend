@@ -182,12 +182,18 @@ def test_process_draft_output_fixed_cut_ratio_uses_batch_budget():
     }
 
 
-def test_truncate_scheduler_output_skips_unsafe_runtime_cut():
+def test_truncate_scheduler_output_consumes_adaptive_plan_and_rewinds_cached_tokens():
+    @dataclass
+    class FakeCachedReqs:
+        req_ids: list[str]
+        num_computed_tokens: list[int]
+
     @dataclass
     class FakeSchedulerOutput:
         scheduled_spec_decode_tokens: dict[str, list[int]]
         num_scheduled_tokens: dict[str, int]
         total_num_scheduled_tokens: int
+        scheduled_cached_reqs: FakeCachedReqs | None = None
 
     class FakeController:
         config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True)
@@ -208,7 +214,7 @@ def test_truncate_scheduler_output_skips_unsafe_runtime_cut():
             self.plans.pop(req_id, None)
 
     controller = FakeController()
-    runner = SimpleNamespace(_dcut_controller=controller, _dcut_unsafe_cut_skip_warnings=0)
+    runner = SimpleNamespace(_dcut_controller=controller)
     scheduler_output = FakeSchedulerOutput(
         scheduled_spec_decode_tokens={
             "req0": [10, 11, 12],
@@ -219,12 +225,27 @@ def test_truncate_scheduler_output_skips_unsafe_runtime_cut():
             "req1": 3,
         },
         total_num_scheduled_tokens=7,
+        scheduled_cached_reqs=FakeCachedReqs(
+            req_ids=["req0", "req1", "req2"],
+            num_computed_tokens=[104, 203, 300],
+        ),
     )
 
-    assert dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
+    truncated = dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output)
+
+    assert truncated.scheduled_spec_decode_tokens == {
+        "req0": [10],
+        "req1": [20, 21],
+    }
+    assert truncated.num_scheduled_tokens == {
+        "req0": 2,
+        "req1": 3,
+    }
+    assert truncated.total_num_scheduled_tokens == 5
+    assert truncated.scheduled_cached_reqs.num_computed_tokens == [102, 203, 300]
+    assert scheduler_output.scheduled_cached_reqs.num_computed_tokens == [104, 203, 300]
     assert controller.invalidated == ["req0", "req1"]
     assert controller.plans == {}
-    assert runner._dcut_unsafe_cut_skip_warnings == 1
 
 
 def test_truncate_scheduler_output_skips_cut_when_runtime_cuts_disabled():

@@ -74,7 +74,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_function_input_shapes": true,
   "log_function_input_shapes_max_items": 8,
   "fixed_cut_ratio": 0.25,
-  "apply_runtime_cuts": false,
+  "apply_runtime_cuts": true,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -147,12 +147,11 @@ of the whole batch's verifier query tokens, subject to `min_query_len_per_req`.
 The kept draft slots are assigned by the same cumulative-probability ordering as
 normal D-Cut, so different requests in the same batch can be cut by different
 amounts while the batch-level token budget is fixed. Runtime truncation is guarded
-by `apply_runtime_cuts`. The current plugin leaves this disabled by default
-because cutting only the late `SchedulerOutput` is not correctness-safe unless
-the verifier input, spec-decode metadata, draft probabilities, and
-rejection-sampler offsets are truncated together. Keep it `false` for
-accuracy-safe planning/timing diagnostics until scheduler-native truncation is
-available.
+by `apply_runtime_cuts`; leave it `true` to apply the planned cut, or set it to
+`false` when you only want planning/timing diagnostics. The runtime cut also
+rewinds the cached request `num_computed_tokens` by the number of removed draft
+tokens so the runner builds positions, spec-decode metadata, and sampler offsets
+from the same shortened verifier shape.
 
 Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
 logs with the post-cut scheduled token count and speculative token count. This
