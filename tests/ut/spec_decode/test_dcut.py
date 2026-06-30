@@ -182,7 +182,7 @@ def test_process_draft_output_fixed_cut_ratio_uses_batch_budget():
     }
 
 
-def test_truncate_scheduler_output_consumes_adaptive_plan():
+def test_truncate_scheduler_output_skips_unsafe_runtime_cut():
     @dataclass
     class FakeSchedulerOutput:
         scheduled_spec_decode_tokens: dict[str, list[int]]
@@ -208,7 +208,7 @@ def test_truncate_scheduler_output_consumes_adaptive_plan():
             self.plans.pop(req_id, None)
 
     controller = FakeController()
-    runner = SimpleNamespace(_dcut_controller=controller)
+    runner = SimpleNamespace(_dcut_controller=controller, _dcut_unsafe_cut_skip_warnings=0)
     scheduler_output = FakeSchedulerOutput(
         scheduled_spec_decode_tokens={
             "req0": [10, 11, 12],
@@ -221,19 +221,10 @@ def test_truncate_scheduler_output_consumes_adaptive_plan():
         total_num_scheduled_tokens=7,
     )
 
-    truncated = dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output)
-
-    assert truncated.scheduled_spec_decode_tokens == {
-        "req0": [10],
-        "req1": [20, 21],
-    }
-    assert truncated.num_scheduled_tokens == {
-        "req0": 2,
-        "req1": 3,
-    }
-    assert truncated.total_num_scheduled_tokens == 5
+    assert dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
     assert controller.invalidated == ["req0", "req1"]
     assert controller.plans == {}
+    assert runner._dcut_unsafe_cut_skip_warnings == 1
 
 
 def test_truncate_scheduler_output_skips_cut_when_runtime_cuts_disabled():

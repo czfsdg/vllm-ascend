@@ -197,6 +197,7 @@ def _patch_runner(cls):
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
         self._dcut_mixed_prefill_skip_warnings = 0
+        self._dcut_unsafe_cut_skip_warnings = 0
         _dcut_init_controller(self)
         _dcut_patch_model_compute_logits(self)
         _dcut_patch_model_forward_call(self)
@@ -1059,6 +1060,12 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
     if not controller.config.apply_runtime_cuts:
         _dcut_clear_scheduler_plans(controller, scheduler_output)
         return scheduler_output
+    _dcut_log_skip_unsafe_runtime_cut(runner, scheduler_output)
+    _dcut_clear_scheduler_plans(controller, scheduler_output)
+    return scheduler_output
+
+
+def _dcut_apply_scheduler_output_cut_unsafe(runner, scheduler_output, controller):
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
@@ -1113,6 +1120,18 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
         num_scheduled_tokens=new_num_sched,
         total_num_scheduled_tokens=tokens_after,
     )
+
+
+def _dcut_log_skip_unsafe_runtime_cut(runner, scheduler_output) -> None:
+    warnings = getattr(runner, "_dcut_unsafe_cut_skip_warnings", 0)
+    if warnings >= 5:
+        return
+    logger.warning(
+        "D-Cut: skip runtime cut because late SchedulerOutput truncation is not correctness-safe. "
+        "The verifier input, spec decode metadata, draft probabilities, and rejection-sampler offsets "
+        "must be truncated together; keeping the original scheduler output to preserve accuracy."
+    )
+    runner._dcut_unsafe_cut_skip_warnings = warnings + 1
 
 
 def _dcut_clear_scheduler_plans(controller, scheduler_output) -> None:

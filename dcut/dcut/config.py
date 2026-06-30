@@ -44,7 +44,7 @@ class VerifyAdaptiveConfig:
     log_function_input_shapes: bool = False
     log_function_input_shapes_max_items: int = 8
     fixed_cut_ratio: float | None = None
-    apply_runtime_cuts: bool = True
+    apply_runtime_cuts: bool = False
     min_score_improvement_ratio: float = 0.0
     min_cost_reduction_ratio: float = 0.05
     enabled: bool = True
