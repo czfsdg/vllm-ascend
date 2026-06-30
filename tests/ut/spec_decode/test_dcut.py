@@ -641,3 +641,38 @@ def test_top_gdn_records_rounds_and_limits_metadata():
             "metadata": {"spec_state_indices_tensor": {"shape": (2, 8)}},
         }
     ]
+
+
+def test_gdn_input_summary_reads_keyword_arguments():
+    hidden = SimpleNamespace(shape=(8, 4096))
+    output = SimpleNamespace(shape=(8, 4096))
+
+    summary = dcut_monkeypatch._dcut_summarize_gdn_inputs((), {"hidden_states": hidden, "output": output})
+
+    assert summary == {
+        "hidden_states": {"type": "SimpleNamespace", "shape": (8, 4096)},
+        "output": {"type": "SimpleNamespace", "shape": (8, 4096)},
+    }
+
+
+def test_gdn_metadata_summary_selects_module_prefix(monkeypatch):
+    class Module:
+        prefix = "language_model.model.layers.0.linear_attn"
+
+    metadata = SimpleNamespace(
+        num_actual_tokens=8,
+        num_spec_decodes=1,
+        max_query_len=8,
+        actual_seq_lengths_q=[8],
+        spec_state_indices_tensor=SimpleNamespace(shape=(1, 8)),
+    )
+    context = SimpleNamespace(attn_metadata={Module.prefix: metadata})
+    monkeypatch.setattr(dcut_monkeypatch, "get_forward_context", lambda: context)
+
+    summary = dcut_monkeypatch._dcut_summarize_gdn_metadata(Module())
+
+    assert summary["num_actual_tokens"] == 8
+    assert summary["num_spec_decodes"] == 1
+    assert summary["max_query_len"] == 8
+    assert summary["actual_seq_lengths_q"] == {"type": "list", "len": 1, "first": 8, "last": 8}
+    assert summary["spec_state_indices_tensor"] == {"type": "SimpleNamespace", "shape": (1, 8)}

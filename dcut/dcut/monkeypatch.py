@@ -419,8 +419,8 @@ def _dcut_patch_model_forward_modules(runner) -> None:
             handles.append(module.register_forward_hook(_dcut_make_layer_block_post_hook(layer_block_name)))
             layer_block_count += 1
         if _dcut_should_trace_gdn_module(name, module):
-            handles.append(module.register_forward_pre_hook(_dcut_make_gdn_pre_hook(name)))
-            handles.append(module.register_forward_hook(_dcut_make_gdn_post_hook(name)))
+            handles.append(module.register_forward_pre_hook(_dcut_make_gdn_pre_hook(name), with_kwargs=True))
+            handles.append(module.register_forward_hook(_dcut_make_gdn_post_hook(name), with_kwargs=True))
             gdn_count += 1
         if not _dcut_should_time_module(module):
             continue
@@ -461,7 +461,7 @@ def _dcut_should_trace_gdn_module(name: str, module) -> bool:
 
 
 def _dcut_make_gdn_pre_hook(name: str):
-    def pre_hook(module, inputs):
+    def pre_hook(module, inputs, kwargs):
         context = _VERIFIER_BREAKDOWN_CONTEXT.get()
         if context is None:
             return
@@ -471,8 +471,8 @@ def _dcut_make_gdn_pre_hook(name: str):
                 "start": time.perf_counter(),
                 "name": name,
                 "class": module.__class__.__name__,
-                "inputs": _dcut_summarize_gdn_inputs(inputs),
-                "metadata": _dcut_summarize_gdn_metadata(),
+                "inputs": _dcut_summarize_gdn_inputs(inputs, kwargs),
+                "metadata": _dcut_summarize_gdn_metadata(module),
             }
         )
 
@@ -480,7 +480,7 @@ def _dcut_make_gdn_pre_hook(name: str):
 
 
 def _dcut_make_gdn_post_hook(name: str):
-    def post_hook(module, _inputs, output):
+    def post_hook(module, _inputs, _kwargs, output):
         context = _VERIFIER_BREAKDOWN_CONTEXT.get()
         if context is None:
             return
@@ -504,20 +504,35 @@ def _dcut_make_gdn_post_hook(name: str):
     return post_hook
 
 
-def _dcut_summarize_gdn_inputs(inputs) -> dict:
-    hidden_states = inputs[0] if inputs else None
-    output = inputs[1] if len(inputs) > 1 else None
+def _dcut_summarize_gdn_inputs(inputs, kwargs) -> dict:
+    hidden_states = kwargs.get("hidden_states") if kwargs else None
+    output = kwargs.get("output") if kwargs else None
+    if hidden_states is None and inputs:
+        hidden_states = inputs[0]
+    if output is None and len(inputs) > 1:
+        output = inputs[1]
     return {
         "hidden_states": _dcut_summarize_value(hidden_states),
         "output": _dcut_summarize_value(output),
     }
 
 
-def _dcut_summarize_gdn_metadata() -> dict:
+def _dcut_summarize_gdn_metadata(module) -> dict:
     forward_context = get_forward_context()
     attn_metadata = getattr(forward_context, "attn_metadata", None)
     if attn_metadata is None:
         return {}
+    if isinstance(attn_metadata, dict):
+        prefix = getattr(module, "prefix", None)
+        if prefix in attn_metadata:
+            attn_metadata = attn_metadata[prefix]
+        else:
+            return {
+                "type": "dict",
+                "len": len(attn_metadata),
+                "prefix": prefix,
+                "keys": list(attn_metadata.keys())[:4],
+            }
     return {
         key: _dcut_summarize_metadata_value(getattr(attn_metadata, key, None))
         for key in (
