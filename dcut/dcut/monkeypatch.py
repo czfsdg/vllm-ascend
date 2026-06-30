@@ -12,6 +12,7 @@ from functools import wraps
 from types import ModuleType
 
 import torch
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
 from dcut.controller import VerifyAdaptiveController, dcut_enabled
@@ -408,6 +409,7 @@ def _dcut_patch_model_forward_modules(runner) -> None:
     handles = []
     leaf_count = 0
     layer_block_count = 0
+    gdn_count = 0
     for name, module in model.named_modules():
         if not name:
             continue
@@ -416,6 +418,10 @@ def _dcut_patch_model_forward_modules(runner) -> None:
             handles.append(module.register_forward_pre_hook(_dcut_make_layer_block_pre_hook(layer_block_name)))
             handles.append(module.register_forward_hook(_dcut_make_layer_block_post_hook(layer_block_name)))
             layer_block_count += 1
+        if _dcut_should_trace_gdn_module(name, module):
+            handles.append(module.register_forward_pre_hook(_dcut_make_gdn_pre_hook(name)))
+            handles.append(module.register_forward_hook(_dcut_make_gdn_post_hook(name)))
+            gdn_count += 1
         if not _dcut_should_time_module(module):
             continue
         handles.append(module.register_forward_pre_hook(_dcut_make_module_pre_hook(name)))
@@ -424,9 +430,10 @@ def _dcut_patch_model_forward_modules(runner) -> None:
     model._dcut_module_timing_handles = handles
     model._dcut_module_timing_patched = True
     logger.info(
-        "D-Cut: installed model-forward timing hooks leaf_modules=%d layer_blocks=%d",
+        "D-Cut: installed model-forward timing hooks leaf_modules=%d layer_blocks=%d gdn_modules=%d",
         leaf_count,
         layer_block_count,
+        gdn_count,
     )
 
 
@@ -446,6 +453,120 @@ def _dcut_should_time_module(module) -> bool:
         return False
     except StopIteration:
         return True
+
+
+def _dcut_should_trace_gdn_module(name: str, module) -> bool:
+    class_name = module.__class__.__name__.lower()
+    return "gateddeltanet" in class_name or name.endswith(".linear_attn")
+
+
+def _dcut_make_gdn_pre_hook(name: str):
+    def pre_hook(module, inputs):
+        context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+        if context is None:
+            return
+        torch.npu.synchronize()
+        context["gdn_stack"].setdefault(id(module), []).append(
+            {
+                "start": time.perf_counter(),
+                "name": name,
+                "class": module.__class__.__name__,
+                "inputs": _dcut_summarize_gdn_inputs(inputs),
+                "metadata": _dcut_summarize_gdn_metadata(),
+            }
+        )
+
+    return pre_hook
+
+
+def _dcut_make_gdn_post_hook(name: str):
+    def post_hook(module, _inputs, output):
+        context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+        if context is None:
+            return
+        stack = context["gdn_stack"].get(id(module))
+        if not stack:
+            return
+        torch.npu.synchronize()
+        record = stack.pop()
+        elapsed_ms = (time.perf_counter() - record["start"]) * 1000.0
+        context["gdn_modules"].append(
+            {
+                "name": name,
+                "class": record["class"],
+                "elapsed_ms": elapsed_ms,
+                "inputs": record["inputs"],
+                "output": _dcut_summarize_value(output),
+                "metadata": record["metadata"],
+            }
+        )
+
+    return post_hook
+
+
+def _dcut_summarize_gdn_inputs(inputs) -> dict:
+    hidden_states = inputs[0] if inputs else None
+    output = inputs[1] if len(inputs) > 1 else None
+    return {
+        "hidden_states": _dcut_summarize_value(hidden_states),
+        "output": _dcut_summarize_value(output),
+    }
+
+
+def _dcut_summarize_gdn_metadata() -> dict:
+    forward_context = get_forward_context()
+    attn_metadata = getattr(forward_context, "attn_metadata", None)
+    if attn_metadata is None:
+        return {}
+    return {
+        key: _dcut_summarize_metadata_value(getattr(attn_metadata, key, None))
+        for key in (
+            "num_actual_tokens",
+            "num_input_tokens",
+            "num_spec_decodes",
+            "num_prefills",
+            "num_decodes",
+            "max_query_len",
+            "actual_seq_lengths_q",
+            "query_start_loc",
+            "spec_query_start_loc",
+            "spec_state_indices_tensor",
+            "spec_sequence_masks",
+            "num_accepted_tokens",
+        )
+        if hasattr(attn_metadata, key)
+    }
+
+
+def _dcut_summarize_metadata_value(value):
+    summary = _dcut_summarize_value(value)
+    if isinstance(value, torch.Tensor):
+        return summary
+    if isinstance(value, (list, tuple)):
+        return {
+            "type": type(value).__name__,
+            "len": len(value),
+            "first": value[0] if value else None,
+            "last": value[-1] if value else None,
+        }
+    return summary
+
+
+def _dcut_top_gdn_records(records: list[dict], top_k: int) -> list[dict]:
+    if not records or top_k < 1:
+        return []
+    top_records = sorted(records, key=lambda item: item["elapsed_ms"], reverse=True)[:top_k]
+    return [
+        {
+            "name": record["name"],
+            "class": record["class"],
+            "elapsed_ms": round(record["elapsed_ms"], 3),
+            "inputs": record["inputs"],
+            "output": record["output"],
+            "metadata": record["metadata"],
+        }
+        for record in top_records
+    ]
 
 
 def _dcut_make_layer_block_pre_hook(name: str):
@@ -536,6 +657,8 @@ def _dcut_start_verifier_breakdown(runner, scheduler_output):
         "module_stack": {},
         "layer_blocks": {},
         "layer_block_stack": {},
+        "gdn_modules": [],
+        "gdn_stack": {},
         "phases": {},
         "module_top_k": controller.config.log_model_forward_module_top_k,
         "log_input_shapes": controller.config.log_function_input_shapes,
@@ -566,7 +689,7 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
     logger.info(
         "D-Cut verifier breakdown: total_ms=%.3f tracked_ms=%.3f untracked_ms=%.3f "
         "total_tokens=%d spec_reqs=%d spec_tokens=%d avg_spec_len=%.2f num_reqs=%d "
-        "phases=%s model_forward_shape_stats=%s layer_blocks=%s module_classes=%s module_names=%s",
+        "phases=%s model_forward_shape_stats=%s layer_blocks=%s gdn_modules=%s module_classes=%s module_names=%s",
         total_elapsed_ms,
         phase_sum_ms,
         untracked_ms,
@@ -578,6 +701,7 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
         {name: round(value, 3) for name, value in sorted(phases.items())},
         model_forward_stats,
         _dcut_top_timing_items(context["layer_blocks"], top_k),
+        _dcut_top_gdn_records(context["gdn_modules"], top_k),
         _dcut_top_timing_items(context["module_classes"], top_k),
         _dcut_top_timing_items(context["module_names"], top_k),
     )

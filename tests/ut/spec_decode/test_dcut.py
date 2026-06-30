@@ -591,3 +591,53 @@ def test_profile_cost_skips_older_dummy_run_signature(monkeypatch):
     dcut_monkeypatch._dcut_profile_cost(runner)
 
     assert "skip cost profiling" in errors[0]
+
+
+def test_gdn_module_detection_targets_linear_attention_blocks():
+    class GatedDeltaNetAttention:
+        pass
+
+    class NestedNorm:
+        pass
+
+    assert dcut_monkeypatch._dcut_should_trace_gdn_module(
+        "language_model.model.layers.0.linear_attn", GatedDeltaNetAttention()
+    )
+    assert dcut_monkeypatch._dcut_should_trace_gdn_module("any.path", GatedDeltaNetAttention())
+    assert not dcut_monkeypatch._dcut_should_trace_gdn_module(
+        "language_model.model.layers.0.linear_attn.norm", NestedNorm()
+    )
+
+
+def test_top_gdn_records_rounds_and_limits_metadata():
+    records = [
+        {
+            "name": "layers.0.linear_attn",
+            "class": "GatedDeltaNetAttention",
+            "elapsed_ms": 1.23456,
+            "inputs": {"hidden_states": {"shape": (8, 4096)}},
+            "output": {"shape": (8, 4096)},
+            "metadata": {"spec_state_indices_tensor": {"shape": (1, 8)}},
+        },
+        {
+            "name": "layers.1.linear_attn",
+            "class": "GatedDeltaNetAttention",
+            "elapsed_ms": 3.98765,
+            "inputs": {"hidden_states": {"shape": (16, 4096)}},
+            "output": {"shape": (16, 4096)},
+            "metadata": {"spec_state_indices_tensor": {"shape": (2, 8)}},
+        },
+    ]
+
+    top = dcut_monkeypatch._dcut_top_gdn_records(records, top_k=1)
+
+    assert top == [
+        {
+            "name": "layers.1.linear_attn",
+            "class": "GatedDeltaNetAttention",
+            "elapsed_ms": 3.988,
+            "inputs": {"hidden_states": {"shape": (16, 4096)}},
+            "output": {"shape": (16, 4096)},
+            "metadata": {"spec_state_indices_tensor": {"shape": (2, 8)}},
+        }
+    ]
