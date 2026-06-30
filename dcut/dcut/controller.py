@@ -278,19 +278,17 @@ class VerifyAdaptiveController:
         active_req_ids = [req_ids[i] for i in active_indices]
         fixed_cut_ratio = self.config.fixed_cut_ratio
         if fixed_cut_ratio is not None:
-            fixed_result = self._choose_fixed_cut_draft_lens(
-                len(active_req_ids), active_probs.shape[1], fixed_cut_ratio
-            )
+            fixed_result = self._choose_fixed_cut_draft_lens(active_probs, fixed_cut_ratio)
             for req_id, draft_len in zip(active_req_ids, fixed_result["draft_lens"]):
                 self._adaptive_draft_lens[req_id] = draft_len
             logger.info(
                 "D-Cut: planned fixed-ratio draft lengths batch_size=%d active_reqs=%d "
-                "fixed_cut_ratio=%.4f full_query_len=%d target_query_len=%d draft_lens=%s",
+                "fixed_cut_ratio=%.4f full_query_tokens=%d target_query_tokens=%d draft_lens=%s",
                 batch_size,
                 len(active_req_ids),
                 fixed_cut_ratio,
-                fixed_result["full_query_len"],
-                fixed_result["target_query_len"],
+                fixed_result["full_query_tokens"],
+                fixed_result["target_query_tokens"],
                 fixed_result["draft_lens"],
             )
             return
@@ -347,18 +345,29 @@ class VerifyAdaptiveController:
     def invalidate(self, req_id: str) -> None:
         self._adaptive_draft_lens.pop(req_id, None)
 
-    def _choose_fixed_cut_draft_lens(
-        self, active_reqs: int, observed_draft_len: int, fixed_cut_ratio: float
-    ) -> dict[str, Any]:
-        full_draft_len = min(observed_draft_len, self.max_query_len_per_req - 1)
+    def _choose_fixed_cut_draft_lens(self, active_probs: np.ndarray, fixed_cut_ratio: float) -> dict[str, Any]:
+        active_reqs = active_probs.shape[0]
+        full_draft_len = min(active_probs.shape[1], self.max_query_len_per_req - 1)
         full_query_len = full_draft_len + 1
-        target_query_len = math.ceil(full_query_len * (1.0 - fixed_cut_ratio))
-        target_query_len = max(self.config.min_query_len_per_req, min(full_query_len, target_query_len))
-        target_draft_len = target_query_len - 1
+        full_query_tokens = active_reqs * full_query_len
+        min_query_len = min(self.config.min_query_len_per_req, full_query_len)
+        min_draft_len = max(min_query_len - 1, 0)
+        min_query_tokens = active_reqs * min_query_len
+        target_query_tokens = math.ceil(full_query_tokens * (1.0 - fixed_cut_ratio))
+        target_query_tokens = max(min_query_tokens, min(full_query_tokens, target_query_tokens))
+        target_draft_slots = target_query_tokens - active_reqs
+        draft_lens = np.full(active_reqs, min_draft_len, dtype=np.int64)
+        remaining_slots = target_draft_slots - int(draft_lens.sum())
+        if remaining_slots > 0 and full_draft_len > min_draft_len:
+            gains = np.cumprod(np.asarray(active_probs, dtype=np.float64)[:, :full_draft_len], axis=1)
+            candidate_gains = gains[:, min_draft_len:].ravel()
+            candidate_seq_ids = np.repeat(np.arange(active_reqs), full_draft_len - min_draft_len)
+            order = np.argsort(-candidate_gains, kind="stable")[:remaining_slots]
+            draft_lens += np.bincount(candidate_seq_ids[order], minlength=active_reqs)
         return {
-            "draft_lens": [target_draft_len] * active_reqs,
-            "full_query_len": full_query_len,
-            "target_query_len": target_query_len,
+            "draft_lens": draft_lens.tolist(),
+            "full_query_tokens": full_query_tokens,
+            "target_query_tokens": target_query_tokens,
         }
 
     def _dump_cost_table_if_requested(self) -> None:

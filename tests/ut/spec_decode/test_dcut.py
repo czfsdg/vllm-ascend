@@ -135,7 +135,7 @@ def test_verify_adaptive_config_rejects_invalid_fixed_cut_ratio():
         cfg.validate(num_speculative_tokens=4)
 
 
-def test_process_draft_output_fixed_cut_ratio_bypasses_cost_table():
+def test_process_draft_output_fixed_cut_ratio_uses_batch_budget():
     class FakeSelectedProbs:
         def __init__(self, values):
             self.values = np.asarray(values, dtype=np.float32)
@@ -157,16 +157,25 @@ def test_process_draft_output_fixed_cut_ratio_bypasses_cost_table():
     controller._sorted_bs = []
 
     controller.process_draft_output(
-        FakeSelectedProbs(np.ones((3, 7), dtype=np.float32)),
+        FakeSelectedProbs(
+            np.array(
+                [
+                    [0.99] * 7,
+                    [0.8] * 7,
+                    [0.1] * 7,
+                ],
+                dtype=np.float32,
+            )
+        ),
         ["req0", "req1", "req2"],
         {"req0", "req1", "req2"},
         batch_size=3,
     )
 
     assert controller._adaptive_draft_lens == {
-        "req0": 5,
-        "req1": 5,
-        "req2": 5,
+        "req0": 7,
+        "req1": 7,
+        "req2": 1,
     }
 
 

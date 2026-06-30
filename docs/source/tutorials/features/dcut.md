@@ -142,9 +142,10 @@ Use `log_decision_interval` to print every Nth decision and
 For diagnostic runs that need a deterministic post-cut verifier shape, set
 `fixed_cut_ratio` to a value in `[0.0, 1.0)`. For example,
 `fixed_cut_ratio=0.25` bypasses the score-based planner and keeps roughly 75%
-of each request's verifier query tokens, subject to `min_query_len_per_req`.
-With `num_speculative_tokens=7`, each request normally verifies 8 query tokens,
-so a 25% fixed cut keeps 6 query tokens (1 anchor + 5 draft tokens).
+of the whole batch's verifier query tokens, subject to `min_query_len_per_req`.
+The kept draft slots are assigned by the same cumulative-probability ordering as
+normal D-Cut, so different requests in the same batch can be cut by different
+amounts while the batch-level token budget is fixed.
 
 Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
 logs with the post-cut scheduled token count and speculative token count. This
