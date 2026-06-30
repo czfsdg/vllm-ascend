@@ -191,6 +191,7 @@ def test_truncate_scheduler_output_consumes_adaptive_plan():
 
     class FakeController:
         config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True)
+        max_query_len_per_req = 8
 
         def __init__(self):
             self.plans = {
@@ -244,6 +245,7 @@ def test_truncate_scheduler_output_skips_cut_when_runtime_cuts_disabled():
 
     class FakeController:
         config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=False)
+        max_query_len_per_req = 8
 
         def __init__(self):
             self.plans = {"req0": 1}
@@ -264,6 +266,44 @@ def test_truncate_scheduler_output_skips_cut_when_runtime_cuts_disabled():
 
     assert dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
     assert controller.plans == {}
+
+
+def test_truncate_scheduler_output_skips_mixed_prefill_batch():
+    @dataclass
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    class FakeController:
+        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True)
+        max_query_len_per_req = 8
+
+        def __init__(self):
+            self.plans = {
+                "decode_req": 1,
+            }
+
+        def get_adaptive_draft_len(self, req_id):
+            return self.plans.get(req_id)
+
+        def invalidate(self, req_id):
+            self.plans.pop(req_id, None)
+
+    controller = FakeController()
+    runner = SimpleNamespace(_dcut_controller=controller, _dcut_mixed_prefill_skip_warnings=0)
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"decode_req": [10, 11, 12]},
+        num_scheduled_tokens={
+            "decode_req": 4,
+            "prefill_req": 976,
+        },
+        total_num_scheduled_tokens=980,
+    )
+
+    assert dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
+    assert controller.plans == {}
+    assert runner._dcut_mixed_prefill_skip_warnings == 1
 
 
 def test_verify_adaptive_config_rejects_invalid_attention_query_shape_interval():

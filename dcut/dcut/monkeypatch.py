@@ -196,6 +196,7 @@ def _patch_runner(cls):
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
+        self._dcut_mixed_prefill_skip_warnings = 0
         _dcut_init_controller(self)
         _dcut_patch_model_compute_logits(self)
         _dcut_patch_model_forward_call(self)
@@ -1051,6 +1052,10 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
     controller = getattr(runner, "_dcut_controller", None)
     if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
         return scheduler_output
+    if _dcut_has_long_non_spec_query(controller, scheduler_output):
+        _dcut_log_skip_mixed_prefill_cut(runner, scheduler_output)
+        _dcut_clear_scheduler_plans(controller, scheduler_output)
+        return scheduler_output
     if not controller.config.apply_runtime_cuts:
         _dcut_clear_scheduler_plans(controller, scheduler_output)
         return scheduler_output
@@ -1114,6 +1119,27 @@ def _dcut_clear_scheduler_plans(controller, scheduler_output) -> None:
     for req_id in scheduler_output.scheduled_spec_decode_tokens:
         if controller.get_adaptive_draft_len(req_id) is not None:
             controller.invalidate(req_id)
+
+
+def _dcut_has_long_non_spec_query(controller, scheduler_output) -> bool:
+    query_lens = _dcut_scheduler_query_lens(scheduler_output)
+    return any(query_len > controller.max_query_len_per_req for query_len in query_lens)
+
+
+def _dcut_log_skip_mixed_prefill_cut(runner, scheduler_output) -> None:
+    warnings = getattr(runner, "_dcut_mixed_prefill_skip_warnings", 0)
+    if warnings >= 5:
+        return
+    query_lens = _dcut_scheduler_query_lens(scheduler_output)
+    logger.warning(
+        "D-Cut: skip runtime cut for mixed prefill/decode batch because query_lens_max=%d "
+        "exceeds speculative max query length; total_num_scheduled_tokens=%d spec_reqs=%d num_reqs=%d",
+        max(query_lens, default=0),
+        scheduler_output.total_num_scheduled_tokens,
+        len(scheduler_output.scheduled_spec_decode_tokens),
+        len(query_lens),
+    )
+    runner._dcut_mixed_prefill_skip_warnings = warnings + 1
 
 
 def _dcut_min_safe_draft_len(runner, req_id: str) -> int:
