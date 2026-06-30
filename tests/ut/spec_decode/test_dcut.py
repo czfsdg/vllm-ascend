@@ -53,6 +53,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
             "log_function_input_shapes_max_items": 5,
             "profile_in_profile_run": True,
             "n_profile_presweep_iters": 2,
+            "fixed_cut_ratio": 0.25,
             "min_cost_reduction_ratio": 0.07,
             "unknown": "ignored",
         }
@@ -78,6 +79,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_function_input_shapes_max_items == 5
     assert cfg.profile_in_profile_run is True
     assert cfg.n_profile_presweep_iters == 2
+    assert cfg.fixed_cut_ratio == 0.25
     assert cfg.min_cost_reduction_ratio == 0.07
 
 
@@ -124,6 +126,48 @@ def test_verify_adaptive_config_rejects_invalid_verifier_timing_interval():
 
     with pytest.raises(ValueError, match="log_verifier_timing_interval"):
         cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_fixed_cut_ratio():
+    cfg = VerifyAdaptiveConfig(fixed_cut_ratio=1.0)
+
+    with pytest.raises(ValueError, match="fixed_cut_ratio"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_process_draft_output_fixed_cut_ratio_bypasses_cost_table():
+    class FakeSelectedProbs:
+        def __init__(self, values):
+            self.values = np.asarray(values, dtype=np.float32)
+
+        @property
+        def shape(self):
+            return self.values.shape
+
+        def __getitem__(self, key):
+            return FakeSelectedProbs(self.values[key])
+
+        def numpy(self):
+            return self.values
+
+    controller = VerifyAdaptiveController.__new__(VerifyAdaptiveController)
+    controller.config = VerifyAdaptiveConfig(fixed_cut_ratio=0.25)
+    controller.max_query_len_per_req = 8
+    controller._adaptive_draft_lens = {}
+    controller._sorted_bs = []
+
+    controller.process_draft_output(
+        FakeSelectedProbs(np.ones((3, 7), dtype=np.float32)),
+        ["req0", "req1", "req2"],
+        {"req0", "req1", "req2"},
+        batch_size=3,
+    )
+
+    assert controller._adaptive_draft_lens == {
+        "req0": 5,
+        "req1": 5,
+        "req2": 5,
+    }
 
 
 def test_verify_adaptive_config_rejects_invalid_attention_query_shape_interval():

@@ -90,8 +90,12 @@ class VerifyAdaptiveController:
         self._attention_timing_count = 0
         self._verifier_breakdown_count = 0
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
-            logger.info("D-Cut: bs_levels=%s ql_levels=%s budget_ratios=%s",
-                        self._batch_size_levels, self._query_len_levels, self.config.budget_ratios)
+            logger.info(
+                "D-Cut: bs_levels=%s ql_levels=%s budget_ratios=%s",
+                self._batch_size_levels,
+                self._query_len_levels,
+                self.config.budget_ratios,
+            )
 
     @classmethod
     def from_env(cls, num_spec_tokens: int, max_batch_size: int) -> VerifyAdaptiveController | None:
@@ -116,8 +120,9 @@ class VerifyAdaptiveController:
         return levels
 
     def _build_query_len_levels(self) -> list[int]:
-        levels = list(range(self.config.min_query_len_per_req, self.max_query_len_per_req + 1,
-                            self.config.query_len_step_per_req))
+        levels = list(
+            range(self.config.min_query_len_per_req, self.max_query_len_per_req + 1, self.config.query_len_step_per_req)
+        )
         if not levels or levels[-1] < self.max_query_len_per_req:
             levels.append(self.max_query_len_per_req)
         return sorted(set(levels))
@@ -125,8 +130,7 @@ class VerifyAdaptiveController:
     def _build_sum_query_len_levels(self, batch_size: int) -> list[int]:
         max_draft_tokens = batch_size * (self.max_query_len_per_req - 1)
         if self.config.budget_ratios:
-            levels = [batch_size + math.ceil(ratio * max_draft_tokens)
-                      for ratio in self.config.budget_ratios]
+            levels = [batch_size + math.ceil(ratio * max_draft_tokens) for ratio in self.config.budget_ratios]
             full_budget = batch_size + max_draft_tokens
             if full_budget not in levels:
                 levels.append(full_budget)
@@ -149,16 +153,18 @@ class VerifyAdaptiveController:
             avg_ms = self._measure_runner(runner, batch_size, num_tokens)
             self._cost_table[(batch_size, num_tokens)] = avg_ms / 1000.0
             self._sorted_sql_per_bs[batch_size].append(num_tokens)
-            self._cost_records.append({
-                "batch_size": batch_size,
-                "query_len_per_req": num_tokens / batch_size,
-                "sum_query_len": num_tokens,
-                "draft_budget_tokens": max(num_tokens - batch_size, 0),
-                "draft_budget_ratio": max(num_tokens - batch_size, 0) /
-                max(batch_size * (self.max_query_len_per_req - 1), 1),
-                "avg_ms": avg_ms,
-                "cost_s": avg_ms / 1000.0,
-            })
+            self._cost_records.append(
+                {
+                    "batch_size": batch_size,
+                    "query_len_per_req": num_tokens / batch_size,
+                    "sum_query_len": num_tokens,
+                    "draft_budget_tokens": max(num_tokens - batch_size, 0),
+                    "draft_budget_ratio": max(num_tokens - batch_size, 0)
+                    / max(batch_size * (self.max_query_len_per_req - 1), 1),
+                    "avg_ms": avg_ms,
+                    "cost_s": avg_ms / 1000.0,
+                }
+            )
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
@@ -195,20 +201,19 @@ class VerifyAdaptiveController:
 
     def _build_profile_query_lens(self, batch_size: int, num_tokens: int) -> list[int]:
         if num_tokens < batch_size:
-            raise ValueError(
-                f"D-Cut profile num_tokens ({num_tokens}) must be >= batch_size ({batch_size}).")
+            raise ValueError(f"D-Cut profile num_tokens ({num_tokens}) must be >= batch_size ({batch_size}).")
         max_query_len = self.max_query_len_per_req
         max_tokens = batch_size * max_query_len
         if num_tokens > max_tokens:
-            raise ValueError(
-                f"D-Cut profile num_tokens ({num_tokens}) exceeds batch capacity ({max_tokens}).")
+            raise ValueError(f"D-Cut profile num_tokens ({num_tokens}) exceeds batch capacity ({max_tokens}).")
         base_len = num_tokens // batch_size
         remainder = num_tokens % batch_size
         query_lens = [base_len + (1 if idx < remainder else 0) for idx in range(batch_size)]
         if any(query_len < 1 or query_len > max_query_len for query_len in query_lens):
             raise ValueError(
                 f"D-Cut generated invalid profile query lengths for batch_size={batch_size}, "
-                f"num_tokens={num_tokens}: {query_lens}")
+                f"num_tokens={num_tokens}: {query_lens}"
+            )
         return query_lens
 
     def _run_profile_iteration(self, runner: Any, num_tokens: int, profile_query_lens: list[int]) -> None:
@@ -236,8 +241,7 @@ class VerifyAdaptiveController:
             if full_cost <= 0.0:
                 filtered_bs.append(batch_size)
                 continue
-            best_reduction = max((full_cost - self._cost_table[(batch_size, q)]) / full_cost
-                                 for q in q_levels[:-1])
+            best_reduction = max((full_cost - self._cost_table[(batch_size, q)]) / full_cost for q in q_levels[:-1])
             if best_reduction >= min_ratio:
                 filtered_bs.append(batch_size)
                 continue
@@ -254,19 +258,14 @@ class VerifyAdaptiveController:
             filtered_bs.append(batch_size)
         self._sorted_bs = filtered_bs
 
-    def process_draft_output(self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str],
-                             batch_size: int) -> None:
+    def process_draft_output(
+        self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str], batch_size: int
+    ) -> None:
         if not self.config.enabled:
             logger.info_once("D-Cut: skip adaptive planning because the controller is disabled.")
             return
         if not active_draft_req_ids:
             logger.debug("D-Cut: skip adaptive planning because there are no active decode requests.")
-            return
-        if not self._sorted_bs:
-            logger.warning_once(
-                "D-Cut: skip adaptive planning because the verifier cost table is empty. "
-                "Check D-Cut cost profiling during engine initialization."
-            )
             return
         n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
         active_indices = [i for i in range(n_rows) if req_ids[i] in active_draft_req_ids]
@@ -277,6 +276,30 @@ class VerifyAdaptiveController:
             return
         active_probs = selected_probs[:n_rows].numpy()[active_indices]
         active_req_ids = [req_ids[i] for i in active_indices]
+        fixed_cut_ratio = self.config.fixed_cut_ratio
+        if fixed_cut_ratio is not None:
+            fixed_result = self._choose_fixed_cut_draft_lens(
+                len(active_req_ids), active_probs.shape[1], fixed_cut_ratio
+            )
+            for req_id, draft_len in zip(active_req_ids, fixed_result["draft_lens"]):
+                self._adaptive_draft_lens[req_id] = draft_len
+            logger.info(
+                "D-Cut: planned fixed-ratio draft lengths batch_size=%d active_reqs=%d "
+                "fixed_cut_ratio=%.4f full_query_len=%d target_query_len=%d draft_lens=%s",
+                batch_size,
+                len(active_req_ids),
+                fixed_cut_ratio,
+                fixed_result["full_query_len"],
+                fixed_result["target_query_len"],
+                fixed_result["draft_lens"],
+            )
+            return
+        if not self._sorted_bs:
+            logger.warning_once(
+                "D-Cut: skip adaptive planning because the verifier cost table is empty. "
+                "Check D-Cut cost profiling during engine initialization."
+            )
+            return
         bs_key = _ceil_lookup(batch_size, self._sorted_bs)
         q_levels = self._sorted_sql_per_bs.get(bs_key) or []
         if not q_levels:
@@ -288,11 +311,15 @@ class VerifyAdaptiveController:
             )
             return
         log_details = self._should_log_decision_details()
-        result = choose_query_lens_discrete(active_probs, batch_size, q_levels,
-                                            lambda q: self._cost_table[(bs_key, q)],
-                                            self.max_query_len_per_req - 1,
-                                            collect_records=log_details,
-                                            min_score_improvement_ratio=self.config.min_score_improvement_ratio)
+        result = choose_query_lens_discrete(
+            active_probs,
+            batch_size,
+            q_levels,
+            lambda q: self._cost_table[(bs_key, q)],
+            self.max_query_len_per_req - 1,
+            collect_records=log_details,
+            min_score_improvement_ratio=self.config.min_score_improvement_ratio,
+        )
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
         logger.info(
@@ -320,6 +347,20 @@ class VerifyAdaptiveController:
     def invalidate(self, req_id: str) -> None:
         self._adaptive_draft_lens.pop(req_id, None)
 
+    def _choose_fixed_cut_draft_lens(
+        self, active_reqs: int, observed_draft_len: int, fixed_cut_ratio: float
+    ) -> dict[str, Any]:
+        full_draft_len = min(observed_draft_len, self.max_query_len_per_req - 1)
+        full_query_len = full_draft_len + 1
+        target_query_len = math.ceil(full_query_len * (1.0 - fixed_cut_ratio))
+        target_query_len = max(self.config.min_query_len_per_req, min(full_query_len, target_query_len))
+        target_draft_len = target_query_len - 1
+        return {
+            "draft_lens": [target_draft_len] * active_reqs,
+            "full_query_len": full_query_len,
+            "target_query_len": target_query_len,
+        }
+
     def _dump_cost_table_if_requested(self) -> None:
         dump_path = (
             os.getenv("VLLM_ASCEND_DCUT_COST_TABLE_OUT")
@@ -329,11 +370,17 @@ class VerifyAdaptiveController:
         )
         if not dump_path or get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:
             return
-        rows = [{"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1000.0}
-                for (bs, q), cost_s in sorted(self._cost_table.items())]
-        payload = {"schema_version": 1, "num_spec_tokens": self.num_spec_tokens,
-                   "max_batch_size": self.max_batch_size, "cost_table": rows,
-                   "profile_records": self._cost_records}
+        rows = [
+            {"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1000.0}
+            for (bs, q), cost_s in sorted(self._cost_table.items())
+        ]
+        payload = {
+            "schema_version": 1,
+            "num_spec_tokens": self.num_spec_tokens,
+            "max_batch_size": self.max_batch_size,
+            "cost_table": rows,
+            "profile_records": self._cost_records,
+        }
         dirname = os.path.dirname(dump_path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
@@ -392,9 +439,12 @@ def _rounded_list(values: np.ndarray) -> list[float]:
 def _format_decision_records(records: list[dict[str, Any]] | None, limit: int) -> list[dict[str, float | int]]:
     if not records:
         return []
-    return [{
-        "Q": int(record["Q"]),
-        "S": int(record["S"]),
-        "cost_ms": round(float(record["cost"]) * 1000.0, 4),
-        "score": round(float(record["score"]), 6),
-    } for record in records[:limit]]
+    return [
+        {
+            "Q": int(record["Q"]),
+            "S": int(record["S"]),
+            "cost_ms": round(float(record["cost"]) * 1000.0, 4),
+            "score": round(float(record["score"]), 6),
+        }
+        for record in records[:limit]
+    ]

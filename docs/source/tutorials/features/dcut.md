@@ -73,6 +73,7 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_model_forward_module_top_k": 12,
   "log_function_input_shapes": true,
   "log_function_input_shapes_max_items": 8,
+  "fixed_cut_ratio": 0.25,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -137,6 +138,13 @@ To inspect why D-Cut often keeps full draft lengths, set
 selected probabilities and every measured candidate's `(Q, S, cost_ms, score)`.
 Use `log_decision_interval` to print every Nth decision and
 `log_decision_max_records` to cap the number of candidate rows in each log.
+
+For diagnostic runs that need a deterministic post-cut verifier shape, set
+`fixed_cut_ratio` to a value in `[0.0, 1.0)`. For example,
+`fixed_cut_ratio=0.25` bypasses the score-based planner and keeps roughly 75%
+of each request's verifier query tokens, subject to `min_query_len_per_req`.
+With `num_speculative_tokens=7`, each request normally verifies 8 query tokens,
+so a 25% fixed cut keeps 6 query tokens (1 anchor + 5 draft tokens).
 
 Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
 logs with the post-cut scheduled token count and speculative token count. This

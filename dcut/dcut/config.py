@@ -43,6 +43,7 @@ class VerifyAdaptiveConfig:
     log_model_forward_module_top_k: int = 12
     log_function_input_shapes: bool = False
     log_function_input_shapes_max_items: int = 8
+    fixed_cut_ratio: float | None = None
     min_score_improvement_ratio: float = 0.0
     min_cost_reduction_ratio: float = 0.05
     enabled: bool = True
@@ -66,7 +67,8 @@ class VerifyAdaptiveConfig:
         if self.min_query_len_per_req > max_query_len:
             raise ValueError(
                 f"min_query_len_per_req ({self.min_query_len_per_req}) > "
-                f"effective max_query_len_per_req ({max_query_len}).")
+                f"effective max_query_len_per_req ({max_query_len})."
+            )
         if self.warmup_seq_lens < 1:
             raise ValueError("warmup_seq_lens must be >= 1.")
         if self.n_profile_presweep_iters < 0:
@@ -91,6 +93,8 @@ class VerifyAdaptiveConfig:
             raise ValueError("log_model_forward_module_top_k must be >= 1.")
         if self.log_function_input_shapes_max_items < 1:
             raise ValueError("log_function_input_shapes_max_items must be >= 1.")
+        if self.fixed_cut_ratio is not None and not 0.0 <= self.fixed_cut_ratio < 1.0:
+            raise ValueError("fixed_cut_ratio must be in [0.0, 1.0).")
         if self.min_score_improvement_ratio < 0.0:
             raise ValueError("min_score_improvement_ratio must be >= 0.0.")
         if self.min_cost_reduction_ratio < 0.0:
