@@ -58,23 +58,23 @@ cat > /tmp/dcut_config.json <<'JSON'
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
   "profile_in_profile_run": false,
-  "log_decision_details": true,
+  "log_decision_details": false,
   "log_decision_interval": 1,
   "log_decision_max_records": 8,
-  "log_verifier_timing": true,
+  "log_verifier_timing": false,
   "log_verifier_timing_interval": 1,
-  "log_attention_query_shape": true,
+  "log_attention_query_shape": false,
   "log_attention_query_shape_interval": 1,
-  "log_attention_timing": true,
+  "log_attention_timing": false,
   "log_attention_timing_interval": 1,
-  "log_verifier_breakdown": true,
+  "log_verifier_breakdown": false,
   "log_verifier_breakdown_interval": 1,
-  "log_model_forward_module_breakdown": true,
+  "log_model_forward_module_breakdown": false,
   "log_model_forward_module_top_k": 12,
-  "log_function_input_shapes": true,
+  "log_function_input_shapes": false,
   "log_function_input_shapes_max_items": 8,
   "fixed_cut_ratio": 0.25,
-  "apply_runtime_cuts": true,
+  "apply_runtime_cuts": false,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -147,11 +147,12 @@ of the whole batch's verifier query tokens, subject to `min_query_len_per_req`.
 The kept draft slots are assigned by the same cumulative-probability ordering as
 normal D-Cut, so different requests in the same batch can be cut by different
 amounts while the batch-level token budget is fixed. Runtime truncation is guarded
-by `apply_runtime_cuts`; leave it `true` to apply the planned cut, or set it to
-`false` when you only want planning/timing diagnostics. The runtime cut also
-rewinds the cached request `num_computed_tokens` by the number of removed draft
-tokens so the runner builds positions, spec-decode metadata, and sampler offsets
-from the same shortened verifier shape.
+by `apply_runtime_cuts`. Keep it `false` for accuracy-first runs that should
+load D-Cut and collect plans without mutating verifier inputs. Set it to `true`
+only when validating runtime truncation; runtime cuts also rewind the cached
+request `num_computed_tokens` by the number of removed draft tokens so the
+runner builds positions, spec-decode metadata, and sampler offsets from the same
+shortened verifier shape.
 
 Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
 logs with the post-cut scheduled token count and speculative token count. This
