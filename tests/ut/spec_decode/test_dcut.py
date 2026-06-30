@@ -453,6 +453,13 @@ def test_log_verifier_timing_groups_stats_by_shape(monkeypatch):
     assert "shape_avg_ms=17.500" in records[-1]
 
 
+def test_layer_block_display_name_only_matches_layer_blocks():
+    assert dcut_monkeypatch._dcut_layer_block_display_name("language_model.model.layers.0") == "layers.0"
+    assert dcut_monkeypatch._dcut_layer_block_display_name("model.layers.12") == "layers.12"
+    assert dcut_monkeypatch._dcut_layer_block_display_name("language_model.model.layers.0.mlp") is None
+    assert dcut_monkeypatch._dcut_layer_block_display_name("language_model.embed_tokens") is None
+
+
 def test_top_level_phase_sum_excludes_nested_model_forward_details():
     assert (
         dcut_monkeypatch._dcut_top_level_phase_sum(
@@ -515,6 +522,8 @@ def test_verifier_breakdown_logs_model_forward_shape_stats(monkeypatch):
         "module_classes": {"FakeLayer": 3.0},
         "module_names": {"layers.0:FakeLayer": 3.0},
         "module_stack": {},
+        "layer_blocks": {"layers.0": 5.0},
+        "layer_block_stack": {},
         "phases": {"model_forward": 20.0, "compute_logits": 2.0},
         "module_top_k": 2,
         "spec_tokens": 6,
@@ -535,6 +544,7 @@ def test_verifier_breakdown_logs_model_forward_shape_stats(monkeypatch):
     assert "model_forward_shape_stats={'elapsed_ms': 20.0" in records[-1]
     assert "'ms_per_token': 2.5" in records[-1]
     assert "'shape_count': 1" in records[-1]
+    assert "layer_blocks=[('layers.0', 5.0)]" in records[-1]
     assert "module_classes=[('FakeLayer', 3.0)]" in records[-1]
 
 

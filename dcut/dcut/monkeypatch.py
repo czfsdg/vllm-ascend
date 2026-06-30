@@ -406,14 +406,38 @@ def _dcut_patch_model_forward_modules(runner) -> None:
     ):
         return
     handles = []
+    leaf_count = 0
+    layer_block_count = 0
     for name, module in model.named_modules():
-        if not name or not _dcut_should_time_module(module):
+        if not name:
+            continue
+        layer_block_name = _dcut_layer_block_display_name(name)
+        if layer_block_name is not None:
+            handles.append(module.register_forward_pre_hook(_dcut_make_layer_block_pre_hook(layer_block_name)))
+            handles.append(module.register_forward_hook(_dcut_make_layer_block_post_hook(layer_block_name)))
+            layer_block_count += 1
+        if not _dcut_should_time_module(module):
             continue
         handles.append(module.register_forward_pre_hook(_dcut_make_module_pre_hook(name)))
         handles.append(module.register_forward_hook(_dcut_make_module_post_hook(name)))
+        leaf_count += 1
     model._dcut_module_timing_handles = handles
     model._dcut_module_timing_patched = True
-    logger.info("D-Cut: installed model-forward module timing hooks count=%d", len(handles) // 2)
+    logger.info(
+        "D-Cut: installed model-forward timing hooks leaf_modules=%d layer_blocks=%d",
+        leaf_count,
+        layer_block_count,
+    )
+
+
+def _dcut_layer_block_display_name(name: str) -> str | None:
+    parts = name.split(".")
+    for idx in range(len(parts) - 1):
+        if parts[idx] == "layers" and parts[idx + 1].isdigit():
+            if idx + 2 == len(parts):
+                return f"layers.{parts[idx + 1]}"
+            return None
+    return None
 
 
 def _dcut_should_time_module(module) -> bool:
@@ -422,6 +446,32 @@ def _dcut_should_time_module(module) -> bool:
         return False
     except StopIteration:
         return True
+
+
+def _dcut_make_layer_block_pre_hook(name: str):
+    def pre_hook(module, _inputs):
+        context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+        if context is None:
+            return
+        torch.npu.synchronize()
+        context["layer_block_stack"].setdefault(id(module), []).append(time.perf_counter())
+
+    return pre_hook
+
+
+def _dcut_make_layer_block_post_hook(name: str):
+    def post_hook(module, _inputs, _output):
+        context = _VERIFIER_BREAKDOWN_CONTEXT.get()
+        if context is None:
+            return
+        stack = context["layer_block_stack"].get(id(module))
+        if not stack:
+            return
+        torch.npu.synchronize()
+        elapsed_ms = (time.perf_counter() - stack.pop()) * 1000.0
+        context["layer_blocks"][name] = context["layer_blocks"].get(name, 0.0) + elapsed_ms
+
+    return post_hook
 
 
 def _dcut_make_module_pre_hook(name: str):
@@ -484,6 +534,8 @@ def _dcut_start_verifier_breakdown(runner, scheduler_output):
         "module_classes": {},
         "module_names": {},
         "module_stack": {},
+        "layer_blocks": {},
+        "layer_block_stack": {},
         "phases": {},
         "module_top_k": controller.config.log_model_forward_module_top_k,
         "log_input_shapes": controller.config.log_function_input_shapes,
@@ -514,7 +566,7 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
     logger.info(
         "D-Cut verifier breakdown: total_ms=%.3f tracked_ms=%.3f untracked_ms=%.3f "
         "total_tokens=%d spec_reqs=%d spec_tokens=%d avg_spec_len=%.2f num_reqs=%d "
-        "phases=%s model_forward_shape_stats=%s module_classes=%s module_names=%s",
+        "phases=%s model_forward_shape_stats=%s layer_blocks=%s module_classes=%s module_names=%s",
         total_elapsed_ms,
         phase_sum_ms,
         untracked_ms,
@@ -525,6 +577,7 @@ def _dcut_finish_verifier_breakdown(scheduler_output, token, total_elapsed_ms: f
         len(scheduler_output.num_scheduled_tokens),
         {name: round(value, 3) for name, value in sorted(phases.items())},
         model_forward_stats,
+        _dcut_top_timing_items(context["layer_blocks"], top_k),
         _dcut_top_timing_items(context["module_classes"], top_k),
         _dcut_top_timing_items(context["module_names"], top_k),
     )
