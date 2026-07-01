@@ -112,3 +112,27 @@ def test_dcut_truncates_draft_token_ids_before_scheduler_update():
     assert truncated is not draft_token_ids
     assert truncated.req_ids == ["r0", "r1"]
     assert truncated.draft_token_ids == [[10], [20, 21]]
+
+
+def test_controller_keeps_one_draft_token_for_active_requests(monkeypatch):
+    from types import SimpleNamespace
+
+    from dcut.controller import VerifyAdaptiveController
+
+    controller = object.__new__(VerifyAdaptiveController)
+    controller.config = SimpleNamespace(enabled=True)
+    controller.max_query_len_per_req = 4
+    controller._sorted_bs = [2]
+    controller._sorted_sql_per_bs = {2: [2, 8]}
+    controller._cost_table = {(2, 2): 1.0, (2, 8): 100.0}
+    controller._adaptive_draft_lens = {}
+
+    controller.process_draft_output(
+        selected_probs=np.array([[0.1, 0.1, 0.1], [0.1, 0.1, 0.1]], dtype=np.float32),
+        req_ids=["r0", "r1"],
+        active_draft_req_ids={"r0", "r1"},
+        batch_size=2,
+    )
+
+    assert controller.get_adaptive_draft_len("r0") == 1
+    assert controller.get_adaptive_draft_len("r1") == 1
