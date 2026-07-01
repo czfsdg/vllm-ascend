@@ -115,3 +115,30 @@ def test_dcut_truncates_scheduler_output_before_execute_model():
     assert truncated.scheduled_spec_decode_tokens == {"r0": [10]}
     assert truncated.num_scheduled_tokens == {"r0": 2, "r1": 1}
     assert truncated.total_num_scheduled_tokens == 3
+
+
+def test_dcut_skips_scheduler_truncation_for_mixed_prefill_batch():
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+
+    from dcut.monkeypatch import _dcut_truncate_scheduler_output
+
+    @dataclass
+    class SchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+        scheduled_new_reqs: list[str]
+
+    scheduler_output = SchedulerOutput(
+        scheduled_spec_decode_tokens={"decode": [10, 11, 12]},
+        num_scheduled_tokens={"decode": 4},
+        total_num_scheduled_tokens=4,
+        scheduled_new_reqs=["prefill"],
+    )
+    runner = SimpleNamespace(
+        _dcut_controller=SimpleNamespace(get_adaptive_draft_len=lambda req_id: 1),
+        _dcut_mixed_batch_skip_warnings=5,
+    )
+
+    assert _dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output

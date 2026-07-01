@@ -183,6 +183,7 @@ def _patch_runner(cls):
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
+        self._dcut_mixed_batch_skip_warnings = 0
         _dcut_init_controller(self)
 
     @wraps(original_sample_tokens)
@@ -283,6 +284,14 @@ def _dcut_debug_draft_token_ids(prefix: str, draft_token_ids) -> None:
 def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     controller = getattr(runner, "_dcut_controller", None)
     if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
+        return scheduler_output
+    if getattr(scheduler_output, "scheduled_new_reqs", None):
+        _dcut_warn_mixed_batch_skip(
+            runner,
+            "skip scheduler truncation for mixed prefill/decode batch new_reqs=%d spec_reqs=%d",
+            len(scheduler_output.scheduled_new_reqs),
+            len(scheduler_output.scheduled_spec_decode_tokens),
+        )
         return scheduler_output
 
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
@@ -447,6 +456,15 @@ def _dcut_align_selected_probs(
     return None
 
 
+def _dcut_warn_mixed_batch_skip(runner, message: str, *args) -> None:
+    warnings = getattr(runner, "_dcut_mixed_batch_skip_warnings", 0)
+    if warnings < 5:
+        logger.warning("D-Cut: " + message, *args)  # noqa: G003
+        runner._dcut_mixed_batch_skip_warnings = warnings + 1
+    else:
+        _dcut_debug(message, *args)
+
+
 def _get_fallback_prob() -> float | None:
     import os
 
@@ -465,6 +483,14 @@ def _dcut_maybe_process_probs(runner) -> None:
     if not runner._dcut_probs_event.query():
         runner._dcut_probs_event.synchronize()
     runner._dcut_probs_pending = False
+    if runner._dcut_active and len(runner._dcut_active) != runner._dcut_num_reqs:
+        _dcut_warn_mixed_batch_skip(
+            runner,
+            "skip probability planning for mixed prefill/decode batch batch_size=%d active_decode_reqs=%d",
+            runner._dcut_num_reqs,
+            len(runner._dcut_active),
+        )
+        return
     if runner._dcut_active and runner._dcut_controller is not None:
         logger.info(
             "D-Cut: processing draft probabilities batch_size=%d active_decode_reqs=%d",
