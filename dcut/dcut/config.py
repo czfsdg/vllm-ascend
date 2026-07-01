@@ -45,6 +45,7 @@ class VerifyAdaptiveConfig:
     log_function_input_shapes_max_items: int = 8
     fixed_cut_ratio: float | None = None
     apply_runtime_cuts: bool = False
+    max_runtime_cut_reqs: int = 1
     min_score_improvement_ratio: float = 0.0
     min_cost_reduction_ratio: float = 0.05
     enabled: bool = True
@@ -96,6 +97,8 @@ class VerifyAdaptiveConfig:
             raise ValueError("log_function_input_shapes_max_items must be >= 1.")
         if self.fixed_cut_ratio is not None and not 0.0 <= self.fixed_cut_ratio < 1.0:
             raise ValueError("fixed_cut_ratio must be in [0.0, 1.0).")
+        if self.max_runtime_cut_reqs < 1:
+            raise ValueError("max_runtime_cut_reqs must be >= 1.")
         if self.min_score_improvement_ratio < 0.0:
             raise ValueError("min_score_improvement_ratio must be >= 0.0.")
         if self.min_cost_reduction_ratio < 0.0:

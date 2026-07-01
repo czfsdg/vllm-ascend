@@ -198,6 +198,7 @@ def _patch_runner(cls):
         self._dcut_fallback_probs_warnings = 0
         self._dcut_accepted_tokens_clamp_warnings = 0
         self._dcut_mixed_prefill_skip_warnings = 0
+        self._dcut_high_concurrency_skip_warnings = 0
         _dcut_init_controller(self)
         _dcut_patch_model_compute_logits(self)
         _dcut_patch_model_forward_call(self)
@@ -1060,6 +1061,11 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
     if not controller.config.apply_runtime_cuts:
         _dcut_clear_scheduler_plans(controller, scheduler_output)
         return scheduler_output
+    max_runtime_cut_reqs = getattr(controller.config, "max_runtime_cut_reqs", 1)
+    if len(scheduler_output.scheduled_spec_decode_tokens) > max_runtime_cut_reqs:
+        _dcut_log_skip_high_concurrency_cut(runner, scheduler_output, max_runtime_cut_reqs)
+        _dcut_clear_scheduler_plans(controller, scheduler_output)
+        return scheduler_output
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
@@ -1147,6 +1153,19 @@ def _dcut_adjust_scheduled_cached_reqs(cached_reqs, tokens_delta_by_req: dict[st
         new_cached_reqs = copy(cached_reqs)
         new_cached_reqs.num_computed_tokens = adjusted
         return new_cached_reqs
+
+
+def _dcut_log_skip_high_concurrency_cut(runner, scheduler_output, max_runtime_cut_reqs: int) -> None:
+    warnings = getattr(runner, "_dcut_high_concurrency_skip_warnings", 0)
+    if warnings >= 5:
+        return
+    logger.warning(
+        "D-Cut: skip runtime cut for high-concurrency batch because spec_reqs=%d exceeds "
+        "max_runtime_cut_reqs=%d. Keeping verifier inputs unmodified to preserve accuracy.",
+        len(scheduler_output.scheduled_spec_decode_tokens),
+        max_runtime_cut_reqs,
+    )
+    runner._dcut_high_concurrency_skip_warnings = warnings + 1
 
 
 def _dcut_clear_scheduler_plans(controller, scheduler_output) -> None:

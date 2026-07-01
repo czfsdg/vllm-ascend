@@ -56,6 +56,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
             "n_profile_presweep_iters": 2,
             "fixed_cut_ratio": 0.25,
             "apply_runtime_cuts": True,
+            "max_runtime_cut_reqs": 4,
             "min_cost_reduction_ratio": 0.07,
             "unknown": "ignored",
         }
@@ -83,6 +84,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.n_profile_presweep_iters == 2
     assert cfg.fixed_cut_ratio == 0.25
     assert cfg.apply_runtime_cuts is True
+    assert cfg.max_runtime_cut_reqs == 4
     assert cfg.min_cost_reduction_ratio == 0.07
 
 
@@ -135,6 +137,13 @@ def test_verify_adaptive_config_rejects_invalid_fixed_cut_ratio():
     cfg = VerifyAdaptiveConfig(fixed_cut_ratio=1.0)
 
     with pytest.raises(ValueError, match="fixed_cut_ratio"):
+        cfg.validate(num_speculative_tokens=4)
+
+
+def test_verify_adaptive_config_rejects_invalid_max_runtime_cut_reqs():
+    cfg = VerifyAdaptiveConfig(max_runtime_cut_reqs=0)
+
+    with pytest.raises(ValueError, match="max_runtime_cut_reqs"):
         cfg.validate(num_speculative_tokens=4)
 
 
@@ -196,7 +205,7 @@ def test_truncate_scheduler_output_consumes_adaptive_plan_and_rewinds_cached_tok
         scheduled_cached_reqs: FakeCachedReqs | None = None
 
     class FakeController:
-        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True)
+        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True, max_runtime_cut_reqs=2)
         max_query_len_per_req = 8
 
         def __init__(self):
@@ -248,6 +257,39 @@ def test_truncate_scheduler_output_consumes_adaptive_plan_and_rewinds_cached_tok
     assert controller.plans == {}
 
 
+def test_truncate_scheduler_output_skips_high_concurrency_runtime_cut():
+    @dataclass
+    class FakeSchedulerOutput:
+        scheduled_spec_decode_tokens: dict[str, list[int]]
+        num_scheduled_tokens: dict[str, int]
+        total_num_scheduled_tokens: int
+
+    class FakeController:
+        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True, max_runtime_cut_reqs=1)
+        max_query_len_per_req = 8
+
+        def __init__(self):
+            self.plans = {"req0": 1, "req1": 1}
+
+        def get_adaptive_draft_len(self, req_id):
+            return self.plans.get(req_id)
+
+        def invalidate(self, req_id):
+            self.plans.pop(req_id, None)
+
+    controller = FakeController()
+    runner = SimpleNamespace(_dcut_controller=controller, _dcut_high_concurrency_skip_warnings=0)
+    scheduler_output = FakeSchedulerOutput(
+        scheduled_spec_decode_tokens={"req0": [10, 11], "req1": [20, 21]},
+        num_scheduled_tokens={"req0": 3, "req1": 3},
+        total_num_scheduled_tokens=6,
+    )
+
+    assert dcut_monkeypatch._dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
+    assert controller.plans == {}
+    assert runner._dcut_high_concurrency_skip_warnings == 1
+
+
 def test_truncate_scheduler_output_skips_cut_when_runtime_cuts_disabled():
     @dataclass
     class FakeSchedulerOutput:
@@ -288,7 +330,7 @@ def test_truncate_scheduler_output_skips_mixed_prefill_batch():
         total_num_scheduled_tokens: int
 
     class FakeController:
-        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True)
+        config = SimpleNamespace(log_decision_details=False, apply_runtime_cuts=True, max_runtime_cut_reqs=1)
         max_query_len_per_req = 8
 
         def __init__(self):
