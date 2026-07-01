@@ -43,9 +43,10 @@ class VerifyAdaptiveConfig:
     log_model_forward_module_top_k: int = 12
     log_function_input_shapes: bool = False
     log_function_input_shapes_max_items: int = 8
+    log_runtime_cut_debug: bool = False
     fixed_cut_ratio: float | None = None
     apply_runtime_cuts: bool = False
-    max_runtime_cut_reqs: int = 1
+    max_runtime_cut_reqs: int = 1024
     min_score_improvement_ratio: float = 0.0
     min_cost_reduction_ratio: float = 0.05
     enabled: bool = True

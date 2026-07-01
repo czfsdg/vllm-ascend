@@ -73,9 +73,10 @@ cat > /tmp/dcut_config.json <<'JSON'
   "log_model_forward_module_top_k": 12,
   "log_function_input_shapes": false,
   "log_function_input_shapes_max_items": 8,
+  "log_runtime_cut_debug": false,
   "fixed_cut_ratio": 0.25,
   "apply_runtime_cuts": false,
-  "max_runtime_cut_reqs": 1,
+  "max_runtime_cut_reqs": 1024,
   "min_score_improvement_ratio": 0.0,
   "cost_table_dump_path": "/tmp/dcut_cost_table.json"
 }
@@ -150,12 +151,14 @@ normal D-Cut, so different requests in the same batch can be cut by different
 amounts while the batch-level token budget is fixed. Runtime truncation is guarded
 by `apply_runtime_cuts`. Keep it `false` for accuracy-first runs that should
 load D-Cut and collect plans without mutating verifier inputs. Set it to `true`
-only when validating runtime truncation. Runtime cuts are additionally guarded
-by `max_runtime_cut_reqs`, which defaults to `1` so high-concurrency batches keep
-the verifier inputs unmodified until multi-request truncation is validated for
-accuracy. Runtime cuts also rewind the cached request `num_computed_tokens` by
-the number of removed draft tokens so the runner builds positions, spec-decode
-metadata, and sampler offsets from the same shortened verifier shape.
+only when validating runtime truncation. Set `log_runtime_cut_debug=true` during
+that validation to print the queued probability request ids, active request set,
+per-request cut deltas, scheduled-token counts, and cached `num_computed_tokens`
+before/after the cut. Runtime cuts also rewind cached request
+`num_computed_tokens` by the number of removed draft tokens so the runner builds
+positions, spec-decode metadata, and sampler offsets from the same shortened
+verifier shape. If a workload still shows high-concurrency accuracy issues, lower
+`max_runtime_cut_reqs` as a temporary safety guard while inspecting the debug logs.
 
 Set `log_verifier_timing=true` to print synchronized per-verifier-step timing
 logs with the post-cut scheduled token count and speculative token count. This

@@ -52,6 +52,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
             "log_model_forward_module_top_k": 7,
             "log_function_input_shapes": True,
             "log_function_input_shapes_max_items": 5,
+            "log_runtime_cut_debug": True,
             "profile_in_profile_run": True,
             "n_profile_presweep_iters": 2,
             "fixed_cut_ratio": 0.25,
@@ -80,6 +81,7 @@ def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
     assert cfg.log_model_forward_module_top_k == 7
     assert cfg.log_function_input_shapes is True
     assert cfg.log_function_input_shapes_max_items == 5
+    assert cfg.log_runtime_cut_debug is True
     assert cfg.profile_in_profile_run is True
     assert cfg.n_profile_presweep_iters == 2
     assert cfg.fixed_cut_ratio == 0.25

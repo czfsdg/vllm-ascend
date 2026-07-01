@@ -1061,7 +1061,7 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
     if not controller.config.apply_runtime_cuts:
         _dcut_clear_scheduler_plans(controller, scheduler_output)
         return scheduler_output
-    max_runtime_cut_reqs = getattr(controller.config, "max_runtime_cut_reqs", 1)
+    max_runtime_cut_reqs = getattr(controller.config, "max_runtime_cut_reqs", 1024)
     if len(scheduler_output.scheduled_spec_decode_tokens) > max_runtime_cut_reqs:
         _dcut_log_skip_high_concurrency_cut(runner, scheduler_output, max_runtime_cut_reqs)
         _dcut_clear_scheduler_plans(controller, scheduler_output)
@@ -1117,6 +1117,14 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
             tokens_after,
         )
     new_cached_reqs = _dcut_adjust_scheduled_cached_reqs(scheduler_output.scheduled_cached_reqs, tokens_delta_by_req)
+    _dcut_log_runtime_cut_debug(
+        controller,
+        scheduler_output,
+        new_spec,
+        new_num_sched,
+        tokens_delta_by_req,
+        new_cached_reqs,
+    )
     return replace(
         scheduler_output,
         scheduled_spec_decode_tokens=new_spec,
@@ -1124,6 +1132,55 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
         total_num_scheduled_tokens=tokens_after,
         scheduled_cached_reqs=new_cached_reqs,
     )
+
+
+def _dcut_log_runtime_cut_debug(
+    controller,
+    scheduler_output,
+    new_spec: dict,
+    new_num_sched: dict,
+    tokens_delta_by_req: dict[str, int],
+    new_cached_reqs,
+) -> None:
+    if not getattr(controller.config, "log_runtime_cut_debug", False):
+        return
+    max_records = controller.config.log_decision_max_records
+    old_cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+    logger.info(
+        "D-Cut runtime cut debug: spec_reqs=%d tokens_before=%d tokens_after=%d "
+        "delta_by_req=%s old_spec_lens=%s new_spec_lens=%s old_num_sched=%s "
+        "new_num_sched=%s cached_req_ids=%s cached_num_computed_before=%s "
+        "cached_num_computed_after=%s",
+        len(scheduler_output.scheduled_spec_decode_tokens),
+        scheduler_output.total_num_scheduled_tokens,
+        sum(int(v) for v in new_num_sched.values()) if hasattr(new_num_sched, "values") else "unknown",
+        dict(list(tokens_delta_by_req.items())[:max_records]),
+        _dcut_lens_summary(scheduler_output.scheduled_spec_decode_tokens, max_records),
+        _dcut_lens_summary(new_spec, max_records),
+        _dcut_mapping_summary(scheduler_output.num_scheduled_tokens, max_records),
+        _dcut_mapping_summary(new_num_sched, max_records),
+        list(getattr(old_cached_reqs, "req_ids", [])[:max_records]) if old_cached_reqs is not None else None,
+        _dcut_seq_summary(getattr(old_cached_reqs, "num_computed_tokens", None), max_records),
+        _dcut_seq_summary(getattr(new_cached_reqs, "num_computed_tokens", None), max_records),
+    )
+
+
+def _dcut_lens_summary(values: dict, max_records: int) -> dict:
+    return {req_id: len(tokens) for req_id, tokens in list(values.items())[:max_records]}
+
+
+def _dcut_mapping_summary(values, max_records: int):
+    if hasattr(values, "items"):
+        return dict(list(values.items())[:max_records])
+    return _dcut_seq_summary(values, max_records)
+
+
+def _dcut_seq_summary(values, max_records: int):
+    if values is None:
+        return None
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    return list(values)[:max_records]
 
 
 def _dcut_adjust_scheduled_cached_reqs(cached_reqs, tokens_delta_by_req: dict[str, int]):
@@ -1261,6 +1318,14 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
         if runner.input_batch.num_computed_tokens_cpu[i] >= runner.input_batch.num_prompt_tokens[i]
     }
     runner._dcut_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
+    if getattr(runner._dcut_controller.config, "log_runtime_cut_debug", False):
+        logger.info(
+            "D-Cut probs queued debug: num_reqs=%d req_ids=%s active_req_ids=%s probs_shape=%s",
+            num_reqs,
+            runner._dcut_req_ids[: runner._dcut_controller.config.log_decision_max_records],
+            list(runner._dcut_active)[: runner._dcut_controller.config.log_decision_max_records],
+            tuple(probs.shape),
+        )
     runner._dcut_probs_event.record()
 
 
@@ -1288,6 +1353,13 @@ def _dcut_maybe_process_probs(runner) -> None:
             runner._dcut_num_reqs,
             len(runner._dcut_active),
         )
+        if getattr(runner._dcut_controller.config, "log_runtime_cut_debug", False):
+            logger.info(
+                "D-Cut probs process debug: num_reqs=%d req_ids=%s active_req_ids=%s",
+                runner._dcut_num_reqs,
+                runner._dcut_req_ids[: runner._dcut_controller.config.log_decision_max_records],
+                list(runner._dcut_active)[: runner._dcut_controller.config.log_decision_max_records],
+            )
         runner._dcut_controller.process_draft_output(
             selected_probs=runner._dcut_probs_pinned[: runner._dcut_num_reqs],
             req_ids=runner._dcut_req_ids,
