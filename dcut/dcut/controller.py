@@ -109,8 +109,9 @@ class VerifyAdaptiveController:
         return levels
 
     def _build_query_len_levels(self) -> list[int]:
-        levels = list(range(self.config.min_query_len_per_req, self.max_query_len_per_req + 1,
-                            self.config.query_len_step_per_req))
+        levels = list(
+            range(self.config.min_query_len_per_req, self.max_query_len_per_req + 1, self.config.query_len_step_per_req)
+        )
         if not levels or levels[-1] < self.max_query_len_per_req:
             levels.append(self.max_query_len_per_req)
         return sorted(set(levels))
@@ -128,13 +129,15 @@ class VerifyAdaptiveController:
                 avg_ms = self._measure_runner(runner, num_tokens)
                 self._cost_table[(batch_size, num_tokens)] = avg_ms / 1000.0
                 self._sorted_sql_per_bs[batch_size].append(num_tokens)
-                self._cost_records.append({
-                    "batch_size": batch_size,
-                    "query_len_per_req": query_len,
-                    "sum_query_len": num_tokens,
-                    "avg_ms": avg_ms,
-                    "cost_s": avg_ms / 1000.0,
-                })
+                self._cost_records.append(
+                    {
+                        "batch_size": batch_size,
+                        "query_len_per_req": query_len,
+                        "sum_query_len": num_tokens,
+                        "avg_ms": avg_ms,
+                        "cost_s": avg_ms / 1000.0,
+                    }
+                )
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
@@ -143,18 +146,21 @@ class VerifyAdaptiveController:
 
     def _measure_runner(self, runner: Any, num_tokens: int) -> float:
         for _ in range(self.config.n_warmup_iters):
-            runner._dummy_run(num_tokens, uniform_decode=True, is_profile=True,
-                              profile_seq_lens=self.config.warmup_seq_lens)
+            runner._dummy_run(
+                num_tokens, uniform_decode=True, is_profile=True, profile_seq_lens=self.config.warmup_seq_lens
+            )
         torch.npu.synchronize()
         start = time.perf_counter()
         for _ in range(self.config.n_measure_iters):
-            runner._dummy_run(num_tokens, uniform_decode=True, is_profile=True,
-                              profile_seq_lens=self.config.warmup_seq_lens)
+            runner._dummy_run(
+                num_tokens, uniform_decode=True, is_profile=True, profile_seq_lens=self.config.warmup_seq_lens
+            )
         torch.npu.synchronize()
         return (time.perf_counter() - start) * 1000.0 / self.config.n_measure_iters
 
-    def process_draft_output(self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str],
-                             batch_size: int) -> None:
+    def process_draft_output(
+        self, selected_probs: torch.Tensor, req_ids: list[str], active_draft_req_ids: set[str], batch_size: int
+    ) -> None:
         if not self.config.enabled or not active_draft_req_ids or not self._sorted_bs:
             return
         n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
@@ -167,9 +173,9 @@ class VerifyAdaptiveController:
         q_levels = self._sorted_sql_per_bs.get(bs_key) or []
         if not q_levels:
             return
-        result = choose_query_lens_discrete(active_probs, batch_size, q_levels,
-                                            lambda q: self._cost_table[(bs_key, q)],
-                                            self.max_query_len_per_req - 1)
+        result = choose_query_lens_discrete(
+            active_probs, batch_size, q_levels, lambda q: self._cost_table[(bs_key, q)], self.max_query_len_per_req - 1
+        )
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
         logger.info(
@@ -196,11 +202,17 @@ class VerifyAdaptiveController:
         )
         if not dump_path or get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:
             return
-        rows = [{"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1000.0}
-                for (bs, q), cost_s in sorted(self._cost_table.items())]
-        payload = {"schema_version": 1, "num_spec_tokens": self.num_spec_tokens,
-                   "max_batch_size": self.max_batch_size, "cost_table": rows,
-                   "profile_records": self._cost_records}
+        rows = [
+            {"batch_size": bs, "sum_query_len": q, "cost_s": cost_s, "cost_ms": cost_s * 1000.0}
+            for (bs, q), cost_s in sorted(self._cost_table.items())
+        ]
+        payload = {
+            "schema_version": 1,
+            "num_spec_tokens": self.num_spec_tokens,
+            "max_batch_size": self.max_batch_size,
+            "cost_table": rows,
+            "profile_records": self._cost_records,
+        }
         dirname = os.path.dirname(dump_path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
