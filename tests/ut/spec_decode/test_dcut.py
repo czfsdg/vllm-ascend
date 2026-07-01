@@ -142,3 +142,27 @@ def test_dcut_skips_scheduler_truncation_for_mixed_prefill_batch():
     )
 
     assert _dcut_truncate_scheduler_output(runner, scheduler_output) is scheduler_output
+
+
+def test_controller_process_draft_output_updates_lengths_without_name_error():
+    from types import SimpleNamespace
+
+    from dcut.controller import VerifyAdaptiveController
+
+    controller = object.__new__(VerifyAdaptiveController)
+    controller.config = SimpleNamespace(enabled=True)
+    controller.max_query_len_per_req = 4
+    controller._sorted_bs = [2]
+    controller._sorted_sql_per_bs = {2: [2, 4, 8]}
+    controller._cost_table = {(2, 2): 1.0, (2, 4): 1.1, (2, 8): 4.0}
+    controller._adaptive_draft_lens = {}
+
+    controller.process_draft_output(
+        selected_probs=np.array([[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]], dtype=np.float32),
+        req_ids=["r0", "r1"],
+        active_draft_req_ids={"r0", "r1"},
+        batch_size=2,
+    )
+
+    assert controller.get_adaptive_draft_len("r0") is not None
+    assert controller.get_adaptive_draft_len("r1") is not None
