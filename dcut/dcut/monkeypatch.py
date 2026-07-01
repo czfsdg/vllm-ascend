@@ -101,9 +101,9 @@ def _patch_proposer(cls):
         next_token = _greedy_sample_from_tp_logits(logits)
         if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
             chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
-                -1, self.num_speculative_tokens
-            ).contiguous()
+            self._last_selected_probs = (
+                (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
+            )
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -203,10 +203,10 @@ def _dcut_init_controller(runner) -> None:
         drafter.needs_draft_probs = True
     runner._dcut_probs_event = torch.npu.Event()
     runner._dcut_probs_pinned = torch.empty(
-        (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory)
-    if (
-        getattr(runner.speculative_config, "method", None) == "dflash"
-        and not getattr(getattr(runner, "ascend_config", None), "enable_reduce_sample", False)
+        (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory
+    )
+    if getattr(runner.speculative_config, "method", None) == "dflash" and not getattr(
+        getattr(runner, "ascend_config", None), "enable_reduce_sample", False
     ):
         logger.warning(
             "D-Cut: dflash is running with enable_reduce_sample=False. "
@@ -334,16 +334,56 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
             )
             runner._dcut_fallback_probs_warnings = warnings + 1
     num_reqs = runner.input_batch.num_reqs
-    runner._dcut_probs_pending = True
-    runner._dcut_num_reqs = num_reqs
-    runner._dcut_req_ids = runner.input_batch.req_ids.copy()
-    runner._dcut_active = {
-        runner.input_batch.req_ids[i]
+    req_ids = runner.input_batch.req_ids.copy()
+    active_req_ids = {
+        req_ids[i]
         for i in range(num_reqs)
         if runner.input_batch.num_computed_tokens_cpu[i] >= runner.input_batch.num_prompt_tokens[i]
     }
+    probs = _dcut_align_selected_probs(runner, probs, num_reqs, active_req_ids)
+    if probs is None:
+        return
+    runner._dcut_probs_pending = True
+    runner._dcut_num_reqs = num_reqs
+    runner._dcut_req_ids = req_ids
+    runner._dcut_active = active_req_ids
     runner._dcut_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
     runner._dcut_probs_event.record()
+
+
+def _dcut_align_selected_probs(
+    runner, probs: torch.Tensor, num_reqs: int, active_req_ids: set[str]
+) -> torch.Tensor | None:
+    if probs.ndim != 2 or probs.shape[1] != runner.num_spec_tokens:
+        logger.warning(
+            "D-Cut: selected probability tensor has unexpected shape %s; skip adaptive cut for this step.",
+            tuple(probs.shape),
+        )
+        return None
+    if probs.shape[0] == num_reqs:
+        return probs[:num_reqs]
+    if probs.shape[0] > num_reqs:
+        logger.warning(
+            "D-Cut: selected probability tensor has %d rows for %d requests; trimming padded rows.",
+            probs.shape[0],
+            num_reqs,
+        )
+        return probs[:num_reqs]
+    if probs.shape[0] == len(active_req_ids):
+        aligned = torch.zeros((num_reqs, runner.num_spec_tokens), dtype=probs.dtype, device=probs.device)
+        active_indices = [
+            i for i, req_id in enumerate(runner.input_batch.req_ids[:num_reqs]) if req_id in active_req_ids
+        ]
+        aligned[active_indices] = probs
+        return aligned
+    logger.warning(
+        "D-Cut: selected probability tensor has %d rows, but current batch has %d requests "
+        "and %d active decode requests; skip adaptive cut for this step to avoid cross-request plans.",
+        probs.shape[0],
+        num_reqs,
+        len(active_req_ids),
+    )
+    return None
 
 
 def _get_fallback_prob() -> float | None:
