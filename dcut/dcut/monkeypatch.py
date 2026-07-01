@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.abc
 import importlib.machinery
+import os
 import sys
 from dataclasses import replace
 from functools import wraps
@@ -20,6 +21,30 @@ _TARGET_MODULES = {
     "vllm_ascend.worker.model_runner_v1",
     "vllm_ascend.worker.worker",
 }
+
+
+def _dcut_debug_enabled() -> bool:
+    return os.getenv("DCUT_DEBUG", "0").lower() in ("1", "true", "yes", "on") or os.getenv(
+        "VLLM_ASCEND_DCUT_DEBUG", "0"
+    ).lower() in ("1", "true", "yes", "on")
+
+
+def _dcut_debug(message: str, *args) -> None:
+    if _dcut_debug_enabled():
+        logger.info("D-Cut debug: " + message, *args)  # noqa: G003
+
+
+def _dcut_preview(value, limit: int = 4):
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().tolist()
+        elif hasattr(value, "tolist"):
+            value = value.tolist()
+    except Exception as exc:  # pragma: no cover - best-effort debug helper
+        return f"<preview failed: {exc}>"
+    if isinstance(value, list):
+        return value[:limit]
+    return value
 
 
 class _DcutPatchLoader(importlib.abc.Loader):
@@ -104,6 +129,13 @@ def _patch_proposer(cls):
             self._last_selected_probs = (
                 (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
             )
+            _dcut_debug(
+                "captured selected probs shape=%s preview=%s next_token_shape=%s next_token_preview=%s",
+                tuple(self._last_selected_probs.shape),
+                _dcut_preview(self._last_selected_probs),
+                tuple(next_token.shape),
+                _dcut_preview(next_token),
+            )
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -165,9 +197,13 @@ def _patch_runner(cls):
 
     @wraps(original_take_draft)
     def take_draft_token_ids(self):
+        _dcut_debug("take_draft_token_ids enter pending_probs=%s", getattr(self, "_dcut_probs_pending", False))
         _dcut_maybe_process_probs(self)
         draft_token_ids = original_take_draft(self)
-        return _dcut_truncate_draft_token_ids(self, draft_token_ids)
+        _dcut_debug_draft_token_ids("take_draft_token_ids original", draft_token_ids)
+        draft_token_ids = _dcut_truncate_draft_token_ids(self, draft_token_ids)
+        _dcut_debug_draft_token_ids("take_draft_token_ids returned", draft_token_ids)
+        return draft_token_ids
 
     cls.__init__ = __init__
     cls.sample_tokens = sample_tokens
@@ -229,6 +265,21 @@ def _dcut_profile_cost(runner) -> None:
         controller.profile_cost_table(runner)
 
 
+def _dcut_debug_draft_token_ids(prefix: str, draft_token_ids) -> None:
+    if not _dcut_debug_enabled() or draft_token_ids is None:
+        return
+    req_ids = getattr(draft_token_ids, "req_ids", None)
+    token_ids = getattr(draft_token_ids, "draft_token_ids", None)
+    lengths = [len(tokens) for tokens in token_ids] if token_ids else None
+    _dcut_debug(
+        "%s req_ids=%s lengths=%s preview=%s",
+        prefix,
+        req_ids,
+        lengths,
+        _dcut_preview(token_ids),
+    )
+
+
 def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     controller = getattr(runner, "_dcut_controller", None)
     if controller is None or draft_token_ids is None:
@@ -238,6 +289,12 @@ def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     if not req_ids or not token_ids:
         return draft_token_ids
 
+    _dcut_debug(
+        "truncate proposal input req_ids=%s lens=%s planned=%s",
+        req_ids,
+        [len(tokens) for tokens in token_ids],
+        [controller.get_adaptive_draft_len(req_id) for req_id in req_ids],
+    )
     truncated_token_ids = []
     tokens_delta = 0
     for req_id, req_draft_token_ids in zip(req_ids, token_ids, strict=False):
@@ -336,9 +393,19 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
         for i in range(num_reqs)
         if runner.input_batch.num_computed_tokens_cpu[i] >= runner.input_batch.num_prompt_tokens[i]
     }
+    _dcut_debug(
+        "queue probs raw shape=%s num_reqs=%d req_ids=%s active=%s preview=%s",
+        tuple(probs.shape),
+        num_reqs,
+        req_ids,
+        sorted(active_req_ids),
+        _dcut_preview(probs),
+    )
     probs = _dcut_align_selected_probs(runner, probs, num_reqs, active_req_ids)
     if probs is None:
+        _dcut_debug("queue probs skipped after alignment")
         return
+    _dcut_debug("queue probs aligned shape=%s preview=%s", tuple(probs.shape), _dcut_preview(probs))
     runner._dcut_probs_pending = True
     runner._dcut_num_reqs = num_reqs
     runner._dcut_req_ids = req_ids
@@ -405,6 +472,12 @@ def _dcut_maybe_process_probs(runner) -> None:
             "D-Cut: processing draft probabilities batch_size=%d active_decode_reqs=%d",
             runner._dcut_num_reqs,
             len(runner._dcut_active),
+        )
+        _dcut_debug(
+            "process probs req_ids=%s active=%s selected_preview=%s",
+            runner._dcut_req_ids,
+            sorted(runner._dcut_active),
+            _dcut_preview(runner._dcut_probs_pinned[: runner._dcut_num_reqs]),
         )
         runner._dcut_controller.process_draft_output(
             selected_probs=runner._dcut_probs_pinned[: runner._dcut_num_reqs],
