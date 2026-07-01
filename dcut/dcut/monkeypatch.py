@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.abc
 import importlib.machinery
+import os
 import sys
 from dataclasses import replace
 from functools import wraps
@@ -20,6 +21,30 @@ _TARGET_MODULES = {
     "vllm_ascend.worker.model_runner_v1",
     "vllm_ascend.worker.worker",
 }
+
+
+def _dcut_debug_enabled() -> bool:
+    return os.getenv("DCUT_DEBUG", "0").lower() in ("1", "true", "yes", "on") or os.getenv(
+        "VLLM_ASCEND_DCUT_DEBUG", "0"
+    ).lower() in ("1", "true", "yes", "on")
+
+
+def _dcut_debug(message: str, *args) -> None:
+    if _dcut_debug_enabled():
+        logger.info("D-Cut debug: " + message, *args)  # noqa: G003
+
+
+def _dcut_preview(value, limit: int = 4):
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().tolist()
+        elif hasattr(value, "tolist"):
+            value = value.tolist()
+    except Exception as exc:  # pragma: no cover - best-effort debug helper
+        return f"<preview failed: {exc}>"
+    if isinstance(value, list):
+        return value[:limit]
+    return value
 
 
 class _DcutPatchLoader(importlib.abc.Loader):
@@ -101,9 +126,16 @@ def _patch_proposer(cls):
         next_token = _greedy_sample_from_tp_logits(logits)
         if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
             chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (chosen - logits.logsumexp(dim=-1)).exp().view(
-                -1, self.num_speculative_tokens
-            ).contiguous()
+            self._last_selected_probs = (
+                (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
+            )
+            _dcut_debug(
+                "captured selected probs shape=%s preview=%s next_token_shape=%s next_token_preview=%s",
+                tuple(self._last_selected_probs.shape),
+                _dcut_preview(self._last_selected_probs),
+                tuple(next_token.shape),
+                _dcut_preview(next_token),
+            )
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -134,9 +166,9 @@ def _patch_runner(cls):
     if getattr(cls, "_dcut_patched", False):
         return
     original_init = cls.__init__
-    original_execute_model = cls.execute_model
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
+    original_take_draft = cls.take_draft_token_ids
 
     @wraps(original_init)
     def __init__(self, *args, **kwargs):
@@ -153,11 +185,6 @@ def _patch_runner(cls):
         self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
 
-    @wraps(original_execute_model)
-    def execute_model(self, scheduler_output, intermediate_tensors=None):
-        scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
-        return original_execute_model(self, scheduler_output, intermediate_tensors)
-
     @wraps(original_sample_tokens)
     def sample_tokens(self, grammar_output):
         _dcut_maybe_process_probs(self)
@@ -168,10 +195,20 @@ def _patch_runner(cls):
         original_copy_draft(self, scheduler_output, zeros_only=zeros_only)
         _dcut_queue_probs(self, zeros_only)
 
+    @wraps(original_take_draft)
+    def take_draft_token_ids(self):
+        _dcut_debug("take_draft_token_ids enter pending_probs=%s", getattr(self, "_dcut_probs_pending", False))
+        _dcut_maybe_process_probs(self)
+        draft_token_ids = original_take_draft(self)
+        _dcut_debug_draft_token_ids("take_draft_token_ids original", draft_token_ids)
+        draft_token_ids = _dcut_truncate_draft_token_ids(self, draft_token_ids)
+        _dcut_debug_draft_token_ids("take_draft_token_ids returned", draft_token_ids)
+        return draft_token_ids
+
     cls.__init__ = __init__
-    cls.execute_model = execute_model
     cls.sample_tokens = sample_tokens
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
+    cls.take_draft_token_ids = take_draft_token_ids
     cls.profile_dcut_cost = _dcut_profile_cost
     cls._dcut_patched = True
 
@@ -203,10 +240,10 @@ def _dcut_init_controller(runner) -> None:
         drafter.needs_draft_probs = True
     runner._dcut_probs_event = torch.npu.Event()
     runner._dcut_probs_pinned = torch.empty(
-        (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory)
-    if (
-        getattr(runner.speculative_config, "method", None) == "dflash"
-        and not getattr(getattr(runner, "ascend_config", None), "enable_reduce_sample", False)
+        (runner.max_num_reqs, num_spec), dtype=torch.float32, device="cpu", pin_memory=runner.pin_memory
+    )
+    if getattr(runner.speculative_config, "method", None) == "dflash" and not getattr(
+        getattr(runner, "ascend_config", None), "enable_reduce_sample", False
     ):
         logger.warning(
             "D-Cut: dflash is running with enable_reduce_sample=False. "
@@ -228,53 +265,69 @@ def _dcut_profile_cost(runner) -> None:
         controller.profile_cost_table(runner)
 
 
-def _dcut_truncate_scheduler_output(runner, scheduler_output):
+def _dcut_debug_draft_token_ids(prefix: str, draft_token_ids) -> None:
+    if not _dcut_debug_enabled() or draft_token_ids is None:
+        return
+    req_ids = getattr(draft_token_ids, "req_ids", None)
+    token_ids = getattr(draft_token_ids, "draft_token_ids", None)
+    lengths = [len(tokens) for tokens in token_ids] if token_ids else None
+    _dcut_debug(
+        "%s req_ids=%s lengths=%s preview=%s",
+        prefix,
+        req_ids,
+        lengths,
+        _dcut_preview(token_ids),
+    )
+
+
+def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     controller = getattr(runner, "_dcut_controller", None)
-    if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
-        return scheduler_output
-    new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
-    new_num_sched = scheduler_output.num_scheduled_tokens.copy()
+    if controller is None or draft_token_ids is None:
+        return draft_token_ids
+    req_ids = getattr(draft_token_ids, "req_ids", None)
+    token_ids = getattr(draft_token_ids, "draft_token_ids", None)
+    if not req_ids or not token_ids:
+        return draft_token_ids
+
+    _dcut_debug(
+        "truncate proposal input req_ids=%s lens=%s planned=%s",
+        req_ids,
+        [len(tokens) for tokens in token_ids],
+        [controller.get_adaptive_draft_len(req_id) for req_id in req_ids],
+    )
+    truncated_token_ids = []
     tokens_delta = 0
-    for req_id, draft_toks in list(new_spec.items()):
+    for req_id, req_draft_token_ids in zip(req_ids, token_ids, strict=False):
         adaptive_len = controller.get_adaptive_draft_len(req_id)
-        if adaptive_len is not None and adaptive_len < len(draft_toks):
-            min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
-            if adaptive_len < min_draft_len:
-                warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
-                if warnings < 5:
-                    logger.warning(
-                        "D-Cut: clamping draft cut for req_id=%s from %d to %d "
-                        "to keep the verifier segment compatible with already-accepted tokens.",
-                        req_id,
-                        adaptive_len,
-                        min_draft_len,
-                    )
-                    runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
-                adaptive_len = min(min_draft_len, len(draft_toks))
-            if adaptive_len >= len(draft_toks):
-                continue
-            diff = len(draft_toks) - adaptive_len
-            tokens_delta += diff
-            new_num_sched[req_id] -= diff
-            if adaptive_len == 0:
-                del new_spec[req_id]
-            else:
-                new_spec[req_id] = draft_toks[:adaptive_len]
+        if adaptive_len is None or adaptive_len >= len(req_draft_token_ids):
+            truncated_token_ids.append(req_draft_token_ids)
+            continue
+        min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
+        if adaptive_len < min_draft_len:
+            warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
+            if warnings < 5:
+                logger.warning(
+                    "D-Cut: clamping draft cut for req_id=%s from %d to %d "
+                    "to keep the verifier segment compatible with already-accepted tokens.",
+                    req_id,
+                    adaptive_len,
+                    min_draft_len,
+                )
+                runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
+            adaptive_len = min(min_draft_len, len(req_draft_token_ids))
+        truncated_token_ids.append(req_draft_token_ids[:adaptive_len])
+        tokens_delta += len(req_draft_token_ids) - adaptive_len
+
     if tokens_delta <= 0:
-        return scheduler_output
+        return draft_token_ids
     logger.info(
-        "D-Cut: cut scheduled speculative tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
-        len(scheduler_output.scheduled_spec_decode_tokens),
-        scheduler_output.total_num_scheduled_tokens,
-        scheduler_output.total_num_scheduled_tokens - tokens_delta,
+        "D-Cut: cut proposed draft tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
+        len(req_ids),
+        sum(len(tokens) for tokens in token_ids),
+        sum(len(tokens) for tokens in truncated_token_ids),
         tokens_delta,
     )
-    return replace(
-        scheduler_output,
-        scheduled_spec_decode_tokens=new_spec,
-        num_scheduled_tokens=new_num_sched,
-        total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - tokens_delta,
-    )
+    return replace(draft_token_ids, draft_token_ids=truncated_token_ids)
 
 
 def _dcut_min_safe_draft_len(runner, req_id: str) -> int:
@@ -334,16 +387,66 @@ def _dcut_queue_probs(runner, zeros_only: bool) -> None:
             )
             runner._dcut_fallback_probs_warnings = warnings + 1
     num_reqs = runner.input_batch.num_reqs
-    runner._dcut_probs_pending = True
-    runner._dcut_num_reqs = num_reqs
-    runner._dcut_req_ids = runner.input_batch.req_ids.copy()
-    runner._dcut_active = {
-        runner.input_batch.req_ids[i]
+    req_ids = runner.input_batch.req_ids.copy()
+    active_req_ids = {
+        req_ids[i]
         for i in range(num_reqs)
         if runner.input_batch.num_computed_tokens_cpu[i] >= runner.input_batch.num_prompt_tokens[i]
     }
+    _dcut_debug(
+        "queue probs raw shape=%s num_reqs=%d req_ids=%s active=%s preview=%s",
+        tuple(probs.shape),
+        num_reqs,
+        req_ids,
+        sorted(active_req_ids),
+        _dcut_preview(probs),
+    )
+    probs = _dcut_align_selected_probs(runner, probs, num_reqs, active_req_ids)
+    if probs is None:
+        _dcut_debug("queue probs skipped after alignment")
+        return
+    _dcut_debug("queue probs aligned shape=%s preview=%s", tuple(probs.shape), _dcut_preview(probs))
+    runner._dcut_probs_pending = True
+    runner._dcut_num_reqs = num_reqs
+    runner._dcut_req_ids = req_ids
+    runner._dcut_active = active_req_ids
     runner._dcut_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
     runner._dcut_probs_event.record()
+
+
+def _dcut_align_selected_probs(
+    runner, probs: torch.Tensor, num_reqs: int, active_req_ids: set[str]
+) -> torch.Tensor | None:
+    if probs.ndim != 2 or probs.shape[1] != runner.num_spec_tokens:
+        logger.warning(
+            "D-Cut: selected probability tensor has unexpected shape %s; skip adaptive cut for this step.",
+            tuple(probs.shape),
+        )
+        return None
+    if probs.shape[0] == num_reqs:
+        return probs[:num_reqs]
+    if probs.shape[0] > num_reqs:
+        logger.warning(
+            "D-Cut: selected probability tensor has %d rows for %d requests; trimming padded rows.",
+            probs.shape[0],
+            num_reqs,
+        )
+        return probs[:num_reqs]
+    if probs.shape[0] == len(active_req_ids):
+        aligned = torch.zeros((num_reqs, runner.num_spec_tokens), dtype=probs.dtype, device=probs.device)
+        active_indices = [
+            i for i, req_id in enumerate(runner.input_batch.req_ids[:num_reqs]) if req_id in active_req_ids
+        ]
+        aligned[active_indices] = probs
+        return aligned
+    logger.warning(
+        "D-Cut: selected probability tensor has %d rows, but current batch has %d requests "
+        "and %d active decode requests; skip adaptive cut for this step to avoid cross-request plans.",
+        probs.shape[0],
+        num_reqs,
+        len(active_req_ids),
+    )
+    return None
 
 
 def _get_fallback_prob() -> float | None:
@@ -369,6 +472,12 @@ def _dcut_maybe_process_probs(runner) -> None:
             "D-Cut: processing draft probabilities batch_size=%d active_decode_reqs=%d",
             runner._dcut_num_reqs,
             len(runner._dcut_active),
+        )
+        _dcut_debug(
+            "process probs req_ids=%s active=%s selected_preview=%s",
+            runner._dcut_req_ids,
+            sorted(runner._dcut_active),
+            _dcut_preview(runner._dcut_probs_pinned[: runner._dcut_num_reqs]),
         )
         runner._dcut_controller.process_draft_output(
             selected_probs=runner._dcut_probs_pinned[: runner._dcut_num_reqs],
