@@ -82,3 +82,33 @@ def test_dcut_align_selected_probs_maps_active_only_rows():
 
     assert aligned is not None
     assert aligned.tolist() == [[0.0, 0.0], [0.9, 0.8], [0.7, 0.6]]
+
+
+def test_dcut_truncates_draft_token_ids_before_scheduler_update():
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+
+    from dcut.monkeypatch import _dcut_truncate_draft_token_ids
+
+    @dataclass
+    class DraftTokenIds:
+        req_ids: list[str]
+        draft_token_ids: list[list[int]]
+
+    draft_token_ids = DraftTokenIds(
+        req_ids=["r0", "r1"],
+        draft_token_ids=[[10, 11, 12], [20, 21, 22]],
+    )
+    controller = SimpleNamespace(
+        get_adaptive_draft_len=lambda req_id: {"r0": 1, "r1": 2}[req_id],
+    )
+    runner = SimpleNamespace(
+        _dcut_controller=controller,
+        input_batch=SimpleNamespace(req_id_to_index={}, num_accepted_tokens_cpu=None),
+    )
+
+    truncated = _dcut_truncate_draft_token_ids(runner, draft_token_ids)
+
+    assert truncated is not draft_token_ids
+    assert truncated.req_ids == ["r0", "r1"]
+    assert truncated.draft_token_ids == [[10], [20, 21]]

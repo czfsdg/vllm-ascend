@@ -134,9 +134,9 @@ def _patch_runner(cls):
     if getattr(cls, "_dcut_patched", False):
         return
     original_init = cls.__init__
-    original_execute_model = cls.execute_model
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
+    original_take_draft = cls.take_draft_token_ids
 
     @wraps(original_init)
     def __init__(self, *args, **kwargs):
@@ -153,11 +153,6 @@ def _patch_runner(cls):
         self._dcut_accepted_tokens_clamp_warnings = 0
         _dcut_init_controller(self)
 
-    @wraps(original_execute_model)
-    def execute_model(self, scheduler_output, intermediate_tensors=None):
-        scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
-        return original_execute_model(self, scheduler_output, intermediate_tensors)
-
     @wraps(original_sample_tokens)
     def sample_tokens(self, grammar_output):
         _dcut_maybe_process_probs(self)
@@ -168,10 +163,16 @@ def _patch_runner(cls):
         original_copy_draft(self, scheduler_output, zeros_only=zeros_only)
         _dcut_queue_probs(self, zeros_only)
 
+    @wraps(original_take_draft)
+    def take_draft_token_ids(self):
+        _dcut_maybe_process_probs(self)
+        draft_token_ids = original_take_draft(self)
+        return _dcut_truncate_draft_token_ids(self, draft_token_ids)
+
     cls.__init__ = __init__
-    cls.execute_model = execute_model
     cls.sample_tokens = sample_tokens
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
+    cls.take_draft_token_ids = take_draft_token_ids
     cls.profile_dcut_cost = _dcut_profile_cost
     cls._dcut_patched = True
 
@@ -228,53 +229,48 @@ def _dcut_profile_cost(runner) -> None:
         controller.profile_cost_table(runner)
 
 
-def _dcut_truncate_scheduler_output(runner, scheduler_output):
+def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     controller = getattr(runner, "_dcut_controller", None)
-    if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
-        return scheduler_output
-    new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
-    new_num_sched = scheduler_output.num_scheduled_tokens.copy()
+    if controller is None or draft_token_ids is None:
+        return draft_token_ids
+    req_ids = getattr(draft_token_ids, "req_ids", None)
+    token_ids = getattr(draft_token_ids, "draft_token_ids", None)
+    if not req_ids or not token_ids:
+        return draft_token_ids
+
+    truncated_token_ids = []
     tokens_delta = 0
-    for req_id, draft_toks in list(new_spec.items()):
+    for req_id, req_draft_token_ids in zip(req_ids, token_ids, strict=False):
         adaptive_len = controller.get_adaptive_draft_len(req_id)
-        if adaptive_len is not None and adaptive_len < len(draft_toks):
-            min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
-            if adaptive_len < min_draft_len:
-                warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
-                if warnings < 5:
-                    logger.warning(
-                        "D-Cut: clamping draft cut for req_id=%s from %d to %d "
-                        "to keep the verifier segment compatible with already-accepted tokens.",
-                        req_id,
-                        adaptive_len,
-                        min_draft_len,
-                    )
-                    runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
-                adaptive_len = min(min_draft_len, len(draft_toks))
-            if adaptive_len >= len(draft_toks):
-                continue
-            diff = len(draft_toks) - adaptive_len
-            tokens_delta += diff
-            new_num_sched[req_id] -= diff
-            if adaptive_len == 0:
-                del new_spec[req_id]
-            else:
-                new_spec[req_id] = draft_toks[:adaptive_len]
+        if adaptive_len is None or adaptive_len >= len(req_draft_token_ids):
+            truncated_token_ids.append(req_draft_token_ids)
+            continue
+        min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
+        if adaptive_len < min_draft_len:
+            warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
+            if warnings < 5:
+                logger.warning(
+                    "D-Cut: clamping draft cut for req_id=%s from %d to %d "
+                    "to keep the verifier segment compatible with already-accepted tokens.",
+                    req_id,
+                    adaptive_len,
+                    min_draft_len,
+                )
+                runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
+            adaptive_len = min(min_draft_len, len(req_draft_token_ids))
+        truncated_token_ids.append(req_draft_token_ids[:adaptive_len])
+        tokens_delta += len(req_draft_token_ids) - adaptive_len
+
     if tokens_delta <= 0:
-        return scheduler_output
+        return draft_token_ids
     logger.info(
-        "D-Cut: cut scheduled speculative tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
-        len(scheduler_output.scheduled_spec_decode_tokens),
-        scheduler_output.total_num_scheduled_tokens,
-        scheduler_output.total_num_scheduled_tokens - tokens_delta,
+        "D-Cut: cut proposed draft tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
+        len(req_ids),
+        sum(len(tokens) for tokens in token_ids),
+        sum(len(tokens) for tokens in truncated_token_ids),
         tokens_delta,
     )
-    return replace(
-        scheduler_output,
-        scheduled_spec_decode_tokens=new_spec,
-        num_scheduled_tokens=new_num_sched,
-        total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - tokens_delta,
-    )
+    return replace(draft_token_ids, draft_token_ids=truncated_token_ids)
 
 
 def _dcut_min_safe_draft_len(runner, req_id: str) -> int:
