@@ -16,6 +16,8 @@ from vllm.logger import logger
 
 from dcut.config import VerifyAdaptiveConfig
 
+MIN_ADAPTIVE_DRAFT_TOKENS = 1
+
 
 def _env_enabled(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
@@ -177,14 +179,22 @@ class VerifyAdaptiveController:
             active_probs, batch_size, q_levels, lambda q: self._cost_table[(bs_key, q)], self.max_query_len_per_req - 1
         )
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
-            self._adaptive_draft_lens[req_id] = draft_len
+            # The Ascend DFlash/spec-decode path is not stable when a decode
+            # request is represented with a zero-length draft proposal. Keep
+            # D-Cut active by allowing aggressive cuts, but always leave at
+            # least one draft token for active decode requests.
+            applied_draft_len = max(MIN_ADAPTIVE_DRAFT_TOKENS, draft_len)
+            self._adaptive_draft_lens[req_id] = applied_draft_len
+            applied_draft_lens.append(applied_draft_len)
         logger.info(
-            "D-Cut: planned adaptive draft lengths batch_size=%d active_reqs=%d best_Q=%d best_S=%d draft_lens=%s",
+            "D-Cut: planned adaptive draft lengths batch_size=%d active_reqs=%d "
+            "best_Q=%d best_S=%d draft_lens=%s applied_draft_lens=%s",
             batch_size,
             len(active_req_ids),
             result["best_Q"],
             result["best_S"],
             result["draft_lens"],
+            applied_draft_lens,
         )
 
     def get_adaptive_draft_len(self, req_id: str) -> int | None:
