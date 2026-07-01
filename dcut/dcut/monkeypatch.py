@@ -168,7 +168,7 @@ def _patch_runner(cls):
     original_init = cls.__init__
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
-    original_take_draft = cls.take_draft_token_ids
+    original_update_states = cls._update_states
 
     @wraps(original_init)
     def __init__(self, *args, **kwargs):
@@ -187,28 +187,28 @@ def _patch_runner(cls):
 
     @wraps(original_sample_tokens)
     def sample_tokens(self, grammar_output):
+        output = original_sample_tokens(self, grammar_output)
         _dcut_maybe_process_probs(self)
-        return original_sample_tokens(self, grammar_output)
+        return output
 
     @wraps(original_copy_draft)
     def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
         original_copy_draft(self, scheduler_output, zeros_only=zeros_only)
         _dcut_queue_probs(self, zeros_only)
 
-    @wraps(original_take_draft)
-    def take_draft_token_ids(self):
-        _dcut_debug("take_draft_token_ids enter pending_probs=%s", getattr(self, "_dcut_probs_pending", False))
-        _dcut_maybe_process_probs(self)
-        draft_token_ids = original_take_draft(self)
-        _dcut_debug_draft_token_ids("take_draft_token_ids original", draft_token_ids)
-        draft_token_ids = _dcut_truncate_draft_token_ids(self, draft_token_ids)
-        _dcut_debug_draft_token_ids("take_draft_token_ids returned", draft_token_ids)
-        return draft_token_ids
+    @wraps(original_update_states)
+    def _update_states(self, scheduler_output):
+        result = original_update_states(self, scheduler_output)
+        controller = getattr(self, "_dcut_controller", None)
+        if controller is not None:
+            for req_id in getattr(scheduler_output, "finished_req_ids", ()):
+                controller.invalidate(req_id)
+        return result
 
     cls.__init__ = __init__
     cls.sample_tokens = sample_tokens
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
-    cls.take_draft_token_ids = take_draft_token_ids
+    cls._update_states = _update_states
     cls.profile_dcut_cost = _dcut_profile_cost
     cls._dcut_patched = True
 
@@ -282,25 +282,17 @@ def _dcut_debug_draft_token_ids(prefix: str, draft_token_ids) -> None:
 
 def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     controller = getattr(runner, "_dcut_controller", None)
-    if controller is None or draft_token_ids is None:
-        return draft_token_ids
-    req_ids = getattr(draft_token_ids, "req_ids", None)
-    token_ids = getattr(draft_token_ids, "draft_token_ids", None)
-    if not req_ids or not token_ids:
-        return draft_token_ids
+    if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
+        return scheduler_output
 
-    _dcut_debug(
-        "truncate proposal input req_ids=%s lens=%s planned=%s",
-        req_ids,
-        [len(tokens) for tokens in token_ids],
-        [controller.get_adaptive_draft_len(req_id) for req_id in req_ids],
-    )
-    truncated_token_ids = []
+    new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
+    new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
-    for req_id, req_draft_token_ids in zip(req_ids, token_ids, strict=False):
+    debug_plans = {}
+    for req_id, draft_toks in list(new_spec.items()):
         adaptive_len = controller.get_adaptive_draft_len(req_id)
-        if adaptive_len is None or adaptive_len >= len(req_draft_token_ids):
-            truncated_token_ids.append(req_draft_token_ids)
+        debug_plans[req_id] = {"scheduled": len(draft_toks), "adaptive": adaptive_len}
+        if adaptive_len is None or adaptive_len >= len(draft_toks):
             continue
         min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
         if adaptive_len < min_draft_len:
@@ -314,10 +306,16 @@ def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
                     min_draft_len,
                 )
                 runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
-            adaptive_len = min(min_draft_len, len(req_draft_token_ids))
-        truncated_token_ids.append(req_draft_token_ids[:adaptive_len])
-        tokens_delta += len(req_draft_token_ids) - adaptive_len
+            adaptive_len = min(min_draft_len, len(draft_toks))
+        diff = len(draft_toks) - adaptive_len
+        tokens_delta += diff
+        new_num_sched[req_id] -= diff
+        if adaptive_len == 0:
+            del new_spec[req_id]
+        else:
+            new_spec[req_id] = draft_toks[:adaptive_len]
 
+    _dcut_debug("truncate scheduler plans=%s tokens_delta=%d", debug_plans, tokens_delta)
     if tokens_delta <= 0:
         return draft_token_ids
     logger.info(

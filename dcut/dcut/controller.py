@@ -178,7 +178,6 @@ class VerifyAdaptiveController:
         result = choose_query_lens_discrete(
             active_probs, batch_size, q_levels, lambda q: self._cost_table[(bs_key, q)], self.max_query_len_per_req - 1
         )
-        applied_draft_lens = []
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             # The Ascend DFlash/spec-decode path is not stable when a decode
             # request is represented with a zero-length draft proposal. Keep
