@@ -28,11 +28,13 @@ def test_choose_query_lens_discrete_global_topk():
 
 
 def test_verify_adaptive_config_ignores_unknown_keys_and_validates():
-    cfg = VerifyAdaptiveConfig.from_dict({
-        "min_warmup_batch_size": 1,
-        "query_len_step_per_req": 1,
-        "unknown": "ignored",
-    })
+    cfg = VerifyAdaptiveConfig.from_dict(
+        {
+            "min_warmup_batch_size": 1,
+            "query_len_step_per_req": 1,
+            "unknown": "ignored",
+        }
+    )
 
     cfg.validate(num_speculative_tokens=4)
     assert cfg.min_warmup_batch_size == 1
@@ -43,3 +45,40 @@ def test_verify_adaptive_config_rejects_invalid_query_range():
 
     with pytest.raises(ValueError, match="min_query_len_per_req"):
         cfg.validate(num_speculative_tokens=4)
+
+
+def test_dcut_align_selected_probs_skips_ambiguous_partial_rows():
+    import torch
+    from dcut.monkeypatch import _dcut_align_selected_probs
+
+    class Runner:
+        num_spec_tokens = 3
+
+        class InputBatch:
+            req_ids = ["r0", "r1", "r2", "r3"]
+
+        input_batch = InputBatch()
+
+    probs = torch.ones((2, 3), dtype=torch.float32)
+
+    assert _dcut_align_selected_probs(Runner(), probs, 4, {"r1"}) is None
+
+
+def test_dcut_align_selected_probs_maps_active_only_rows():
+    import torch
+    from dcut.monkeypatch import _dcut_align_selected_probs
+
+    class Runner:
+        num_spec_tokens = 2
+
+        class InputBatch:
+            req_ids = ["prefill", "decode0", "decode1"]
+
+        input_batch = InputBatch()
+
+    probs = torch.tensor([[0.9, 0.8], [0.7, 0.6]], dtype=torch.float32)
+
+    aligned = _dcut_align_selected_probs(Runner(), probs, 3, {"decode0", "decode1"})
+
+    assert aligned is not None
+    assert aligned.tolist() == [[0.0, 0.0], [0.9, 0.8], [0.7, 0.6]]
