@@ -43,6 +43,10 @@ def test_config_overrides_policy_and_cost_table_values():
                 "default_acceptance_rate": 0.6,
                 "high_concurrency_batch": 8,
             },
+            "safety": {
+                "accuracy_safe_mode": False,
+                "target_only_methods": ["dflash", "draft_model"],
+            },
         }
     )
 
@@ -61,3 +65,5 @@ def test_config_overrides_policy_and_cost_table_values():
     assert table.get(1).target_cost == 2.5
     assert policy.default_acceptance_rate == 0.6
     assert policy.high_concurrency_batch == 8
+    assert config.accuracy_safe_mode is False
+    assert config.target_only_methods == ("dflash", "draft_model")

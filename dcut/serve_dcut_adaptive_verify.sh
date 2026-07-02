@@ -13,6 +13,8 @@ export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend,dcut_adaptive_verify}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DCUT_ENABLE="${DCUT_ENABLE:-1}"
 export DCUT_CONFIG="${DCUT_CONFIG:-${SCRIPT_DIR}/verify_adaptive_config.example.json}"
+# 默认先保护精度：DFlash 接收率/精度确认正常后，可设置 DCUT_ACCURACY_SAFE_MODE=0。
+export DCUT_ACCURACY_SAFE_MODE="${DCUT_ACCURACY_SAFE_MODE:-1}"
 
 TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-/data/models/Qwen3.5-9B/}"
 DFLASH_DRAFT_PATH="${DFLASH_DRAFT_PATH:-/data/models/Qwen3.5-9B-DFlash}"

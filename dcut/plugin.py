@@ -35,6 +35,18 @@ def _num_speculative_tokens(runner) -> int:
     return int(getattr(speculative_config, "num_speculative_tokens", 1) or 1)
 
 
+def _spec_method(runner) -> str:
+    speculative_config = getattr(runner, "speculative_config", None)
+    return str(getattr(speculative_config, "method", "") or "")
+
+
+def _should_use_target_only(runner) -> bool:
+    if not getattr(runner, "dcut_accuracy_safe_mode", True):
+        return False
+    target_only_methods = getattr(runner, "dcut_target_only_methods", ("dflash",))
+    return _spec_method(runner) in target_only_methods
+
+
 def _patch_runner_class(npu_model_runner: type) -> None:
     global _PATCHED
     if _PATCHED:
@@ -61,11 +73,16 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             default_acceptance_rate=config.default_acceptance_rate,
             high_concurrency_batch=config.high_concurrency_batch,
         )
+        self.dcut_accuracy_safe_mode = config.accuracy_safe_mode
+        self.dcut_target_only_methods = config.target_only_methods
         logger.info(
-            "[dcut] cost-table initialized: enabled=%s config=%s max_verify_len=%d table=[%s]",
+            "[dcut] cost-table initialized: enabled=%s config=%s max_verify_len=%d "
+            "accuracy_safe_mode=%s target_only_methods=%s table=[%s]",
             True,
             config_source or "<defaults>",
             max_verify_len,
+            config.accuracy_safe_mode,
+            config.target_only_methods,
             self.dcut_cost_table.summary(),
         )
 
@@ -90,6 +107,15 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 decision.score,
                 decision.reason,
             )
+            if _should_use_target_only(self):
+                logger.warning(
+                    "[dcut] accuracy-safe target-only fallback is active for "
+                    "speculative method=%s. Returning no draft tokens to preserve "
+                    "target-model output quality. Set DCUT_ACCURACY_SAFE_MODE=0 "
+                    "after DFlash acceptance/accuracy is verified.",
+                    _spec_method(self),
+                )
+                return None
         return original_propose(self, *args, **kwargs)
 
     npu_model_runner.__init__ = init_with_dcut
