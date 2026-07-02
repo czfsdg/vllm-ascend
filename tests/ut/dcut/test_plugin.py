@@ -50,7 +50,7 @@ def test_accuracy_safe_mode_returns_no_draft_tokens(monkeypatch):
     assert "dflash" in runner.dcut_target_only_methods
 
 
-def test_repeated_identical_decisions_are_throttled(monkeypatch):
+def test_repeated_identical_decisions_are_logged(monkeypatch):
     class FreshSpeculativeConfig:
         method = "dflash"
         num_speculative_tokens = 4
@@ -80,8 +80,9 @@ def test_repeated_identical_decisions_are_throttled(monkeypatch):
         assert runner.propose_draft_token_ids() == [[1, 2]]
 
     decision_logs = [log for log in logs if "cut-policy decision" in log]
-    assert len(decision_logs) == 1
+    assert len(decision_logs) == 3
     assert "repeat_count=1" in decision_logs[0]
+    assert "repeat_count=3" in decision_logs[-1]
     assert runner.dcut_decision_count == 3
 
 
@@ -118,3 +119,31 @@ def test_acceptance_rate_uses_runtime_counters(monkeypatch):
     assert runner.dcut_last_decision.acceptance_rate == 0.5
     decision_logs = [log for log in logs if "cut-policy decision" in log]
     assert "acceptance_source=runtime_counters" in decision_logs[0]
+
+
+def test_acceptance_rate_uses_metrics_log_bridge(monkeypatch, tmp_path):
+    metrics_path = tmp_path / "dcut_metrics.json"
+    monkeypatch.setattr(plugin, "METRICS_FILE_PATH", str(metrics_path))
+
+    record = type(
+        "Record",
+        (),
+        {
+            "getMessage": lambda self: (
+                "SpecDecoding metrics: Mean acceptance length: 2.99, "
+                "Accepted throughput: 4.48 tokens/s, Drafted throughput: "
+                "15.78 tokens/s, Accepted: 147 tokens, Drafted: 518 "
+                "tokens, Avg Draft acceptance rate: 28.4%"
+            ),
+        },
+    )()
+    plugin._DcutMetricsLogHandler().emit(record)
+
+    class Runner:
+        pass
+
+    runner = Runner()
+    rate, source = plugin._acceptance_rate_from_runner(runner)
+
+    assert round(rate, 3) == round(147 / 518, 3)
+    assert source == "spec_decoding_metrics_log"

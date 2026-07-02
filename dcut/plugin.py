@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import builtins
+import json
 import logging
 import os
+import re
 import sys
+import tempfile
+import time
 from functools import wraps
 from numbers import Real
 from types import ModuleType
@@ -26,8 +30,14 @@ def _visible_log(level: str, message: str, *args) -> None:
 
 
 _RUNNER_MODULE = "vllm_ascend.worker.model_runner_v1"
-DECISION_LOG_REPEAT_INTERVAL = 128
 ACCEPTANCE_EMA_ALPHA = 0.2
+UNKNOWN_ACCEPTANCE_RATE = 0.0
+METRICS_FILE_NAME = f"dcut_acceptance_metrics_{os.getuid()}.json"
+METRICS_FILE_PATH = os.path.join(tempfile.gettempdir(), METRICS_FILE_NAME)
+SPEC_DECODING_METRICS_PATTERN = re.compile(
+    r"SpecDecoding metrics:.*Accepted:\s*([0-9,]+)\s*tokens,"
+    r"\s*Drafted:\s*([0-9,]+)\s*tokens"
+)
 ACCEPTED_COUNTER_NAMES = (
     "num_accepted_tokens",
     "accepted_tokens",
@@ -49,6 +59,7 @@ ACCEPTANCE_COUNTER_ROOTS = (
 )
 _PATCHED = False
 _IMPORT_HOOK_INSTALLED = False
+_METRICS_LOG_HANDLER_INSTALLED = False
 _ORIGINAL_IMPORT = builtins.__import__
 
 
@@ -107,6 +118,68 @@ def _find_first_counter(container, names: tuple[str, ...]) -> float | None:
     return None
 
 
+def _write_acceptance_metrics(accepted: float, drafted: float, source: str) -> None:
+    if drafted <= 0:
+        return
+    payload = {
+        "accepted": accepted,
+        "drafted": drafted,
+        "acceptance_rate": accepted / drafted,
+        "source": source,
+        "timestamp": time.time(),
+    }
+    tmp_path = f"{METRICS_FILE_PATH}.{os.getpid()}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as metrics_file:
+        json.dump(payload, metrics_file)
+    os.replace(tmp_path, METRICS_FILE_PATH)
+
+
+def _read_acceptance_metrics_file() -> tuple[float, str] | None:
+    try:
+        with open(METRICS_FILE_PATH, encoding="utf-8") as metrics_file:
+            payload = json.load(metrics_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    acceptance_rate = _to_float(payload.get("acceptance_rate"))
+    if acceptance_rate is None:
+        accepted = _to_float(payload.get("accepted"))
+        drafted = _to_float(payload.get("drafted"))
+        if accepted is None or drafted is None or drafted <= 0:
+            return None
+        acceptance_rate = accepted / drafted
+    return min(max(acceptance_rate, 0.0), 1.0), str(payload.get("source", "metrics_file"))
+
+
+class _DcutMetricsLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        match = SPEC_DECODING_METRICS_PATTERN.search(message)
+        if match is None:
+            return
+        accepted = float(match.group(1).replace(",", ""))
+        drafted = float(match.group(2).replace(",", ""))
+        try:
+            _write_acceptance_metrics(
+                accepted,
+                drafted,
+                "spec_decoding_metrics_log",
+            )
+        except OSError:
+            self.handleError(record)
+
+
+def _install_metrics_log_bridge() -> None:
+    global _METRICS_LOG_HANDLER_INSTALLED
+    if _METRICS_LOG_HANDLER_INSTALLED:
+        return
+    handler = _DcutMetricsLogHandler()
+    handler.setLevel(logging.INFO)
+    for logger_name in ("", "vllm", "vllm.v1", "vllm.v1.metrics"):
+        logging.getLogger(logger_name).addHandler(handler)
+    _METRICS_LOG_HANDLER_INSTALLED = True
+
+
 def _read_acceptance_counters(runner) -> tuple[float, float] | None:
     for root_name in ACCEPTANCE_COUNTER_ROOTS:
         root = _read_field(runner, root_name)
@@ -126,25 +199,30 @@ def _read_acceptance_counters(runner) -> tuple[float, float] | None:
 
 def _acceptance_rate_from_runner(runner) -> tuple[float | None, str]:
     counters = _read_acceptance_counters(runner)
-    if counters is None:
-        return getattr(runner, "dcut_observed_acceptance_rate", None), "default_config"
+    if counters is not None:
+        accepted, drafted = counters
+        previous_counters = getattr(runner, "dcut_acceptance_counter_snapshot", None)
+        runner.dcut_acceptance_counter_snapshot = counters
+        if previous_counters is not None:
+            accepted_delta = accepted - previous_counters[0]
+            drafted_delta = drafted - previous_counters[1]
+            if accepted_delta >= 0 and drafted_delta > 0:
+                raw_rate = accepted_delta / drafted_delta
+                previous_rate = getattr(runner, "dcut_observed_acceptance_rate", raw_rate)
+                smoothed_rate = ACCEPTANCE_EMA_ALPHA * raw_rate + (1.0 - ACCEPTANCE_EMA_ALPHA) * previous_rate
+                runner.dcut_observed_acceptance_rate = smoothed_rate
+                return smoothed_rate, "runtime_counter_delta"
 
-    accepted, drafted = counters
-    previous_counters = getattr(runner, "dcut_acceptance_counter_snapshot", None)
-    runner.dcut_acceptance_counter_snapshot = counters
-    if previous_counters is not None:
-        accepted_delta = accepted - previous_counters[0]
-        drafted_delta = drafted - previous_counters[1]
-        if accepted_delta >= 0 and drafted_delta > 0:
-            raw_rate = accepted_delta / drafted_delta
-            previous_rate = getattr(runner, "dcut_observed_acceptance_rate", raw_rate)
-            smoothed_rate = ACCEPTANCE_EMA_ALPHA * raw_rate + (1.0 - ACCEPTANCE_EMA_ALPHA) * previous_rate
-            runner.dcut_observed_acceptance_rate = smoothed_rate
-            return smoothed_rate, "runtime_counter_delta"
+        raw_rate = accepted / drafted
+        runner.dcut_observed_acceptance_rate = raw_rate
+        return raw_rate, "runtime_counters"
 
-    raw_rate = accepted / drafted
-    runner.dcut_observed_acceptance_rate = raw_rate
-    return raw_rate, "runtime_counters"
+    metrics_file_rate = _read_acceptance_metrics_file()
+    if metrics_file_rate is not None:
+        runner.dcut_observed_acceptance_rate = metrics_file_rate[0]
+        return metrics_file_rate
+
+    return UNKNOWN_ACCEPTANCE_RATE, "unavailable"
 
 
 def _decision_signature(decision) -> tuple[int, int, int, float, str]:
@@ -160,16 +238,7 @@ def _decision_signature(decision) -> tuple[int, int, int, float, str]:
 def _log_cut_decision(runner, decision, acceptance_source: str) -> None:
     decision_count = int(getattr(runner, "dcut_decision_count", 0)) + 1
     runner.dcut_decision_count = decision_count
-
-    signature = _decision_signature(decision)
-    previous_signature = getattr(runner, "dcut_last_logged_decision_signature", None)
-    should_log = (
-        signature != previous_signature or decision_count == 1 or decision_count % DECISION_LOG_REPEAT_INTERVAL == 0
-    )
-    if not should_log:
-        return
-
-    runner.dcut_last_logged_decision_signature = signature
+    runner.dcut_last_logged_decision_signature = _decision_signature(decision)
     _visible_log(
         "info",
         "[dcut] cut-policy decision: requested_len=%d selected_len=%d "
@@ -209,12 +278,12 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         )
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
-            default_acceptance_rate=config.default_acceptance_rate,
+            default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,
             high_concurrency_batch=config.high_concurrency_batch,
         )
         self.dcut_accuracy_safe_mode = config.accuracy_safe_mode
         self.dcut_target_only_methods = config.target_only_methods
-        self.dcut_observed_acceptance_rate = config.default_acceptance_rate
+        self.dcut_observed_acceptance_rate = None
         self.dcut_acceptance_counter_snapshot = None
         self.dcut_decision_count = 0
         self.dcut_last_logged_decision_signature = None
@@ -298,6 +367,7 @@ def register() -> None:
     if not _env_flag("DCUT_ENABLE", "1"):
         _visible_log("info", "[dcut] plugin disabled by DCUT_ENABLE=0")
         return
+    _install_metrics_log_bridge()
     if not _maybe_patch_loaded_runner():
         if _IMPORT_HOOK_INSTALLED:
             return
