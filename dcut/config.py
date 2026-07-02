@@ -17,7 +17,7 @@ class DcutConfig:
     draft_token_cost: float = 0.08
     default_acceptance_rate: float = 0.75
     high_concurrency_batch: int = 16
-    accuracy_safe_mode: bool = True
+    accuracy_safe_mode: bool = False
     target_only_methods: tuple[str, ...] = ("dflash",)
 
 

@@ -13,16 +13,15 @@ export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend,dcut_adaptive_verify}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DCUT_ENABLE="${DCUT_ENABLE:-1}"
 export DCUT_CONFIG="${DCUT_CONFIG:-${SCRIPT_DIR}/verify_adaptive_config.example.json}"
-# 默认先保护精度：不传 --speculative-config，不加载 DFlash。
-# DFlash 接收率/精度确认正常后，可设置 DCUT_ACCURACY_SAFE_MODE=0 开启 speculative。
-export DCUT_ACCURACY_SAFE_MODE="${DCUT_ACCURACY_SAFE_MODE:-1}"
+# 默认开启 DFlash speculative + D-Cut；如需 target-only 基线，可设置 DCUT_ACCURACY_SAFE_MODE=1。
+export DCUT_ACCURACY_SAFE_MODE="${DCUT_ACCURACY_SAFE_MODE:-0}"
 
 TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-/data/models/Qwen3.5-9B/}"
 DFLASH_DRAFT_PATH="${DFLASH_DRAFT_PATH:-/data/models/Qwen3.5-9B-DFlash}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.5-9b}"
 VLLM_PORT="${VLLM_PORT:-8304}"
 
-SPEC_CONFIG="${SPEC_CONFIG:-{\"method\":\"dflash\",\"model\":\"${DFLASH_DRAFT_PATH}\",\"num_speculative_tokens\":15}}"
+SPEC_CONFIG="${SPEC_CONFIG:-{\"method\":\"dflash\",\"model\":\"${DFLASH_DRAFT_PATH}\",\"num_speculative_tokens\":7}}"
 
 SPEC_ARGS=()
 case "${DCUT_ACCURACY_SAFE_MODE,,}" in
@@ -34,7 +33,7 @@ case "${DCUT_ACCURACY_SAFE_MODE,,}" in
     ;;
   *)
     echo "[dcut] DCUT_ACCURACY_SAFE_MODE=${DCUT_ACCURACY_SAFE_MODE}; starting target-only server without --speculative-config."
-    echo "[dcut] Set DCUT_ACCURACY_SAFE_MODE=0 to enable DFlash speculative decoding after accuracy is verified."
+    echo "[dcut] Set DCUT_ACCURACY_SAFE_MODE=0 to enable DFlash speculative decoding."
     ;;
 esac
 

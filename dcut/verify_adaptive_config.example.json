@@ -9,7 +9,7 @@
     "high_concurrency_batch": 16
   },
   "safety": {
-    "accuracy_safe_mode": true,
+    "accuracy_safe_mode": false,
     "target_only_methods": ["dflash"]
   }
 }

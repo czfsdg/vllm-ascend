@@ -39,7 +39,7 @@ def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
 
 
 def test_accuracy_safe_mode_returns_no_draft_tokens(monkeypatch):
-    monkeypatch.delenv("DCUT_ACCURACY_SAFE_MODE", raising=False)
+    monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "1")
     monkeypatch.setattr(plugin, "_PATCHED", False)
 
     plugin._patch_runner_class(FakeRunner)
