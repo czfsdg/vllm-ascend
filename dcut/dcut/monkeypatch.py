@@ -111,13 +111,15 @@ def _patch_proposer(cls):
 
     @wraps(original_compute)
     def compute_draft_token_ids(self, hidden_states):
+        if not _dcut_should_capture_draft_probs(self):
+            return original_compute(self, hidden_states)
+
         logits = self.model.logits_processor(self.model.lm_head, hidden_states)
         next_token = _greedy_sample_from_tp_logits(logits)
-        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
-            chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (
-                (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
-            )
+        chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
+        self._last_selected_probs = (
+            (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
+        )
         if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
             return next_token
         bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
@@ -129,6 +131,15 @@ def _patch_proposer(cls):
     cls.take_last_selected_probs = take_last_selected_probs
     cls.compute_draft_token_ids = compute_draft_token_ids
     cls._dcut_patched = True
+
+
+def _dcut_should_capture_draft_probs(proposer) -> bool:
+    if not getattr(proposer, "needs_draft_probs", False):
+        return False
+    runner = getattr(proposer, "runner", None)
+    controller = getattr(runner, "_dcut_controller", None)
+    config = getattr(controller, "config", None)
+    return bool(getattr(config, "apply_runtime_cuts", False))
 
 
 def _patch_attention_backend(module: ModuleType) -> None:
