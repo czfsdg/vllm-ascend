@@ -108,13 +108,15 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 decision.reason,
             )
             if _should_use_target_only(self):
-                logger.warning(
-                    "[dcut] accuracy-safe target-only fallback is active for "
-                    "speculative method=%s. Returning no draft tokens to preserve "
-                    "target-model output quality. Set DCUT_ACCURACY_SAFE_MODE=0 "
-                    "after DFlash acceptance/accuracy is verified.",
-                    _spec_method(self),
-                )
+                if not getattr(self, "dcut_target_only_warning_emitted", False):
+                    logger.warning(
+                        "[dcut] accuracy-safe target-only fallback is active for "
+                        "speculative method=%s. Returning no draft tokens to preserve "
+                        "target-model output quality. Set DCUT_ACCURACY_SAFE_MODE=0 "
+                        "after DFlash acceptance/accuracy is verified.",
+                        _spec_method(self),
+                    )
+                    self.dcut_target_only_warning_emitted = True
                 return None
         return original_propose(self, *args, **kwargs)
 
