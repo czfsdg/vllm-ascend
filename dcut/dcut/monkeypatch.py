@@ -166,7 +166,6 @@ def _patch_runner(cls):
     if getattr(cls, "_dcut_patched", False):
         return
     original_init = cls.__init__
-    original_execute_model = cls.execute_model
     original_sample_tokens = cls.sample_tokens
     original_copy_draft = cls._copy_draft_token_ids_to_cpu
     original_update_states = cls._update_states
@@ -186,11 +185,6 @@ def _patch_runner(cls):
         self._dcut_accepted_tokens_clamp_warnings = 0
         self._dcut_mixed_batch_skip_warnings = 0
         _dcut_init_controller(self)
-
-    @wraps(original_execute_model)
-    def execute_model(self, scheduler_output, intermediate_tensors=None):
-        scheduler_output = _dcut_truncate_scheduler_output(self, scheduler_output)
-        return original_execute_model(self, scheduler_output, intermediate_tensors)
 
     @wraps(original_sample_tokens)
     def sample_tokens(self, grammar_output):
@@ -213,7 +207,6 @@ def _patch_runner(cls):
         return result
 
     cls.__init__ = __init__
-    cls.execute_model = execute_model
     cls.sample_tokens = sample_tokens
     cls._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     cls._update_states = _update_states
@@ -273,7 +266,22 @@ def _dcut_profile_cost(runner) -> None:
         controller.profile_cost_table(runner)
 
 
-def _dcut_truncate_scheduler_output(runner, scheduler_output):
+def _dcut_debug_draft_token_ids(prefix: str, draft_token_ids) -> None:
+    if not _dcut_debug_enabled() or draft_token_ids is None:
+        return
+    req_ids = getattr(draft_token_ids, "req_ids", None)
+    token_ids = getattr(draft_token_ids, "draft_token_ids", None)
+    lengths = [len(tokens) for tokens in token_ids] if token_ids else None
+    _dcut_debug(
+        "%s req_ids=%s lengths=%s preview=%s",
+        prefix,
+        req_ids,
+        lengths,
+        _dcut_preview(token_ids),
+    )
+
+
+def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
     controller = getattr(runner, "_dcut_controller", None)
     if controller is None or not scheduler_output.scheduled_spec_decode_tokens:
         return scheduler_output
@@ -318,20 +326,15 @@ def _dcut_truncate_scheduler_output(runner, scheduler_output):
 
     _dcut_debug("truncate scheduler plans=%s tokens_delta=%d", debug_plans, tokens_delta)
     if tokens_delta <= 0:
-        return scheduler_output
+        return draft_token_ids
     logger.info(
-        "D-Cut: cut scheduled speculative tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
-        len(scheduler_output.scheduled_spec_decode_tokens),
-        scheduler_output.total_num_scheduled_tokens,
-        scheduler_output.total_num_scheduled_tokens - tokens_delta,
+        "D-Cut: cut proposed draft tokens reqs=%d tokens_before=%d tokens_after=%d delta=%d",
+        len(req_ids),
+        sum(len(tokens) for tokens in token_ids),
+        sum(len(tokens) for tokens in truncated_token_ids),
         tokens_delta,
     )
-    return replace(
-        scheduler_output,
-        scheduled_spec_decode_tokens=new_spec,
-        num_scheduled_tokens=new_num_sched,
-        total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - tokens_delta,
-    )
+    return replace(draft_token_ids, draft_token_ids=truncated_token_ids)
 
 
 def _dcut_min_safe_draft_len(runner, req_id: str) -> int:
