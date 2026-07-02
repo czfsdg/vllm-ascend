@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
+import builtins
 import logging
 import os
+import sys
 from functools import wraps
+from types import ModuleType
 
 from dcut.config import load_dcut_config
 from dcut.cost_table import DcutCostTable
 from dcut.policy import DcutPolicy
 
 logger = logging.getLogger("dcut")
+_RUNNER_MODULE = "vllm_ascend.worker.model_runner_v1"
 _PATCHED = False
+_IMPORT_HOOK_INSTALLED = False
+_ORIGINAL_IMPORT = builtins.__import__
 
 
 def _env_flag(name: str, default: str = "1") -> bool:
@@ -29,11 +35,13 @@ def _num_speculative_tokens(runner) -> int:
     return int(getattr(speculative_config, "num_speculative_tokens", 1) or 1)
 
 
-def _install_runner_patch() -> None:
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+def _patch_runner_class(npu_model_runner: type) -> None:
+    global _PATCHED
+    if _PATCHED:
+        return
 
-    original_init = NPUModelRunner.__init__
-    original_propose = NPUModelRunner.propose_draft_token_ids
+    original_init = npu_model_runner.__init__
+    original_propose = npu_model_runner.propose_draft_token_ids
 
     @wraps(original_init)
     def init_with_dcut(self, *args, **kwargs):
@@ -84,21 +92,47 @@ def _install_runner_patch() -> None:
             )
         return original_propose(self, *args, **kwargs)
 
-    NPUModelRunner.__init__ = init_with_dcut
-    NPUModelRunner.propose_draft_token_ids = propose_with_dcut
+    npu_model_runner.__init__ = init_with_dcut
+    npu_model_runner.propose_draft_token_ids = propose_with_dcut
+    _PATCHED = True
+    logger.info("[dcut] NPUModelRunner patch installed")
+
+
+def _maybe_patch_loaded_runner(module: ModuleType | None = None) -> bool:
+    runner_module = module or sys.modules.get(_RUNNER_MODULE)
+    npu_model_runner = getattr(runner_module, "NPUModelRunner", None)
+    if npu_model_runner is None:
+        return False
+    _patch_runner_class(npu_model_runner)
+    return True
+
+
+def _install_import_hook() -> None:
+    global _IMPORT_HOOK_INSTALLED
+    if _IMPORT_HOOK_INSTALLED:
+        return
+
+    def dcut_import(name, globals=None, locals=None, fromlist=(), level=0):
+        module = _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+        if name == _RUNNER_MODULE or name.startswith(f"{_RUNNER_MODULE}."):
+            _maybe_patch_loaded_runner(sys.modules.get(_RUNNER_MODULE))
+        return module
+
+    builtins.__import__ = dcut_import
+    _IMPORT_HOOK_INSTALLED = True
 
 
 def register() -> None:
     """Register D-Cut as a vLLM general plugin.
 
-    This patch only builds/logs the cost table and policy decision. It does not
-    change speculative token tensors yet; the actual cut execution is reserved
-    for the next implementation step.
+    vLLM loads general plugins while building CLI arguments, before importing
+    the Ascend model runner is safe. Therefore registration only installs an
+    import hook and patches ``NPUModelRunner`` after vLLM imports it normally.
     """
 
-    global _PATCHED
-    if _PATCHED:
+    if not _env_flag("DCUT_ENABLE", "1"):
+        logger.info("[dcut] plugin disabled by DCUT_ENABLE=0")
         return
-    _install_runner_patch()
-    _PATCHED = True
-    logger.info("[dcut] plugin registered: phase=cost_table_and_cut_policy")
+    if not _maybe_patch_loaded_runner():
+        _install_import_hook()
+        logger.info("[dcut] plugin registered: waiting_for=%s", _RUNNER_MODULE)
