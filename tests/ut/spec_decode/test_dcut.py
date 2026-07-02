@@ -912,3 +912,40 @@ def test_gdn_metadata_summary_selects_module_prefix(monkeypatch):
     assert summary["max_query_len"] == 8
     assert summary["actual_seq_lengths_q"] == {"type": "list", "len": 1, "first": 8, "last": 8}
     assert summary["spec_state_indices_tensor"] == {"type": "SimpleNamespace", "shape": (1, 8)}
+
+
+def test_dcut_proposer_observer_mode_delegates_original_compute():
+    calls = []
+
+    class FakeProposer:
+        def __init__(self):
+            self.needs_draft_probs = True
+            self.runner = SimpleNamespace(
+                _dcut_controller=SimpleNamespace(config=SimpleNamespace(apply_runtime_cuts=False))
+            )
+
+        def compute_draft_token_ids(self, hidden_states):
+            calls.append(hidden_states)
+            return "original-result"
+
+    dcut_monkeypatch._patch_proposer(FakeProposer)
+    proposer = FakeProposer()
+
+    assert proposer.compute_draft_token_ids("hidden") == "original-result"
+    assert calls == ["hidden"]
+    assert proposer.take_last_selected_probs() is None
+
+
+def test_dcut_should_capture_draft_probs_requires_runtime_cuts_enabled():
+    proposer = SimpleNamespace(
+        needs_draft_probs=True,
+        runner=SimpleNamespace(_dcut_controller=SimpleNamespace(config=SimpleNamespace(apply_runtime_cuts=True))),
+    )
+    assert dcut_monkeypatch._dcut_should_capture_draft_probs(proposer) is True
+
+    proposer.runner._dcut_controller.config.apply_runtime_cuts = False
+    assert dcut_monkeypatch._dcut_should_capture_draft_probs(proposer) is False
+
+    proposer.needs_draft_probs = False
+    proposer.runner._dcut_controller.config.apply_runtime_cuts = True
+    assert dcut_monkeypatch._dcut_should_capture_draft_probs(proposer) is False
