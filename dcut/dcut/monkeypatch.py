@@ -107,7 +107,6 @@ def _patch_proposer(cls):
     if getattr(cls, "_dcut_patched", False):
         return
     original_init = cls.__init__
-    original_compute = cls.compute_draft_token_ids
 
     @wraps(original_init)
     def __init__(self, *args, **kwargs):
@@ -120,28 +119,8 @@ def _patch_proposer(cls):
         self._last_selected_probs = None
         return probs
 
-    @wraps(original_compute)
-    def compute_draft_token_ids(self, hidden_states):
-        draft_token_ids = original_compute(self, hidden_states)
-        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
-            logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-            selected_token_ids = _dcut_get_selected_draft_ids_for_probs(self, logits, draft_token_ids)
-            chosen = logits.gather(-1, selected_token_ids.long().unsqueeze(-1)).squeeze(-1)
-            self._last_selected_probs = (
-                (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
-            )
-            _dcut_debug(
-                "captured selected probs shape=%s preview=%s draft_token_shape=%s draft_token_preview=%s",
-                tuple(self._last_selected_probs.shape),
-                _dcut_preview(self._last_selected_probs),
-                tuple(draft_token_ids.shape),
-                _dcut_preview(draft_token_ids),
-            )
-        return draft_token_ids
-
     cls.__init__ = __init__
     cls.take_last_selected_probs = take_last_selected_probs
-    cls.compute_draft_token_ids = compute_draft_token_ids
     cls._dcut_patched = True
 
 
@@ -478,7 +457,7 @@ def _get_fallback_prob() -> float | None:
 
     raw_value = os.getenv("DCUT_FALLBACK_PROB")
     if raw_value is None:
-        return None
+        return 1.0
     value = float(raw_value)
     if value <= 0.0 or value > 1.0:
         raise ValueError("DCUT_FALLBACK_PROB must be in the range (0, 1].")
