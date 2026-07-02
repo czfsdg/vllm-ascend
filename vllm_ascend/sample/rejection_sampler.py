@@ -475,6 +475,7 @@ def rejection_sample(
             target_indices=target_indices,
             global_vocab_size=global_vocab_size,
             enable_reduce_sampling=True,
+            use_block_verify=using_block_verify,
         )
 
         if not using_block_verify:
@@ -618,6 +619,7 @@ def rejection_sample(
             target_indices=None,
             global_vocab_size=vocab_size,
             enable_reduce_sampling=False,
+            use_block_verify=using_block_verify,
         )
 
         if not using_block_verify:
