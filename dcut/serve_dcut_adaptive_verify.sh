@@ -7,7 +7,7 @@ export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-ascend}"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-6}"
 
 # 必须包含 dcut_adaptive_verify；只写 ascend 不会加载 D-Cut。
-export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend,dcut_adaptive_verify,dcut}"
+export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend,dcut_adaptive_verify}"
 
 # 使用 DCUT_*，避免 vLLM unknown env warning。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

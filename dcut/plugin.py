@@ -84,7 +84,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         self.dcut_target_only_methods = config.target_only_methods
         _visible_log(
             "info",
-            "[dcut] cost-table initialized: enabled=%s config=%s max_verify_len=%d "
+            "[dcut][cost-table] initialized: enabled=%s config=%s max_verify_len=%d "
             "accuracy_safe_mode=%s target_only_methods=%s table=[%s]",
             True,
             config_source or "<defaults>",
@@ -172,5 +172,7 @@ def register() -> None:
         _visible_log("info", "[dcut] plugin disabled by DCUT_ENABLE=0")
         return
     if not _maybe_patch_loaded_runner():
+        if _IMPORT_HOOK_INSTALLED:
+            return
         _install_import_hook()
         _visible_log("info", "[dcut] plugin registered: waiting_for=%s", _RUNNER_MODULE)
