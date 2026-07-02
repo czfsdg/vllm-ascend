@@ -1,0 +1,11 @@
+{
+  "cost_table": {
+    "target_base_cost": 1.0,
+    "target_token_cost": 0.18,
+    "draft_token_cost": 0.08
+  },
+  "policy": {
+    "default_acceptance_rate": 0.75,
+    "high_concurrency_batch": 16
+  }
+}
