@@ -7,6 +7,7 @@ import logging
 import os
 from functools import wraps
 
+from dcut.config import load_dcut_config
 from dcut.cost_table import DcutCostTable
 from dcut.policy import DcutPolicy
 
@@ -39,12 +40,23 @@ def _install_runner_patch() -> None:
         original_init(self, *args, **kwargs)
         if not _env_flag("DCUT_ENABLE", "1"):
             return
+        config, config_source = load_dcut_config()
         max_verify_len = _num_speculative_tokens(self)
-        self.dcut_cost_table = DcutCostTable(max_verify_len=max_verify_len)
-        self.dcut_policy = DcutPolicy(self.dcut_cost_table)
+        self.dcut_cost_table = DcutCostTable(
+            max_verify_len=max_verify_len,
+            target_base_cost=config.target_base_cost,
+            target_token_cost=config.target_token_cost,
+            draft_token_cost=config.draft_token_cost,
+        )
+        self.dcut_policy = DcutPolicy(
+            self.dcut_cost_table,
+            default_acceptance_rate=config.default_acceptance_rate,
+            high_concurrency_batch=config.high_concurrency_batch,
+        )
         logger.info(
-            "[dcut] cost-table initialized: enabled=%s max_verify_len=%d table=[%s]",
+            "[dcut] cost-table initialized: enabled=%s config=%s max_verify_len=%d table=[%s]",
             True,
+            config_source or "<defaults>",
             max_verify_len,
             self.dcut_cost_table.summary(),
         )

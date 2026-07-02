@@ -540,6 +540,7 @@ setup(
     entry_points={
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
         "vllm.general_plugins": [
+            "dcut_adaptive_verify = dcut:register",
             "dcut = dcut:register",
             "ascend_kv_connector = vllm_ascend:register_connector",
             "ascend_model_loader = vllm_ascend:register_model_loader",
