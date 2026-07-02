@@ -122,31 +122,39 @@ def _patch_proposer(cls):
 
     @wraps(original_compute)
     def compute_draft_token_ids(self, hidden_states):
-        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-        next_token = _greedy_sample_from_tp_logits(logits)
+        draft_token_ids = original_compute(self, hidden_states)
         if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
-            chosen = logits.gather(-1, next_token.long().unsqueeze(-1)).squeeze(-1)
+            logits = self.model.logits_processor(self.model.lm_head, hidden_states)
+            selected_token_ids = _dcut_get_selected_draft_ids_for_probs(self, logits, draft_token_ids)
+            chosen = logits.gather(-1, selected_token_ids.long().unsqueeze(-1)).squeeze(-1)
             self._last_selected_probs = (
                 (chosen - logits.logsumexp(dim=-1)).exp().view(-1, self.num_speculative_tokens).contiguous()
             )
             _dcut_debug(
-                "captured selected probs shape=%s preview=%s next_token_shape=%s next_token_preview=%s",
+                "captured selected probs shape=%s preview=%s draft_token_shape=%s draft_token_preview=%s",
                 tuple(self._last_selected_probs.shape),
                 _dcut_preview(self._last_selected_probs),
-                tuple(next_token.shape),
-                _dcut_preview(next_token),
+                tuple(draft_token_ids.shape),
+                _dcut_preview(draft_token_ids),
             )
-        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
-            return next_token
-        bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(
-            next_token.shape
-        )
-        return next_token + bias
+        return draft_token_ids
 
     cls.__init__ = __init__
     cls.take_last_selected_probs = take_last_selected_probs
     cls.compute_draft_token_ids = compute_draft_token_ids
     cls._dcut_patched = True
+
+
+def _dcut_get_selected_draft_ids_for_probs(
+    proposer, logits: torch.Tensor, draft_token_ids: torch.Tensor
+) -> torch.Tensor:
+    # Never use this helper to choose draft tokens. It is only for probability
+    # capture after the original proposer has already selected draft_token_ids.
+    # If the model uses draft_id_to_target_id remapping, recompute the draft-vocab
+    # greedy ids for gather because draft_token_ids are target-vocab ids.
+    if hasattr(proposer.model, "draft_id_to_target_id") and proposer.model.draft_id_to_target_id is not None:
+        return _greedy_sample_from_tp_logits(logits)
+    return draft_token_ids
 
 
 def _greedy_sample_from_tp_logits(logits: torch.Tensor) -> torch.Tensor:
