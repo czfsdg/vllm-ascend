@@ -83,10 +83,10 @@ def test_repeated_identical_decisions_are_logged(monkeypatch):
     for _ in range(3):
         assert runner.propose_draft_token_ids() == [[1, 2]]
 
-    decision_logs = [log for log in logs if "cut-policy decision" in log]
+    decision_logs = [log for log in logs if "[dcut][plan]" in log]
     assert len(decision_logs) == 3
-    assert "repeat_count=1" in decision_logs[0]
-    assert "repeat_count=3" in decision_logs[-1]
+    assert "plan_count=1" in decision_logs[0]
+    assert "plan_count=3" in decision_logs[-1]
     assert runner.dcut_decision_count == 3
 
 
@@ -125,7 +125,7 @@ def test_acceptance_rate_uses_runtime_counters(monkeypatch):
 
     assert runner.propose_draft_token_ids() == [[1, 2]]
     assert runner.dcut_last_decision.acceptance_rate == 0.5
-    decision_logs = [log for log in logs if "cut-policy decision" in log]
+    decision_logs = [log for log in logs if "[dcut][plan]" in log]
     assert "acceptance_source=runtime_counters" in decision_logs[0]
 
 
@@ -189,14 +189,17 @@ def test_acceptance_rate_uses_per_step_sampled_token_lengths(monkeypatch):
 
     sampled_token_ids = [[1, 2, 3], [4]]
     assert runner.propose_draft_token_ids(sampled_token_ids) == [[1, 2]]
-    assert runner.dcut_last_decision.acceptance_rate == 0.25
-    assert runner.dcut_last_accepted_tokens == 2
+    assert runner.dcut_last_decision.acceptance_rate == 0.5
+    assert runner.dcut_last_accepted_tokens == 4
     assert runner.dcut_last_drafted_tokens == 8
-    decision_logs = [log for log in logs if "cut-policy decision" in log]
+    assert runner.dcut_last_accepted_draft_tokens == 2
+    decision_logs = [log for log in logs if "[dcut][plan]" in log]
     assert "acceptance_source=sampled_token_lengths" in decision_logs[0]
-    assert "accepted_tokens=2" in decision_logs[0]
-    assert "drafted_tokens=8" in decision_logs[0]
-    assert "batch_dcut_plan=[#0:accept=0.500,cut=4,#1:accept=0.000,cut=4]" in decision_logs[0]
+    assert "batch_dcut_plan=[#0:accept=0.750,cut=4,#1:accept=0.250,cut=4]" in decision_logs[0]
+    assert "candidate_scores=[" in decision_logs[0]
+    result_logs = [log for log in logs if "[dcut][result]" in log]
+    assert "effective_tokens=4" in result_logs[0]
+    assert "accepted_draft_tokens=2" in result_logs[0]
 
 
 def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
@@ -235,13 +238,16 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     runner._bookkeeping_sync()
     assert runner.propose_draft_token_ids(object()) is not None
 
-    assert runner.dcut_last_decision.acceptance_rate == 0.375
-    assert runner.dcut_last_accepted_tokens == 3
+    assert runner.dcut_last_decision.acceptance_rate == 0.625
+    assert runner.dcut_last_accepted_tokens == 5
     assert runner.dcut_last_drafted_tokens == 8
-    assert runner.dcut_last_per_request_acceptance == [0.5, 0.25]
-    decision_logs = [log for log in logs if "cut-policy decision" in log]
+    assert runner.dcut_last_accepted_draft_tokens == 3
+    assert runner.dcut_last_per_request_acceptance == [0.75, 0.5]
+    decision_logs = [log for log in logs if "[dcut][plan]" in log]
     assert "acceptance_source=bookkeeping_valid_sampled_tokens" in decision_logs[0]
-    assert "accepted_tokens=3" in decision_logs[0]
-    assert "drafted_tokens=8" in decision_logs[0]
-    assert "per_request_acceptance=[0.5, 0.25]" in decision_logs[0]
-    assert "batch_dcut_plan=[#0:accept=0.500,cut=4,#1:accept=0.250,cut=4]" in decision_logs[0]
+    assert "batch_dcut_plan=[#0:accept=0.750,cut=4,#1:accept=0.500,cut=4]" in decision_logs[0]
+    assert "candidate_scores=[" in decision_logs[0]
+    result_logs = [log for log in logs if "[dcut][result]" in log]
+    assert "effective_tokens=5" in result_logs[0]
+    assert "accepted_draft_tokens=3" in result_logs[0]
+    assert "per_request_acceptance=[0.75, 0.5]" in result_logs[0]
