@@ -15,6 +15,13 @@ from dcut.cost_table import DcutCostTable
 from dcut.policy import DcutPolicy
 
 logger = logging.getLogger("dcut")
+
+
+def _visible_log(level: str, message: str, *args) -> None:
+    formatted = message % args if args else message
+    print(formatted, flush=True)
+    log_method = getattr(logger, level)
+    log_method(message, *args)
 _RUNNER_MODULE = "vllm_ascend.worker.model_runner_v1"
 _PATCHED = False
 _IMPORT_HOOK_INSTALLED = False
@@ -75,7 +82,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         )
         self.dcut_accuracy_safe_mode = config.accuracy_safe_mode
         self.dcut_target_only_methods = config.target_only_methods
-        logger.info(
+        _visible_log(
+            "info",
             "[dcut] cost-table initialized: enabled=%s config=%s max_verify_len=%d "
             "accuracy_safe_mode=%s target_only_methods=%s table=[%s]",
             True,
@@ -96,7 +104,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 batch_size=_batch_size_from_runner(self),
             )
             self.dcut_last_decision = decision
-            logger.info(
+            _visible_log(
+                "info",
                 "[dcut] cut-policy decision: requested_len=%d selected_len=%d "
                 "batch_size=%d acceptance_rate=%.3f score=%.6f reason=%s "
                 "mode=plan_only",
@@ -109,7 +118,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             )
             if _should_use_target_only(self):
                 if not getattr(self, "dcut_target_only_warning_emitted", False):
-                    logger.warning(
+                    _visible_log(
+                        "warning",
                         "[dcut] accuracy-safe target-only fallback is active for "
                         "speculative method=%s. Returning no draft tokens to preserve "
                         "target-model output quality. Set DCUT_ACCURACY_SAFE_MODE=0 "
@@ -123,7 +133,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
     npu_model_runner.__init__ = init_with_dcut
     npu_model_runner.propose_draft_token_ids = propose_with_dcut
     _PATCHED = True
-    logger.info("[dcut] NPUModelRunner patch installed")
+    _visible_log("info", "[dcut] NPUModelRunner patch installed")
 
 
 def _maybe_patch_loaded_runner(module: ModuleType | None = None) -> bool:
@@ -159,8 +169,8 @@ def register() -> None:
     """
 
     if not _env_flag("DCUT_ENABLE", "1"):
-        logger.info("[dcut] plugin disabled by DCUT_ENABLE=0")
+        _visible_log("info", "[dcut] plugin disabled by DCUT_ENABLE=0")
         return
     if not _maybe_patch_loaded_runner():
         _install_import_hook()
-        logger.info("[dcut] plugin registered: waiting_for=%s", _RUNNER_MODULE)
+        _visible_log("info", "[dcut] plugin registered: waiting_for=%s", _RUNNER_MODULE)

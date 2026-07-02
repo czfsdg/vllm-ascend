@@ -7,7 +7,7 @@ export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-ascend}"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-6}"
 
 # 必须包含 dcut_adaptive_verify；只写 ascend 不会加载 D-Cut。
-export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend,dcut_adaptive_verify}"
+export VLLM_PLUGINS="${VLLM_PLUGINS:-ascend,dcut_adaptive_verify,dcut}"
 
 # 使用 DCUT_*，避免 vLLM unknown env warning。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +15,20 @@ export DCUT_ENABLE="${DCUT_ENABLE:-1}"
 export DCUT_CONFIG="${DCUT_CONFIG:-${SCRIPT_DIR}/verify_adaptive_config.example.json}"
 # 默认开启 DFlash speculative + D-Cut；如需 target-only 基线，可设置 DCUT_ACCURACY_SAFE_MODE=1。
 export DCUT_ACCURACY_SAFE_MODE="${DCUT_ACCURACY_SAFE_MODE:-0}"
+
+DCUT_AUTO_INSTALL="${DCUT_AUTO_INSTALL:-1}"
+if [[ "${DCUT_AUTO_INSTALL,,}" != "0" && "${DCUT_AUTO_INSTALL,,}" != "false" && "${DCUT_AUTO_INSTALL,,}" != "no" && "${DCUT_AUTO_INSTALL,,}" != "off" ]]; then
+  if ! python - <<'PY'
+from importlib.metadata import entry_points
+
+names = {entry.name for entry in entry_points(group="vllm.general_plugins")}
+raise SystemExit(0 if "dcut_adaptive_verify" in names else 1)
+PY
+  then
+    echo "[dcut] vLLM entry point dcut_adaptive_verify is missing; running pip install -e ${SCRIPT_DIR}."
+    python -m pip install -e "${SCRIPT_DIR}" --no-deps
+  fi
+fi
 
 TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-/data/models/Qwen3.5-9B/}"
 DFLASH_DRAFT_PATH="${DFLASH_DRAFT_PATH:-/data/models/Qwen3.5-9B-DFlash}"
