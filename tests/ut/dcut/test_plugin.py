@@ -147,3 +147,40 @@ def test_acceptance_rate_uses_metrics_log_bridge(monkeypatch, tmp_path):
 
     assert round(rate, 3) == round(147 / 518, 3)
     assert source == "spec_decoding_metrics_log"
+
+
+def test_acceptance_rate_uses_per_step_sampled_token_lengths(monkeypatch):
+    class FreshSpeculativeConfig:
+        method = "dflash"
+        num_speculative_tokens = 4
+
+    class FreshInputBatch:
+        num_reqs = 2
+
+    class FreshRunner:
+        speculative_config = FreshSpeculativeConfig()
+        input_batch = FreshInputBatch()
+
+        def __init__(self):
+            pass
+
+        def propose_draft_token_ids(self, sampled_token_ids):
+            return [[1, 2]]
+
+    logs = []
+    monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
+    monkeypatch.setattr(plugin, "_PATCHED", False)
+    monkeypatch.setattr(plugin, "_visible_log", lambda level, message, *args: logs.append(message % args))
+
+    plugin._patch_runner_class(FreshRunner)
+    runner = FreshRunner()
+
+    sampled_token_ids = [[1, 2, 3], [4]]
+    assert runner.propose_draft_token_ids(sampled_token_ids) == [[1, 2]]
+    assert runner.dcut_last_decision.acceptance_rate == 0.25
+    assert runner.dcut_last_accepted_tokens == 2
+    assert runner.dcut_last_drafted_tokens == 8
+    decision_logs = [log for log in logs if "cut-policy decision" in log]
+    assert "acceptance_source=sampled_token_lengths" in decision_logs[0]
+    assert "accepted_tokens=2" in decision_logs[0]
+    assert "drafted_tokens=8" in decision_logs[0]

@@ -134,7 +134,7 @@ def _write_acceptance_metrics(accepted: float, drafted: float, source: str) -> N
     os.replace(tmp_path, METRICS_FILE_PATH)
 
 
-def _read_acceptance_metrics_file() -> tuple[float, str] | None:
+def _read_acceptance_metrics_file() -> tuple[float, str, float, float] | None:
     try:
         with open(METRICS_FILE_PATH, encoding="utf-8") as metrics_file:
             payload = json.load(metrics_file)
@@ -148,7 +148,14 @@ def _read_acceptance_metrics_file() -> tuple[float, str] | None:
         if accepted is None or drafted is None or drafted <= 0:
             return None
         acceptance_rate = accepted / drafted
-    return min(max(acceptance_rate, 0.0), 1.0), str(payload.get("source", "metrics_file"))
+    accepted = _to_float(payload.get("accepted"))
+    drafted = _to_float(payload.get("drafted"))
+    return (
+        min(max(acceptance_rate, 0.0), 1.0),
+        str(payload.get("source", "metrics_file")),
+        accepted if accepted is not None else -1.0,
+        drafted if drafted is not None else -1.0,
+    )
 
 
 class _DcutMetricsLogHandler(logging.Handler):
@@ -197,7 +204,75 @@ def _read_acceptance_counters(runner) -> tuple[float, float] | None:
     return None
 
 
-def _acceptance_rate_from_runner(runner) -> tuple[float | None, str]:
+def _counts_from_sampled_token_lists(sampled_token_ids) -> list[int] | None:
+    if not isinstance(sampled_token_ids, list):
+        return None
+    if not sampled_token_ids:
+        return None
+    counts: list[int] = []
+    for sampled_tokens in sampled_token_ids:
+        if isinstance(sampled_tokens, list):
+            counts.append(len(sampled_tokens))
+    return counts or None
+
+
+def _counts_from_runner_cpu_buffer(runner) -> list[int] | None:
+    counts_cpu = getattr(runner, "valid_sampled_token_count_cpu", None)
+    if counts_cpu is None:
+        return None
+    event = getattr(runner, "valid_sampled_token_count_event", None)
+    if event is not None:
+        event.synchronize()
+    if str(getattr(counts_cpu, "device", "")) != "cpu":
+        return None
+    num_reqs = _batch_size_from_runner(runner)
+    counts = counts_cpu[:num_reqs].tolist()
+    return [int(count) for count in counts]
+
+
+def _acceptance_stats_from_sampled_counts(
+    counts: list[int] | None,
+    requested_len: int,
+) -> tuple[float, int, int] | None:
+    if not counts or requested_len <= 0:
+        return None
+    accepted = sum(max(count - 1, 0) for count in counts)
+    drafted = requested_len * len(counts)
+    if drafted <= 0:
+        return None
+    return min(max(accepted / drafted, 0.0), 1.0), accepted, drafted
+
+
+def _set_acceptance_stats(
+    runner,
+    accepted: float | int,
+    drafted: float | int,
+) -> None:
+    runner.dcut_last_accepted_tokens = accepted
+    runner.dcut_last_drafted_tokens = drafted
+
+
+def _acceptance_rate_from_runner(
+    runner,
+    sampled_token_ids=None,
+    requested_len: int = 1,
+) -> tuple[float | None, str]:
+    sampled_counts = _counts_from_sampled_token_lists(sampled_token_ids)
+    sampled_stats = _acceptance_stats_from_sampled_counts(sampled_counts, requested_len)
+    if sampled_stats is not None:
+        sampled_rate, accepted, drafted = sampled_stats
+        runner.dcut_observed_acceptance_rate = sampled_rate
+        _set_acceptance_stats(runner, accepted, drafted)
+        return sampled_rate, "sampled_token_lengths"
+
+    cpu_counts = _counts_from_runner_cpu_buffer(runner)
+    cpu_stats = _acceptance_stats_from_sampled_counts(cpu_counts, requested_len)
+    if cpu_stats is not None:
+        cpu_rate, accepted, drafted = cpu_stats
+        runner.dcut_observed_acceptance_rate = cpu_rate
+        _set_acceptance_stats(runner, accepted, drafted)
+        return cpu_rate, "valid_sampled_token_count_cpu"
+
     counters = _read_acceptance_counters(runner)
     if counters is not None:
         accepted, drafted = counters
@@ -211,17 +286,22 @@ def _acceptance_rate_from_runner(runner) -> tuple[float | None, str]:
                 previous_rate = getattr(runner, "dcut_observed_acceptance_rate", raw_rate)
                 smoothed_rate = ACCEPTANCE_EMA_ALPHA * raw_rate + (1.0 - ACCEPTANCE_EMA_ALPHA) * previous_rate
                 runner.dcut_observed_acceptance_rate = smoothed_rate
+                _set_acceptance_stats(runner, accepted_delta, drafted_delta)
                 return smoothed_rate, "runtime_counter_delta"
 
         raw_rate = accepted / drafted
         runner.dcut_observed_acceptance_rate = raw_rate
+        _set_acceptance_stats(runner, accepted, drafted)
         return raw_rate, "runtime_counters"
 
     metrics_file_rate = _read_acceptance_metrics_file()
     if metrics_file_rate is not None:
-        runner.dcut_observed_acceptance_rate = metrics_file_rate[0]
-        return metrics_file_rate
+        rate, source, accepted, drafted = metrics_file_rate
+        runner.dcut_observed_acceptance_rate = rate
+        _set_acceptance_stats(runner, accepted, drafted)
+        return rate, source
 
+    _set_acceptance_stats(runner, -1, -1)
     return UNKNOWN_ACCEPTANCE_RATE, "unavailable"
 
 
@@ -243,7 +323,8 @@ def _log_cut_decision(runner, decision, acceptance_source: str) -> None:
         "info",
         "[dcut] cut-policy decision: requested_len=%d selected_len=%d "
         "batch_size=%d acceptance_rate=%.3f score=%.6f reason=%s "
-        "acceptance_source=%s mode=plan_only repeat_count=%d",
+        "acceptance_source=%s accepted_tokens=%s drafted_tokens=%s "
+        "mode=plan_only repeat_count=%d",
         decision.requested_len,
         decision.selected_len,
         decision.batch_size,
@@ -251,6 +332,8 @@ def _log_cut_decision(runner, decision, acceptance_source: str) -> None:
         decision.score,
         decision.reason,
         acceptance_source,
+        getattr(runner, "dcut_last_accepted_tokens", "unknown"),
+        getattr(runner, "dcut_last_drafted_tokens", "unknown"),
         decision_count,
     )
 
@@ -304,7 +387,12 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         policy = getattr(self, "dcut_policy", None)
         if policy is not None and _env_flag("DCUT_ENABLE", "1"):
             requested_len = _num_speculative_tokens(self)
-            acceptance_rate, acceptance_source = _acceptance_rate_from_runner(self)
+            sampled_token_ids = args[0] if args else kwargs.get("sampled_token_ids")
+            acceptance_rate, acceptance_source = _acceptance_rate_from_runner(
+                self,
+                sampled_token_ids=sampled_token_ids,
+                requested_len=requested_len,
+            )
             decision = policy.decide(
                 requested_len=requested_len,
                 batch_size=_batch_size_from_runner(self),
