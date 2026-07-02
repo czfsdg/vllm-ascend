@@ -71,7 +71,11 @@ def test_repeated_identical_decisions_are_logged(monkeypatch):
     logs = []
     monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
     monkeypatch.setattr(plugin, "_PATCHED", False)
-    monkeypatch.setattr(plugin, "_visible_log", lambda level, message, *args: logs.append(message % args))
+    monkeypatch.setattr(
+        plugin,
+        "_visible_log",
+        lambda level, message, *args: logs.append(message % args),
+    )
 
     plugin._patch_runner_class(FreshRunner)
     runner = FreshRunner()
@@ -110,7 +114,11 @@ def test_acceptance_rate_uses_runtime_counters(monkeypatch):
     logs = []
     monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
     monkeypatch.setattr(plugin, "_PATCHED", False)
-    monkeypatch.setattr(plugin, "_visible_log", lambda level, message, *args: logs.append(message % args))
+    monkeypatch.setattr(
+        plugin,
+        "_visible_log",
+        lambda level, message, *args: logs.append(message % args),
+    )
 
     plugin._patch_runner_class(FreshRunner)
     runner = FreshRunner()
@@ -170,7 +178,11 @@ def test_acceptance_rate_uses_per_step_sampled_token_lengths(monkeypatch):
     logs = []
     monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
     monkeypatch.setattr(plugin, "_PATCHED", False)
-    monkeypatch.setattr(plugin, "_visible_log", lambda level, message, *args: logs.append(message % args))
+    monkeypatch.setattr(
+        plugin,
+        "_visible_log",
+        lambda level, message, *args: logs.append(message % args),
+    )
 
     plugin._patch_runner_class(FreshRunner)
     runner = FreshRunner()
@@ -184,3 +196,52 @@ def test_acceptance_rate_uses_per_step_sampled_token_lengths(monkeypatch):
     assert "acceptance_source=sampled_token_lengths" in decision_logs[0]
     assert "accepted_tokens=2" in decision_logs[0]
     assert "drafted_tokens=8" in decision_logs[0]
+    assert "batch_dcut_plan=[#0:accept=0.500,cut=4,#1:accept=0.000,cut=4]" in decision_logs[0]
+
+
+def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
+    class FreshSpeculativeConfig:
+        method = "dflash"
+        num_speculative_tokens = 4
+
+    class FreshInputBatch:
+        num_reqs = 2
+
+    class FreshRunner:
+        speculative_config = FreshSpeculativeConfig()
+        input_batch = FreshInputBatch()
+
+        def __init__(self):
+            pass
+
+        def _bookkeeping_sync(self):
+            return (None, [[101, 102, 103], [201, 202]], None)
+
+        def propose_draft_token_ids(self, sampled_token_ids):
+            return sampled_token_ids
+
+    logs = []
+    monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
+    monkeypatch.setattr(plugin, "_PATCHED", False)
+    monkeypatch.setattr(
+        plugin,
+        "_visible_log",
+        lambda level, message, *args: logs.append(message % args),
+    )
+
+    plugin._patch_runner_class(FreshRunner)
+    runner = FreshRunner()
+
+    runner._bookkeeping_sync()
+    assert runner.propose_draft_token_ids(object()) is not None
+
+    assert runner.dcut_last_decision.acceptance_rate == 0.375
+    assert runner.dcut_last_accepted_tokens == 3
+    assert runner.dcut_last_drafted_tokens == 8
+    assert runner.dcut_last_per_request_acceptance == [0.5, 0.25]
+    decision_logs = [log for log in logs if "cut-policy decision" in log]
+    assert "acceptance_source=bookkeeping_valid_sampled_tokens" in decision_logs[0]
+    assert "accepted_tokens=3" in decision_logs[0]
+    assert "drafted_tokens=8" in decision_logs[0]
+    assert "per_request_acceptance=[0.5, 0.25]" in decision_logs[0]
+    assert "batch_dcut_plan=[#0:accept=0.500,cut=4,#1:accept=0.250,cut=4]" in decision_logs[0]
