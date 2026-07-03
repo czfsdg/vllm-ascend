@@ -401,15 +401,15 @@ def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
     )
 
 
-def _log_cost_table_profile(runner, verify_len: int, q_tokens: int) -> None:
+def _log_cost_table_profile(runner, q_tokens: int, planned_cut: int) -> None:
     cost_table = getattr(runner, "dcut_cost_table", None)
     if cost_table is None:
         return
-    entry = cost_table.get(verify_len, q_tokens)
+    entry = cost_table.get(q_tokens)
     measured_entry = getattr(cost_table, "last_measured_entry", None) or entry
     _visible_log(
         "info",
-        "[dcut][cost-table][profile] source=npu_runtime q_tokens=%d q_bucket=%d verify_len=%d "
+        "[dcut][cost-table][profile] source=npu_runtime q_tokens=%d q_bucket=%d planned_cut=%d "
         "measured_target_ms=%.3f measured_draft_ms=%.3f measured_total_ms=%.3f "
         "table_target_ms=%.3f table_draft_ms=%.3f table_total_ms=%.3f "
         "table_updated=%s profile_state=%s profile_count=%d "
@@ -417,7 +417,7 @@ def _log_cost_table_profile(runner, verify_len: int, q_tokens: int) -> None:
         "profiled_table=[%s]",
         q_tokens,
         entry.q_tokens,
-        entry.verify_len,
+        planned_cut,
         measured_entry.target_cost,
         measured_entry.draft_cost,
         measured_entry.total_cost,
@@ -425,8 +425,8 @@ def _log_cost_table_profile(runner, verify_len: int, q_tokens: int) -> None:
         entry.draft_cost,
         entry.total_cost,
         cost_table.last_profile_updated,
-        cost_table.profile_state(entry.verify_len, entry.q_tokens),
-        cost_table.profile_counts.get((entry.verify_len, entry.q_tokens), 0),
+        cost_table.profile_state(entry.q_tokens),
+        cost_table.profile_counts.get(entry.q_tokens, 0),
         cost_table.min_profile_samples,
         cost_table.trim_largest_samples,
         sorted(cost_table.profiled_lens),
@@ -455,15 +455,15 @@ def _format_candidate_scores(runner, decision) -> str:
         1,
     )
     concurrency = max(batch_size - 1, 0) / high_concurrency_batch
-    q_tokens = _q_tokens_for_decision(batch_size, decision.requested_len)
     items = []
     for verify_len in range(1, decision.requested_len + 1):
-        cost = cost_table.get(verify_len, q_tokens)
+        q_tokens = _q_tokens_for_decision(batch_size, verify_len)
+        cost = cost_table.get(q_tokens)
         expected_accepts = max(1.0 + max(verify_len - 1, 0) * decision.acceptance_rate, 1e-6)
         length_penalty = 1.0 + concurrency * max(verify_len - 1, 0) / decision.requested_len
         score = cost.total_cost * length_penalty / expected_accepts
         marker = "*" if verify_len == decision.selected_len else ""
-        items.append(f"k={verify_len}:score={score:.3f}{marker}")
+        items.append(f"q={q_tokens},k={verify_len}:score={score:.3f}{marker}")
     return "[" + ",".join(items) + "]"
 
 
@@ -550,6 +550,15 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         )
         _log_cost_table_prediction(self.dcut_cost_table, config_source)
         _log_cost_table_warmup(self.dcut_cost_table)
+        self.dcut_cost_table.simulate_bootstrap_profiles()
+        _visible_log(
+            "info",
+            "[dcut][cost-table][simulation] source=synthetic_random_draft "
+            "min_profile_samples=%d trim_largest_samples=%d simulated_table=[%s]",
+            self.dcut_cost_table.min_profile_samples,
+            self.dcut_cost_table.trim_largest_samples,
+            self.dcut_cost_table.summary(),
+        )
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
             default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,
@@ -682,14 +691,13 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 )
                 planned_cut = getattr(self, "dcut_last_planned_cut", None)
                 if planned_cut is not None:
-                    q_tokens = _q_tokens_for_decision(_batch_size_from_runner(self), requested_len)
+                    q_tokens = _q_tokens_for_decision(_batch_size_from_runner(self), planned_cut)
                     self.dcut_cost_table.update_profile(
-                        planned_cut,
                         self.dcut_last_target_elapsed_ms,
                         draft_elapsed_ms,
                         q_tokens=q_tokens,
                     )
-                    _log_cost_table_profile(self, planned_cut, q_tokens)
+                    _log_cost_table_profile(self, q_tokens, planned_cut)
             _log_acceptance_result(self, "bookkeeping_valid_sampled_tokens")
             return result
 
