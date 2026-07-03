@@ -441,7 +441,9 @@ def _log_cost_table_startup(cost_table: DcutCostTable, source: str, unit: str) -
     for index, line in enumerate(lines, start=1):
         _visible_log(
             "info",
-            "[dcut][cost-table][startup] chunk=%d/%d %s",
+            "[dcut][cost-table][startup] source=%s unit=%s chunk=%d/%d %s",
+            source,
+            unit,
             index,
             len(lines),
             line,

@@ -49,6 +49,9 @@ def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
     assert "entries=4" in warmup_logs[0]
     assert "source=analytic_estimate" in warmup_logs[0]
     assert "warmed_table=[batch_size_buckets=" in warmup_logs[0]
+    startup_chunk_logs = [log for log in logs if "[dcut][cost-table][startup] source=" in log and "chunk=" in log]
+    assert "source=synthetic_estimate" in startup_chunk_logs[0]
+    assert "unit=relative_cost" in startup_chunk_logs[0]
 
 
 def test_startup_cost_table_profiles_with_runner_hook():
