@@ -1,0 +1,166 @@
+# SPDX-License-Identifier: Apache-2.0
+
+from dcut.config import _parse_config
+from dcut.cost_table import DcutCostTable
+from dcut.policy import DcutPolicy
+
+
+def _profile_all(table: DcutCostTable) -> DcutCostTable:
+    table.simulate_bootstrap_profiles()
+    return table
+
+
+def test_cost_table_builds_batch_size_and_q_buckets():
+    table = DcutCostTable(max_verify_len=4, max_q_tokens=32, max_batch_size=4)
+
+    assert table.batch_size_buckets == (1, 2, 4)
+    assert table.q_buckets == (8, 16, 24, 32)
+    assert len(table.entries) == 12
+
+    for target_cost, draft_cost in (
+        (10.0, 2.0),
+        (8.0, 1.0),
+        (12.0, 3.0),
+        (100.0, 10.0),
+    ):
+        profiled = table.update_profile(
+            q_tokens=24,
+            batch_size=4,
+            target_cost=target_cost,
+            draft_cost=draft_cost,
+        )
+        assert profiled == table.get(24, 4)
+        assert table.profiled_lens == set()
+
+    profiled = table.update_profile(
+        q_tokens=24,
+        batch_size=4,
+        target_cost=80.0,
+        draft_cost=8.0,
+    )
+    assert table.profile_counts == {(4, 24): 5}
+    assert table.profiled_lens == {(4, 24)}
+    assert profiled.total_cost == 12.0
+    assert table.profile_state(24, 4) == "ready"
+    assert "bs=4,q=24" in table.summary(24, 4)
+
+
+def test_policy_never_exceeds_requested_len():
+    policy = DcutPolicy(DcutCostTable(max_verify_len=8))
+
+    decision = policy.decide(requested_len=4, batch_size=32, acceptance_rate=0.5)
+
+    assert 1 <= decision.selected_len <= 4
+    assert decision.requested_len == 4
+    assert decision.batch_size == 32
+
+
+def test_policy_cuts_under_high_concurrency():
+    policy = DcutPolicy(_profile_all(DcutCostTable(max_verify_len=4)))
+
+    decision = policy.decide(requested_len=4, batch_size=32, acceptance_rate=0.75)
+
+    assert decision.selected_len < decision.requested_len
+    assert decision.reason == "high_concurrency_cost_cut"
+
+
+def test_config_overrides_policy_and_cost_table_values():
+    config = _parse_config(
+        {
+            "cost_table": {
+                "target_base_cost": 2.0,
+                "target_token_cost": 0.5,
+                "draft_token_cost": 0.25,
+            },
+            "policy": {
+                "default_acceptance_rate": 0.6,
+                "high_concurrency_batch": 8,
+            },
+            "safety": {
+                "accuracy_safe_mode": False,
+                "target_only_methods": ["dflash", "draft_model"],
+            },
+        }
+    )
+
+    table = DcutCostTable(
+        max_verify_len=2,
+        target_base_cost=config.target_base_cost,
+        target_token_cost=config.target_token_cost,
+        draft_token_cost=config.draft_token_cost,
+    )
+    policy = DcutPolicy(
+        table,
+        default_acceptance_rate=config.default_acceptance_rate,
+        high_concurrency_batch=config.high_concurrency_batch,
+    )
+
+    assert table.get(8).target_cost == 6.0
+    assert policy.default_acceptance_rate == 0.6
+    assert policy.high_concurrency_batch == 8
+    assert config.accuracy_safe_mode is False
+    assert config.target_only_methods == ("dflash", "draft_model")
+
+
+def test_policy_uses_acceptance_to_change_selected_len():
+    policy = DcutPolicy(_profile_all(DcutCostTable(max_verify_len=7)))
+
+    low_acceptance = policy.decide(requested_len=7, batch_size=16, acceptance_rate=0.3)
+    high_acceptance = policy.decide(requested_len=7, batch_size=16, acceptance_rate=0.6)
+
+    assert low_acceptance.selected_len < high_acceptance.selected_len
+
+
+def test_policy_profiles_each_len_before_scoring():
+    table = DcutCostTable(max_verify_len=3, max_q_tokens=24, max_batch_size=1)
+    policy = DcutPolicy(table)
+
+    first = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
+    assert first.selected_len == 1
+    assert first.reason == "npu_profile_warmup"
+
+    for _ in range(table.min_profile_samples - 1):
+        table.update_profile(q_tokens=8, target_cost=100.0, draft_cost=10.0)
+    second = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
+    assert second.selected_len == 1
+    assert second.reason == "npu_profile_warmup"
+
+    table.update_profile(q_tokens=8, target_cost=10.0, draft_cost=1.0)
+    third = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
+    assert third.selected_len == 2
+    assert table.profile_state(8, 1) == "ready"
+
+
+def test_cost_table_uses_trimmed_mean_after_five_samples():
+    table = DcutCostTable(max_verify_len=1)
+
+    for target_cost, draft_cost in (
+        (70.0, 10.0),
+        (71.0, 10.0),
+        (69.0, 11.0),
+        (450.0, 40.0),
+        (500.0, 50.0),
+    ):
+        table.update_profile(q_tokens=8, target_cost=target_cost, draft_cost=draft_cost)
+
+    assert table.profile_state(8, 1) == "ready"
+    assert table.profile_counts[(0, 8)] == 5
+    assert table.get(8).target_cost == 70.0
+    assert table.get(8).draft_cost == 10.333333333333334
+
+
+def test_cost_table_builds_q_buckets_to_max_concurrency_times_spec_len():
+    table = DcutCostTable(max_verify_len=7, max_q_tokens=112, max_batch_size=16)
+
+    assert table.q_bucket_size == 8
+    assert table.q_buckets[-1] == 112
+    assert len(table.entries) == len(table.batch_size_buckets) * 14
+    assert table.q_bucket_for(111) == 112
+    assert table.q_bucket_for(113) == 112
+
+    for value in (80, 81, 82, 500, 600):
+        table.update_profile(target_cost=value - 10, draft_cost=10, q_tokens=112)
+
+    assert table.profile_state(112) == "ready"
+    assert table.get(112).total_cost == 81
+    assert table.profile_state(8) == "bootstrap"
