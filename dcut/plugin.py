@@ -89,6 +89,19 @@ def _num_speculative_tokens(runner) -> int:
     return int(getattr(speculative_config, "num_speculative_tokens", 1) or 1)
 
 
+def _max_concurrency_from_runner(runner) -> int:
+    for container_name in ("scheduler_config", "vllm_config"):
+        container = getattr(runner, container_name, None)
+        value = _read_field(container, "max_num_seqs")
+        if value is not None:
+            return max(int(value), 1)
+    return max(_batch_size_from_runner(runner), 1)
+
+
+def _q_tokens_for_decision(batch_size: int, requested_len: int) -> int:
+    return max(batch_size, 1) * max(requested_len, 1)
+
+
 def _spec_method(runner) -> str:
     speculative_config = getattr(runner, "speculative_config", None)
     return str(getattr(speculative_config, "method", "") or "")
@@ -364,10 +377,13 @@ def _log_cost_table_prediction(cost_table: DcutCostTable, config_source: str) ->
     _visible_log(
         "info",
         "[dcut][cost-table][prediction] source=analytic config=%s "
-        "max_verify_len=%d target_base_cost=%.3f target_token_cost=%.3f "
-        "draft_token_cost=%.3f predicted_table=[%s]",
+        "max_verify_len=%d max_q_tokens=%d q_bucket_size=%d "
+        "target_base_cost=%.3f target_token_cost=%.3f draft_token_cost=%.3f "
+        "predicted_table=[%s]",
         config_source or "<defaults>",
         cost_table.max_verify_len,
+        cost_table.max_q_tokens,
+        cost_table.q_bucket_size,
         cost_table.target_base_cost,
         cost_table.target_token_cost,
         cost_table.draft_token_cost,
@@ -385,24 +401,36 @@ def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
     )
 
 
-def _log_cost_table_profile(runner, verify_len: int) -> None:
+def _log_cost_table_profile(runner, q_tokens: int, planned_cut: int) -> None:
     cost_table = getattr(runner, "dcut_cost_table", None)
     if cost_table is None:
         return
-    entry = cost_table.get(verify_len)
+    entry = cost_table.get(q_tokens)
+    measured_entry = getattr(cost_table, "last_measured_entry", None) or entry
     _visible_log(
         "info",
-        "[dcut][cost-table][profile] source=npu_runtime verify_len=%d "
-        "target_ms=%.3f draft_ms=%.3f total_ms=%.3f profile_count=%d "
-        "min_profile_samples=%d profiled_lens=%s profiled_table=[%s]",
-        entry.verify_len,
+        "[dcut][cost-table][profile] source=npu_runtime q_tokens=%d q_bucket=%d planned_cut=%d "
+        "measured_target_ms=%.3f measured_draft_ms=%.3f measured_total_ms=%.3f "
+        "table_target_ms=%.3f table_draft_ms=%.3f table_total_ms=%.3f "
+        "table_updated=%s profile_state=%s profile_count=%d "
+        "min_profile_samples=%d trim_largest_samples=%d profiled_lens=%s "
+        "profiled_table=[%s]",
+        q_tokens,
+        entry.q_tokens,
+        planned_cut,
+        measured_entry.target_cost,
+        measured_entry.draft_cost,
+        measured_entry.total_cost,
         entry.target_cost,
         entry.draft_cost,
         entry.total_cost,
-        cost_table.profile_counts.get(entry.verify_len, 0),
+        cost_table.last_profile_updated,
+        cost_table.profile_state(entry.q_tokens),
+        cost_table.profile_counts.get(entry.q_tokens, 0),
         cost_table.min_profile_samples,
+        cost_table.trim_largest_samples,
         sorted(cost_table.profiled_lens),
-        cost_table.summary(),
+        cost_table.summary(entry.q_tokens),
     )
 
 
@@ -429,12 +457,13 @@ def _format_candidate_scores(runner, decision) -> str:
     concurrency = max(batch_size - 1, 0) / high_concurrency_batch
     items = []
     for verify_len in range(1, decision.requested_len + 1):
-        cost = cost_table.get(verify_len)
+        q_tokens = _q_tokens_for_decision(batch_size, verify_len)
+        cost = cost_table.get(q_tokens)
         expected_accepts = max(1.0 + max(verify_len - 1, 0) * decision.acceptance_rate, 1e-6)
         length_penalty = 1.0 + concurrency * max(verify_len - 1, 0) / decision.requested_len
         score = cost.total_cost * length_penalty / expected_accepts
         marker = "*" if verify_len == decision.selected_len else ""
-        items.append(f"k={verify_len}:score={score:.3f}{marker}")
+        items.append(f"q={q_tokens},k={verify_len}:score={score:.3f}{marker}")
     return "[" + ",".join(items) + "]"
 
 
@@ -510,14 +539,26 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             return
         config, config_source = load_dcut_config()
         max_verify_len = _num_speculative_tokens(self)
+        max_concurrency = _max_concurrency_from_runner(self)
+        self.dcut_max_q_tokens = max_concurrency * max_verify_len
         self.dcut_cost_table = DcutCostTable(
             max_verify_len=max_verify_len,
+            max_q_tokens=self.dcut_max_q_tokens,
             target_base_cost=config.target_base_cost,
             target_token_cost=config.target_token_cost,
             draft_token_cost=config.draft_token_cost,
         )
         _log_cost_table_prediction(self.dcut_cost_table, config_source)
         _log_cost_table_warmup(self.dcut_cost_table)
+        self.dcut_cost_table.simulate_bootstrap_profiles()
+        _visible_log(
+            "info",
+            "[dcut][cost-table][simulation] source=synthetic_random_draft "
+            "min_profile_samples=%d trim_largest_samples=%d simulated_table=[%s]",
+            self.dcut_cost_table.min_profile_samples,
+            self.dcut_cost_table.trim_largest_samples,
+            self.dcut_cost_table.summary(),
+        )
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
             default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,
@@ -543,10 +584,14 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         _visible_log(
             "info",
             "[dcut][cost-table] initialized: enabled=%s config=%s max_verify_len=%d "
+            "max_concurrency=%d max_q_tokens=%d q_bucket_size=%d "
             "accuracy_safe_mode=%s target_only_methods=%s table=[%s]",
             True,
             config_source or "<defaults>",
             max_verify_len,
+            max_concurrency,
+            self.dcut_max_q_tokens,
+            self.dcut_cost_table.q_bucket_size,
             config.accuracy_safe_mode,
             config.target_only_methods,
             self.dcut_cost_table.summary(),
@@ -646,12 +691,13 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 )
                 planned_cut = getattr(self, "dcut_last_planned_cut", None)
                 if planned_cut is not None:
+                    q_tokens = _q_tokens_for_decision(_batch_size_from_runner(self), planned_cut)
                     self.dcut_cost_table.update_profile(
-                        planned_cut,
                         self.dcut_last_target_elapsed_ms,
                         draft_elapsed_ms,
+                        q_tokens=q_tokens,
                     )
-                    _log_cost_table_profile(self, planned_cut)
+                    _log_cost_table_profile(self, q_tokens, planned_cut)
             _log_acceptance_result(self, "bookkeeping_valid_sampled_tokens")
             return result
 
