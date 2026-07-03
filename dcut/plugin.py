@@ -401,6 +401,54 @@ def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
     )
 
 
+def _format_cost_table_bucket_lines(
+    cost_table: DcutCostTable,
+    buckets_per_line: int = 16,
+) -> list[str]:
+    bucket_items = []
+    for q_bucket in cost_table.q_buckets:
+        entry = cost_table.get(q_bucket)
+        bucket_items.append(
+            f"q={q_bucket}:state={cost_table.profile_state(q_bucket)},"
+            f"samples={cost_table.profile_counts.get(q_bucket, 0)},"
+            f"target={entry.target_cost:.3f},draft={entry.draft_cost:.3f},"
+            f"total={entry.total_cost:.3f}"
+        )
+    return [
+        "; ".join(bucket_items[index : index + buckets_per_line])
+        for index in range(0, len(bucket_items), buckets_per_line)
+    ]
+
+
+def _log_cost_table_startup(cost_table: DcutCostTable) -> None:
+    lines = _format_cost_table_bucket_lines(cost_table)
+    _visible_log(
+        "info",
+        "[dcut][cost-table][startup] buckets=%d q_bucket_size=%d "
+        "max_q_tokens=%d min_profile_samples=%d trim_largest_samples=%d",
+        len(cost_table.q_buckets),
+        cost_table.q_bucket_size,
+        cost_table.max_q_tokens,
+        cost_table.min_profile_samples,
+        cost_table.trim_largest_samples,
+    )
+    for index, line in enumerate(lines, start=1):
+        _visible_log(
+            "info",
+            "[dcut][cost-table][startup] chunk=%d/%d %s",
+            index,
+            len(lines),
+            line,
+        )
+
+
+def _profiled_bucket_summary(cost_table: DcutCostTable) -> str:
+    profiled_buckets = sorted(cost_table.profiled_lens)
+    if not profiled_buckets:
+        return "[]"
+    return f"count={len(profiled_buckets)},first={profiled_buckets[0]},last={profiled_buckets[-1]}"
+
+
 def _log_cost_table_profile(runner, q_tokens: int, planned_cut: int) -> None:
     cost_table = getattr(runner, "dcut_cost_table", None)
     if cost_table is None:
@@ -413,8 +461,7 @@ def _log_cost_table_profile(runner, q_tokens: int, planned_cut: int) -> None:
         "measured_target_ms=%.3f measured_draft_ms=%.3f measured_total_ms=%.3f "
         "table_target_ms=%.3f table_draft_ms=%.3f table_total_ms=%.3f "
         "table_updated=%s profile_state=%s profile_count=%d "
-        "min_profile_samples=%d trim_largest_samples=%d profiled_lens=%s "
-        "profiled_table=[%s]",
+        "min_profile_samples=%d trim_largest_samples=%d profiled_buckets=%s",
         q_tokens,
         entry.q_tokens,
         planned_cut,
@@ -429,8 +476,7 @@ def _log_cost_table_profile(runner, q_tokens: int, planned_cut: int) -> None:
         cost_table.profile_counts.get(entry.q_tokens, 0),
         cost_table.min_profile_samples,
         cost_table.trim_largest_samples,
-        sorted(cost_table.profiled_lens),
-        cost_table.summary(entry.q_tokens),
+        _profiled_bucket_summary(cost_table),
     )
 
 
@@ -554,11 +600,11 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         _visible_log(
             "info",
             "[dcut][cost-table][simulation] source=synthetic_random_draft "
-            "min_profile_samples=%d trim_largest_samples=%d simulated_table=[%s]",
+            "min_profile_samples=%d trim_largest_samples=%d",
             self.dcut_cost_table.min_profile_samples,
             self.dcut_cost_table.trim_largest_samples,
-            self.dcut_cost_table.summary(),
         )
+        _log_cost_table_startup(self.dcut_cost_table)
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
             default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,
