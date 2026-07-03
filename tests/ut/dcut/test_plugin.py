@@ -43,11 +43,38 @@ def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
     assert runner.dcut_last_decision.requested_len == 4
     assert runner.dcut_last_decision.batch_size == 32
     prediction_logs = [log for log in logs if "[dcut][cost-table][prediction]" in log]
-    assert "source=analytic" in prediction_logs[0]
-    assert "predicted_table=[q_bucket_size=" in prediction_logs[0]
+    assert "source=analytic_estimate" in prediction_logs[0]
+    assert "predicted_table=[batch_size_buckets=" in prediction_logs[0]
     warmup_logs = [log for log in logs if "[dcut][cost-table][warmup]" in log]
     assert "entries=4" in warmup_logs[0]
-    assert "warmed_table=[q_bucket_size=" in warmup_logs[0]
+    assert "source=analytic_estimate" in warmup_logs[0]
+    assert "warmed_table=[batch_size_buckets=" in warmup_logs[0]
+
+
+def test_startup_cost_table_profiles_with_runner_hook():
+    class RunnerWithProfile:
+        def __init__(self):
+            self.dcut_cost_table = plugin.DcutCostTable(
+                max_verify_len=2,
+                max_q_tokens=4,
+                max_batch_size=2,
+                q_bucket_size=1,
+            )
+            self.profile_calls = []
+
+        def _adaptive_profile_run(self, scheduled_tokens, *args):
+            self.profile_calls.append(tuple(scheduled_tokens))
+            return "eager", float(sum(scheduled_tokens) * 10), sum(scheduled_tokens)
+
+    runner = RunnerWithProfile()
+
+    source = plugin._profile_startup_cost_table(runner)
+
+    assert source == "npu_profile"
+    assert runner.profile_calls
+    assert runner.dcut_cost_table.profile_counts[(2, 4)] == 5
+    assert runner.dcut_cost_table.get(4, 2).target_cost == 40.0
+    assert runner.dcut_cost_table.get(4, 2).draft_cost == 0.0
 
 
 def test_accuracy_safe_mode_returns_no_draft_tokens(monkeypatch):
@@ -247,13 +274,14 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     plugin._patch_runner_class(FreshRunner)
     runner = FreshRunner()
     q_tokens = plugin._q_tokens_for_decision(plugin._batch_size_from_runner(runner), 4)
-    q_bucket = runner.dcut_cost_table.bucket_for(q_tokens)
-    profile_count_before = runner.dcut_cost_table.profile_counts[q_bucket]
+    q_bucket = runner.dcut_cost_table.q_bucket_for(q_tokens)
+    batch_bucket = runner.dcut_cost_table.batch_bucket_for(plugin._batch_size_from_runner(runner))
+    profile_count_before = runner.dcut_cost_table.profile_counts[(batch_bucket, q_bucket)]
 
     runner.dcut_verify_start_time = plugin.time.perf_counter()
     runner.dcut_last_planned_cut = 4
     runner._bookkeeping_sync()
-    assert runner.dcut_cost_table.profile_counts[q_bucket] == profile_count_before
+    assert runner.dcut_cost_table.profile_counts[(batch_bucket, q_bucket)] == profile_count_before
     assert runner.propose_draft_token_ids(object()) is not None
 
     assert runner.dcut_last_decision.acceptance_rate == 0.625

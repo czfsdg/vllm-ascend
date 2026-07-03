@@ -376,7 +376,7 @@ def _acceptance_rate_from_runner(
 def _log_cost_table_prediction(cost_table: DcutCostTable, config_source: str) -> None:
     _visible_log(
         "info",
-        "[dcut][cost-table][prediction] source=analytic config=%s "
+        "[dcut][cost-table][prediction] source=analytic_estimate unit=relative_cost config=%s "
         "max_verify_len=%d max_q_tokens=%d q_bucket_size=%d "
         "target_base_cost=%.3f target_token_cost=%.3f draft_token_cost=%.3f "
         "predicted_table=[%s]",
@@ -395,7 +395,7 @@ def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
     warmed_entries = cost_table.warmup()
     _visible_log(
         "info",
-        "[dcut][cost-table][warmup] entries=%d warmed_table=[%s]",
+        "[dcut][cost-table][warmup] source=analytic_estimate unit=relative_cost entries=%d warmed_table=[%s]",
         len(warmed_entries),
         cost_table.summary(),
     )
@@ -406,13 +406,15 @@ def _format_cost_table_bucket_lines(
     buckets_per_line: int = 16,
 ) -> list[str]:
     bucket_items = []
+    batch_bucket = cost_table.batch_size_buckets[-1]
     for q_bucket in cost_table.q_buckets:
-        entry = cost_table.get(q_bucket)
+        entry = cost_table.get(q_bucket, batch_bucket)
+        key = (batch_bucket, q_bucket)
         bucket_items.append(
-            f"q={q_bucket}:state={cost_table.profile_state(q_bucket)},"
-            f"bootstrap_samples={cost_table.profile_counts.get(q_bucket, 0)},"
-            f"target={entry.target_cost:.3f},draft={entry.draft_cost:.3f},"
-            f"total={entry.total_cost:.3f}"
+            f"bs={batch_bucket},q={q_bucket}:state={cost_table.profile_state(q_bucket, batch_bucket)},"
+            f"bootstrap_estimates={cost_table.profile_counts.get(key, 0)},"
+            f"target_cost={entry.target_cost:.3f},draft_cost={entry.draft_cost:.3f},"
+            f"total_cost={entry.total_cost:.3f}"
         )
     return [
         "; ".join(bucket_items[index : index + buckets_per_line])
@@ -420,12 +422,16 @@ def _format_cost_table_bucket_lines(
     ]
 
 
-def _log_cost_table_startup(cost_table: DcutCostTable) -> None:
+def _log_cost_table_startup(cost_table: DcutCostTable, source: str, unit: str) -> None:
     lines = _format_cost_table_bucket_lines(cost_table)
     _visible_log(
         "info",
-        "[dcut][cost-table][startup] buckets=%d q_bucket_size=%d "
+        "[dcut][cost-table][startup] source=%s unit=%s "
+        "batch_size_buckets=%d q_buckets=%d q_bucket_size=%d "
         "max_q_tokens=%d min_profile_samples=%d trim_largest_samples=%d",
+        source,
+        unit,
+        len(cost_table.batch_size_buckets),
         len(cost_table.q_buckets),
         cost_table.q_bucket_size,
         cost_table.max_q_tokens,
@@ -440,6 +446,45 @@ def _log_cost_table_startup(cost_table: DcutCostTable) -> None:
             len(lines),
             line,
         )
+
+
+def _profile_startup_cost_table(runner) -> str:
+    cost_table = getattr(runner, "dcut_cost_table", None)
+    if cost_table is None:
+        return "unavailable"
+    profile_run = getattr(runner, "_adaptive_profile_run", None)
+    if not callable(profile_run):
+        cost_table.simulate_bootstrap_profiles()
+        return "synthetic_estimate"
+
+    try:
+        for batch_size in cost_table.batch_size_buckets:
+            if batch_size <= 0:
+                continue
+            for verify_len in range(1, cost_table.max_verify_len + 1):
+                q_tokens = batch_size * verify_len
+                scheduled_tokens = [verify_len] * batch_size
+                for _ in range(cost_table.min_profile_samples):
+                    profile_result = profile_run(scheduled_tokens, [], 1, 1)
+                    if isinstance(profile_result, tuple):
+                        avg_ms = float(profile_result[1])
+                    else:
+                        avg_ms = float(profile_result)
+                    cost_table.update_profile(
+                        q_tokens=q_tokens,
+                        batch_size=batch_size,
+                        target_cost=avg_ms,
+                        draft_cost=0.0,
+                    )
+    except Exception as error:  # pragma: no cover - defensive runtime fallback
+        _visible_log(
+            "warning",
+            "[dcut][cost-table][startup] npu_profile_failed=%s fallback=synthetic_estimate",
+            error,
+        )
+        cost_table.simulate_bootstrap_profiles()
+        return "synthetic_estimate"
+    return "npu_profile"
 
 
 def _format_batch_cut_plan(runner, decision) -> str:
@@ -466,7 +511,7 @@ def _format_candidate_scores(runner, decision) -> str:
     items = []
     for verify_len in range(1, decision.requested_len + 1):
         q_tokens = _q_tokens_for_decision(batch_size, verify_len)
-        cost = cost_table.get(q_tokens)
+        cost = cost_table.get(q_tokens, batch_size)
         expected_accepts = max(1.0 + max(verify_len - 1, 0) * decision.acceptance_rate, 1e-6)
         length_penalty = 1.0 + concurrency * max(verify_len - 1, 0) / decision.requested_len
         score = cost.total_cost * length_penalty / expected_accepts
@@ -552,21 +597,28 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         self.dcut_cost_table = DcutCostTable(
             max_verify_len=max_verify_len,
             max_q_tokens=self.dcut_max_q_tokens,
+            max_batch_size=max_concurrency,
             target_base_cost=config.target_base_cost,
             target_token_cost=config.target_token_cost,
             draft_token_cost=config.draft_token_cost,
         )
         _log_cost_table_prediction(self.dcut_cost_table, config_source)
         _log_cost_table_warmup(self.dcut_cost_table)
-        self.dcut_cost_table.simulate_bootstrap_profiles()
+        startup_profile_source = _profile_startup_cost_table(self)
+        startup_profile_unit = "ms" if startup_profile_source == "npu_profile" else "relative_cost"
         _visible_log(
             "info",
-            "[dcut][cost-table][simulation] source=synthetic_random_draft "
-            "min_profile_samples=%d trim_largest_samples=%d",
+            "[dcut][cost-table][simulation] source=%s unit=%s min_profile_samples=%d trim_largest_samples=%d",
+            startup_profile_source,
+            startup_profile_unit,
             self.dcut_cost_table.min_profile_samples,
             self.dcut_cost_table.trim_largest_samples,
         )
-        _log_cost_table_startup(self.dcut_cost_table)
+        _log_cost_table_startup(
+            self.dcut_cost_table,
+            startup_profile_source,
+            startup_profile_unit,
+        )
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
             default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,

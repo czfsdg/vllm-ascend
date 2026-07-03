@@ -6,38 +6,43 @@ from dcut.policy import DcutPolicy
 
 
 def _profile_all(table: DcutCostTable) -> DcutCostTable:
-    for verify_len in range(1, table.max_verify_len + 1):
-        entry = table.get(verify_len)
-        for _ in range(table.min_profile_samples):
-            table.update_profile(
-                q_tokens=verify_len * table.q_bucket_size,
-                target_cost=entry.target_cost,
-                draft_cost=entry.draft_cost,
-            )
+    table.simulate_bootstrap_profiles()
     return table
 
 
-def test_cost_table_builds_one_entry_per_verify_len():
-    table = DcutCostTable(max_verify_len=4)
+def test_cost_table_builds_batch_size_and_q_buckets():
+    table = DcutCostTable(max_verify_len=4, max_q_tokens=32, max_batch_size=4)
 
-    assert [entry.verify_len for entry in table.entries] == [1, 2, 3, 4]
-    assert [entry.verify_len for entry in table.warmup()] == [1, 2, 3, 4]
+    assert table.batch_size_buckets == (1, 2, 4)
+    assert table.q_buckets == (8, 16, 24, 32)
+    assert len(table.entries) == 12
+
     for target_cost, draft_cost in (
         (10.0, 2.0),
         (8.0, 1.0),
         (12.0, 3.0),
         (100.0, 10.0),
     ):
-        profiled = table.update_profile(q_tokens=24, target_cost=target_cost, draft_cost=draft_cost)
-        assert profiled == table.get(24)
+        profiled = table.update_profile(
+            q_tokens=24,
+            batch_size=4,
+            target_cost=target_cost,
+            draft_cost=draft_cost,
+        )
+        assert profiled == table.get(24, 4)
         assert table.profiled_lens == set()
 
-    profiled = table.update_profile(verify_len=3, target_cost=80.0, draft_cost=8.0)
-    assert table.profile_counts == {24: 5}
-    assert table.profiled_lens == {24}
+    profiled = table.update_profile(
+        q_tokens=24,
+        batch_size=4,
+        target_cost=80.0,
+        draft_cost=8.0,
+    )
+    assert table.profile_counts == {(4, 24): 5}
+    assert table.profiled_lens == {(4, 24)}
     assert profiled.total_cost == 12.0
-    assert table.profile_state(24) == "ready"
-    assert "q=24" in table.summary(24)
+    assert table.profile_state(24, 4) == "ready"
+    assert "bs=4,q=24" in table.summary(24, 4)
 
 
 def test_policy_never_exceeds_requested_len():
@@ -90,7 +95,7 @@ def test_config_overrides_policy_and_cost_table_values():
         high_concurrency_batch=config.high_concurrency_batch,
     )
 
-    assert table.get(1).target_cost == 2.5
+    assert table.get(8).target_cost == 6.0
     assert policy.default_acceptance_rate == 0.6
     assert policy.high_concurrency_batch == 8
     assert config.accuracy_safe_mode is False
@@ -107,7 +112,7 @@ def test_policy_uses_acceptance_to_change_selected_len():
 
 
 def test_policy_profiles_each_len_before_scoring():
-    table = DcutCostTable(max_verify_len=3)
+    table = DcutCostTable(max_verify_len=3, max_q_tokens=24, max_batch_size=1)
     policy = DcutPolicy(table)
 
     first = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
@@ -123,7 +128,7 @@ def test_policy_profiles_each_len_before_scoring():
     table.update_profile(q_tokens=8, target_cost=10.0, draft_cost=1.0)
     third = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
     assert third.selected_len == 2
-    assert table.profile_state(8) == "ready"
+    assert table.profile_state(8, 1) == "ready"
 
 
 def test_cost_table_uses_trimmed_mean_after_five_samples():
@@ -138,18 +143,18 @@ def test_cost_table_uses_trimmed_mean_after_five_samples():
     ):
         table.update_profile(q_tokens=8, target_cost=target_cost, draft_cost=draft_cost)
 
-    assert table.profile_state(8) == "ready"
-    assert table.profile_counts[8] == 5
+    assert table.profile_state(8, 1) == "ready"
+    assert table.profile_counts[(0, 8)] == 5
     assert table.get(8).target_cost == 70.0
     assert table.get(8).draft_cost == 10.333333333333334
 
 
 def test_cost_table_builds_q_buckets_to_max_concurrency_times_spec_len():
-    table = DcutCostTable(max_verify_len=7, max_q_tokens=112)
+    table = DcutCostTable(max_verify_len=7, max_q_tokens=112, max_batch_size=16)
 
     assert table.q_bucket_size == 8
     assert table.q_buckets[-1] == 112
-    assert len(table.entries) == 14
+    assert len(table.entries) == len(table.batch_size_buckets) * 14
     assert table.q_bucket_for(111) == 112
     assert table.q_bucket_for(113) == 112
 
