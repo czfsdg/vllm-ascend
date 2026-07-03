@@ -393,12 +393,14 @@ def _log_cost_table_profile(runner, verify_len: int) -> None:
     _visible_log(
         "info",
         "[dcut][cost-table][profile] source=npu_runtime verify_len=%d "
-        "target_ms=%.3f draft_ms=%.3f total_ms=%.3f profiled_lens=%s "
-        "profiled_table=[%s]",
+        "target_ms=%.3f draft_ms=%.3f total_ms=%.3f profile_count=%d "
+        "min_profile_samples=%d profiled_lens=%s profiled_table=[%s]",
         entry.verify_len,
         entry.target_cost,
         entry.draft_cost,
         entry.total_cost,
+        cost_table.profile_counts.get(entry.verify_len, 0),
+        cost_table.min_profile_samples,
         sorted(cost_table.profiled_lens),
         cost_table.summary(),
     )

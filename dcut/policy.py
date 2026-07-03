@@ -42,6 +42,18 @@ class DcutPolicy:
         observed_acceptance = self.default_acceptance_rate if acceptance_rate is None else acceptance_rate
         observed_acceptance = min(max(observed_acceptance, 0.0), 1.0)
 
+        for verify_len in range(1, bounded_requested_len + 1):
+            if self.cost_table.needs_profile(verify_len):
+                cost = self.cost_table.get(verify_len)
+                return CutDecision(
+                    requested_len=bounded_requested_len,
+                    selected_len=verify_len,
+                    batch_size=bounded_batch_size,
+                    acceptance_rate=observed_acceptance,
+                    score=cost.total_cost,
+                    reason="npu_profile_warmup",
+                )
+
         best_len = 1
         best_score = float("inf")
         for verify_len in range(1, bounded_requested_len + 1):
