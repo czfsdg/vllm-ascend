@@ -410,7 +410,7 @@ def _format_cost_table_bucket_lines(
         entry = cost_table.get(q_bucket)
         bucket_items.append(
             f"q={q_bucket}:state={cost_table.profile_state(q_bucket)},"
-            f"samples={cost_table.profile_counts.get(q_bucket, 0)},"
+            f"bootstrap_samples={cost_table.profile_counts.get(q_bucket, 0)},"
             f"target={entry.target_cost:.3f},draft={entry.draft_cost:.3f},"
             f"total={entry.total_cost:.3f}"
         )
@@ -440,44 +440,6 @@ def _log_cost_table_startup(cost_table: DcutCostTable) -> None:
             len(lines),
             line,
         )
-
-
-def _profiled_bucket_summary(cost_table: DcutCostTable) -> str:
-    profiled_buckets = sorted(cost_table.profiled_lens)
-    if not profiled_buckets:
-        return "[]"
-    return f"count={len(profiled_buckets)},first={profiled_buckets[0]},last={profiled_buckets[-1]}"
-
-
-def _log_cost_table_profile(runner, q_tokens: int, planned_cut: int) -> None:
-    cost_table = getattr(runner, "dcut_cost_table", None)
-    if cost_table is None:
-        return
-    entry = cost_table.get(q_tokens)
-    measured_entry = getattr(cost_table, "last_measured_entry", None) or entry
-    _visible_log(
-        "info",
-        "[dcut][cost-table][profile] source=npu_runtime q_tokens=%d q_bucket=%d planned_cut=%d "
-        "measured_target_ms=%.3f measured_draft_ms=%.3f measured_total_ms=%.3f "
-        "table_target_ms=%.3f table_draft_ms=%.3f table_total_ms=%.3f "
-        "table_updated=%s profile_state=%s profile_count=%d "
-        "min_profile_samples=%d trim_largest_samples=%d profiled_buckets=%s",
-        q_tokens,
-        entry.q_tokens,
-        planned_cut,
-        measured_entry.target_cost,
-        measured_entry.draft_cost,
-        measured_entry.total_cost,
-        entry.target_cost,
-        entry.draft_cost,
-        entry.total_cost,
-        cost_table.last_profile_updated,
-        cost_table.profile_state(entry.q_tokens),
-        cost_table.profile_counts.get(entry.q_tokens, 0),
-        cost_table.min_profile_samples,
-        cost_table.trim_largest_samples,
-        _profiled_bucket_summary(cost_table),
-    )
 
 
 def _format_batch_cut_plan(runner, decision) -> str:
@@ -735,15 +697,9 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                     max(self.dcut_last_verify_elapsed_ms - draft_elapsed_ms, 0.0),
                     3,
                 )
-                planned_cut = getattr(self, "dcut_last_planned_cut", None)
-                if planned_cut is not None:
-                    q_tokens = _q_tokens_for_decision(_batch_size_from_runner(self), planned_cut)
-                    self.dcut_cost_table.update_profile(
-                        self.dcut_last_target_elapsed_ms,
-                        draft_elapsed_ms,
-                        q_tokens=q_tokens,
-                    )
-                    _log_cost_table_profile(self, q_tokens, planned_cut)
+                # Cost table is intentionally fixed after startup bootstrap.
+                # Runtime timing is logged in the result line for inspection,
+                # but it must not mutate planning costs during serving.
             _log_acceptance_result(self, "bookkeeping_valid_sampled_tokens")
             return result
 

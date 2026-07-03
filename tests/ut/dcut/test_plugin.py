@@ -44,10 +44,10 @@ def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
     assert runner.dcut_last_decision.batch_size == 32
     prediction_logs = [log for log in logs if "[dcut][cost-table][prediction]" in log]
     assert "source=analytic" in prediction_logs[0]
-    assert "predicted_table=[k=1:" in prediction_logs[0]
+    assert "predicted_table=[q_bucket_size=" in prediction_logs[0]
     warmup_logs = [log for log in logs if "[dcut][cost-table][warmup]" in log]
     assert "entries=4" in warmup_logs[0]
-    assert "warmed_table=[k=1:" in warmup_logs[0]
+    assert "warmed_table=[q_bucket_size=" in warmup_logs[0]
 
 
 def test_accuracy_safe_mode_returns_no_draft_tokens(monkeypatch):
@@ -246,10 +246,14 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
 
     plugin._patch_runner_class(FreshRunner)
     runner = FreshRunner()
+    q_tokens = plugin._q_tokens_for_decision(plugin._batch_size_from_runner(runner), 4)
+    q_bucket = runner.dcut_cost_table.bucket_for(q_tokens)
+    profile_count_before = runner.dcut_cost_table.profile_counts[q_bucket]
 
     runner.dcut_verify_start_time = plugin.time.perf_counter()
     runner.dcut_last_planned_cut = 4
     runner._bookkeeping_sync()
+    assert runner.dcut_cost_table.profile_counts[q_bucket] == profile_count_before
     assert runner.propose_draft_token_ids(object()) is not None
 
     assert runner.dcut_last_decision.acceptance_rate == 0.625
@@ -270,5 +274,4 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     assert "target_elapsed_ms=" in result_logs[0]
     assert "planned_cut=4" in result_logs[0]
     profile_logs = [log for log in logs if "[dcut][cost-table][profile]" in log]
-    assert "source=npu_runtime" in profile_logs[0]
-    assert "verify_len=4" in profile_logs[0]
+    assert profile_logs == []
