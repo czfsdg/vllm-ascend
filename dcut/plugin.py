@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import builtins
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -20,6 +22,16 @@ from dcut.cost_table import DcutCostTable
 from dcut.policy import DcutPolicy
 
 logger = logging.getLogger("dcut")
+
+
+def _synchronize_npu_for_profile() -> None:
+    """Synchronize async NPU work before reading wall-clock profile timers."""
+    if importlib.util.find_spec("torch") is None:
+        return
+    torch = importlib.import_module("torch")
+    npu = getattr(torch, "npu", None)
+    if npu is not None and hasattr(npu, "synchronize"):
+        npu.synchronize()
 
 
 def _visible_log(level: str, message: str, *args) -> None:
@@ -373,6 +385,25 @@ def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
     )
 
 
+def _log_cost_table_profile(runner, verify_len: int) -> None:
+    cost_table = getattr(runner, "dcut_cost_table", None)
+    if cost_table is None:
+        return
+    entry = cost_table.get(verify_len)
+    _visible_log(
+        "info",
+        "[dcut][cost-table][profile] source=npu_runtime verify_len=%d "
+        "target_ms=%.3f draft_ms=%.3f total_ms=%.3f profiled_lens=%s "
+        "profiled_table=[%s]",
+        entry.verify_len,
+        entry.target_cost,
+        entry.draft_cost,
+        entry.total_cost,
+        sorted(cost_table.profiled_lens),
+        cost_table.summary(),
+    )
+
+
 def _format_batch_cut_plan(runner, decision) -> str:
     per_request_acceptance = getattr(runner, "dcut_last_per_request_acceptance", None)
     if per_request_acceptance:
@@ -445,8 +476,8 @@ def _log_acceptance_result(runner, acceptance_source: str) -> None:
         "info",
         "[dcut][result] acceptance_source=%s acceptance_rate=%.3f "
         "effective_tokens=%s drafted_tokens=%s accepted_draft_tokens=%s "
-        "per_request_acceptance=%s verify_elapsed_ms=%s planned_cut=%s "
-        "result_count=%d",
+        "per_request_acceptance=%s verify_elapsed_ms=%s draft_elapsed_ms=%s "
+        "target_elapsed_ms=%s planned_cut=%s result_count=%d",
         acceptance_source,
         getattr(runner, "dcut_observed_acceptance_rate", UNKNOWN_ACCEPTANCE_RATE),
         getattr(runner, "dcut_last_accepted_tokens", "unknown"),
@@ -454,6 +485,8 @@ def _log_acceptance_result(runner, acceptance_source: str) -> None:
         getattr(runner, "dcut_last_accepted_draft_tokens", None),
         getattr(runner, "dcut_last_per_request_acceptance", None),
         getattr(runner, "dcut_last_verify_elapsed_ms", None),
+        getattr(runner, "dcut_last_draft_elapsed_ms", None),
+        getattr(runner, "dcut_last_target_elapsed_ms", None),
         getattr(runner, "dcut_last_planned_cut", None),
         result_count,
     )
@@ -502,6 +535,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         self.dcut_last_accepted_draft_tokens = None
         self.dcut_verify_start_time = None
         self.dcut_last_verify_elapsed_ms = None
+        self.dcut_last_draft_elapsed_ms = None
+        self.dcut_last_target_elapsed_ms = None
         self.dcut_last_planned_cut = None
         _visible_log(
             "info",
@@ -538,6 +573,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             )
             self.dcut_last_decision = decision
             _log_dcut_plan(self, decision, acceptance_source)
+            _synchronize_npu_for_profile()
             self.dcut_verify_start_time = time.perf_counter()
             self.dcut_last_planned_cut = decision.selected_len
             if _should_use_target_only(self):
@@ -551,7 +587,17 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                         _spec_method(self),
                     )
                     self.dcut_target_only_warning_emitted = True
+                self.dcut_last_draft_elapsed_ms = 0.0
                 return None
+            _synchronize_npu_for_profile()
+            draft_start_time = time.perf_counter()
+            proposed = original_propose(self, *args, **kwargs)
+            _synchronize_npu_for_profile()
+            self.dcut_last_draft_elapsed_ms = round(
+                (time.perf_counter() - draft_start_time) * 1000.0,
+                3,
+            )
+            return proposed
         return original_propose(self, *args, **kwargs)
 
     if callable(original_bookkeeping):
@@ -585,11 +631,25 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             )
             verify_start_time = getattr(self, "dcut_verify_start_time", None)
             if verify_start_time is not None:
+                _synchronize_npu_for_profile()
                 self.dcut_last_verify_elapsed_ms = round(
                     (time.perf_counter() - verify_start_time) * 1000.0,
                     3,
                 )
                 self.dcut_verify_start_time = None
+                draft_elapsed_ms = getattr(self, "dcut_last_draft_elapsed_ms", 0.0) or 0.0
+                self.dcut_last_target_elapsed_ms = round(
+                    max(self.dcut_last_verify_elapsed_ms - draft_elapsed_ms, 0.0),
+                    3,
+                )
+                planned_cut = getattr(self, "dcut_last_planned_cut", None)
+                if planned_cut is not None:
+                    self.dcut_cost_table.update_profile(
+                        planned_cut,
+                        self.dcut_last_target_elapsed_ms,
+                        draft_elapsed_ms,
+                    )
+                    _log_cost_table_profile(self, planned_cut)
             _log_acceptance_result(self, "bookkeeping_valid_sampled_tokens")
             return result
 

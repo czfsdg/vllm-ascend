@@ -10,6 +10,10 @@ def test_cost_table_builds_one_entry_per_verify_len():
 
     assert [entry.verify_len for entry in table.entries] == [1, 2, 3, 4]
     assert [entry.verify_len for entry in table.warmup()] == [1, 2, 3, 4]
+    profiled = table.update_profile(verify_len=3, target_cost=10.0, draft_cost=2.0)
+    assert profiled.total_cost == 12.0
+    assert table.get(3).target_cost == 10.0
+    assert table.profiled_lens == {3}
     assert "k=4" in table.summary()
 
 

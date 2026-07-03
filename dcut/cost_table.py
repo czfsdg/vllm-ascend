@@ -39,6 +39,7 @@ class DcutCostTable:
         self.target_base_cost = target_base_cost
         self.target_token_cost = target_token_cost
         self.draft_token_cost = draft_token_cost
+        self.profiled_lens: set[int] = set()
         self._entries = tuple(self._build_entry(i) for i in range(1, max_verify_len + 1))
 
     @property
@@ -59,6 +60,28 @@ class DcutCostTable:
     def warmup(self) -> tuple[CostEntry, ...]:
         """Touch all predicted entries before the first D-Cut decision."""
         return tuple(self.get(entry.verify_len) for entry in self._entries)
+
+    def update_profile(
+        self,
+        verify_len: int,
+        target_cost: float,
+        draft_cost: float,
+    ) -> CostEntry:
+        """Replace one entry with measured runtime profiling costs."""
+        bounded_len = min(max(verify_len, 1), self.max_verify_len)
+        target_cost = max(target_cost, 0.0)
+        draft_cost = max(draft_cost, 0.0)
+        entry = CostEntry(
+            verify_len=bounded_len,
+            target_cost=target_cost,
+            draft_cost=draft_cost,
+            total_cost=target_cost + draft_cost,
+        )
+        entries = list(self._entries)
+        entries[bounded_len - 1] = entry
+        self._entries = tuple(entries)
+        self.profiled_lens.add(bounded_len)
+        return entry
 
     def _build_entry(self, verify_len: int) -> CostEntry:
         target_cost = self.target_base_cost + self.target_token_cost * verify_len
