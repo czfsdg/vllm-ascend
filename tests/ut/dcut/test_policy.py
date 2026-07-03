@@ -9,6 +9,7 @@ def test_cost_table_builds_one_entry_per_verify_len():
     table = DcutCostTable(max_verify_len=4)
 
     assert [entry.verify_len for entry in table.entries] == [1, 2, 3, 4]
+    assert [entry.verify_len for entry in table.warmup()] == [1, 2, 3, 4]
     assert "k=4" in table.summary()
 
 
@@ -67,3 +68,12 @@ def test_config_overrides_policy_and_cost_table_values():
     assert policy.high_concurrency_batch == 8
     assert config.accuracy_safe_mode is False
     assert config.target_only_methods == ("dflash", "draft_model")
+
+
+def test_policy_uses_acceptance_to_change_selected_len():
+    policy = DcutPolicy(DcutCostTable(max_verify_len=7))
+
+    low_acceptance = policy.decide(requested_len=7, batch_size=16, acceptance_rate=0.3)
+    high_acceptance = policy.decide(requested_len=7, batch_size=16, acceptance_rate=0.6)
+
+    assert low_acceptance.selected_len < high_acceptance.selected_len

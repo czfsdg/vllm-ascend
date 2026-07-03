@@ -348,6 +348,31 @@ def _acceptance_rate_from_runner(
     return UNKNOWN_ACCEPTANCE_RATE, "unavailable"
 
 
+def _log_cost_table_prediction(cost_table: DcutCostTable, config_source: str) -> None:
+    _visible_log(
+        "info",
+        "[dcut][cost-table][prediction] source=analytic config=%s "
+        "max_verify_len=%d target_base_cost=%.3f target_token_cost=%.3f "
+        "draft_token_cost=%.3f predicted_table=[%s]",
+        config_source or "<defaults>",
+        cost_table.max_verify_len,
+        cost_table.target_base_cost,
+        cost_table.target_token_cost,
+        cost_table.draft_token_cost,
+        cost_table.summary(),
+    )
+
+
+def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
+    warmed_entries = cost_table.warmup()
+    _visible_log(
+        "info",
+        "[dcut][cost-table][warmup] entries=%d warmed_table=[%s]",
+        len(warmed_entries),
+        cost_table.summary(),
+    )
+
+
 def _format_batch_cut_plan(runner, decision) -> str:
     per_request_acceptance = getattr(runner, "dcut_last_per_request_acceptance", None)
     if per_request_acceptance:
@@ -372,7 +397,7 @@ def _format_candidate_scores(runner, decision) -> str:
     items = []
     for verify_len in range(1, decision.requested_len + 1):
         cost = cost_table.get(verify_len)
-        expected_accepts = max(verify_len * decision.acceptance_rate, 1e-6)
+        expected_accepts = max(1.0 + max(verify_len - 1, 0) * decision.acceptance_rate, 1e-6)
         length_penalty = 1.0 + concurrency * max(verify_len - 1, 0) / decision.requested_len
         score = cost.total_cost * length_penalty / expected_accepts
         marker = "*" if verify_len == decision.selected_len else ""
@@ -420,13 +445,16 @@ def _log_acceptance_result(runner, acceptance_source: str) -> None:
         "info",
         "[dcut][result] acceptance_source=%s acceptance_rate=%.3f "
         "effective_tokens=%s drafted_tokens=%s accepted_draft_tokens=%s "
-        "per_request_acceptance=%s result_count=%d",
+        "per_request_acceptance=%s verify_elapsed_ms=%s planned_cut=%s "
+        "result_count=%d",
         acceptance_source,
         getattr(runner, "dcut_observed_acceptance_rate", UNKNOWN_ACCEPTANCE_RATE),
         getattr(runner, "dcut_last_accepted_tokens", "unknown"),
         getattr(runner, "dcut_last_drafted_tokens", "unknown"),
         getattr(runner, "dcut_last_accepted_draft_tokens", None),
         getattr(runner, "dcut_last_per_request_acceptance", None),
+        getattr(runner, "dcut_last_verify_elapsed_ms", None),
+        getattr(runner, "dcut_last_planned_cut", None),
         result_count,
     )
 
@@ -453,6 +481,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             target_token_cost=config.target_token_cost,
             draft_token_cost=config.draft_token_cost,
         )
+        _log_cost_table_prediction(self.dcut_cost_table, config_source)
+        _log_cost_table_warmup(self.dcut_cost_table)
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
             default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,
@@ -470,6 +500,9 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         self.dcut_pending_acceptance_source = None
         self.dcut_last_per_request_acceptance = None
         self.dcut_last_accepted_draft_tokens = None
+        self.dcut_verify_start_time = None
+        self.dcut_last_verify_elapsed_ms = None
+        self.dcut_last_planned_cut = None
         _visible_log(
             "info",
             "[dcut][cost-table] initialized: enabled=%s config=%s max_verify_len=%d "
@@ -505,6 +538,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             )
             self.dcut_last_decision = decision
             _log_dcut_plan(self, decision, acceptance_source)
+            self.dcut_verify_start_time = time.perf_counter()
+            self.dcut_last_planned_cut = decision.selected_len
             if _should_use_target_only(self):
                 if not getattr(self, "dcut_target_only_warning_emitted", False):
                     _visible_log(
@@ -548,6 +583,13 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 per_request_acceptance,
                 accepted_draft_tokens,
             )
+            verify_start_time = getattr(self, "dcut_verify_start_time", None)
+            if verify_start_time is not None:
+                self.dcut_last_verify_elapsed_ms = round(
+                    (time.perf_counter() - verify_start_time) * 1000.0,
+                    3,
+                )
+                self.dcut_verify_start_time = None
             _log_acceptance_result(self, "bookkeeping_valid_sampled_tokens")
             return result
 

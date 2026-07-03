@@ -24,8 +24,14 @@ class FakeRunner:
 
 
 def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
+    logs = []
     monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
     monkeypatch.setattr(plugin, "_PATCHED", False)
+    monkeypatch.setattr(
+        plugin,
+        "_visible_log",
+        lambda level, message, *args: logs.append(message % args),
+    )
 
     plugin._patch_runner_class(FakeRunner)
     runner = FakeRunner()
@@ -36,6 +42,12 @@ def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
     assert runner.dcut_cost_table.max_verify_len == 4
     assert runner.dcut_last_decision.requested_len == 4
     assert runner.dcut_last_decision.batch_size == 32
+    prediction_logs = [log for log in logs if "[dcut][cost-table][prediction]" in log]
+    assert "source=analytic" in prediction_logs[0]
+    assert "predicted_table=[k=1:" in prediction_logs[0]
+    warmup_logs = [log for log in logs if "[dcut][cost-table][warmup]" in log]
+    assert "entries=4" in warmup_logs[0]
+    assert "warmed_table=[k=1:" in warmup_logs[0]
 
 
 def test_accuracy_safe_mode_returns_no_draft_tokens(monkeypatch):
@@ -235,6 +247,8 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     plugin._patch_runner_class(FreshRunner)
     runner = FreshRunner()
 
+    runner.dcut_verify_start_time = plugin.time.perf_counter()
+    runner.dcut_last_planned_cut = 4
     runner._bookkeeping_sync()
     assert runner.propose_draft_token_ids(object()) is not None
 
@@ -251,3 +265,5 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     assert "effective_tokens=5" in result_logs[0]
     assert "accepted_draft_tokens=3" in result_logs[0]
     assert "per_request_acceptance=[0.75, 0.5]" in result_logs[0]
+    assert "verify_elapsed_ms=" in result_logs[0]
+    assert "planned_cut=4" in result_logs[0]

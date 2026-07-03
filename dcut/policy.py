@@ -46,7 +46,7 @@ class DcutPolicy:
         best_score = float("inf")
         for verify_len in range(1, bounded_requested_len + 1):
             cost = self.cost_table.get(verify_len)
-            expected_accepts = max(verify_len * observed_acceptance, 1e-6)
+            expected_accepts = max(1.0 + max(verify_len - 1, 0) * observed_acceptance, 1e-6)
             concurrency = max(bounded_batch_size - 1, 0) / self.high_concurrency_batch
             length_penalty = 1.0 + concurrency * max(verify_len - 1, 0) / bounded_requested_len
             score = cost.total_cost * length_penalty / expected_accepts

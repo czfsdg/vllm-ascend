@@ -56,6 +56,10 @@ class DcutCostTable:
             for entry in self._entries
         )
 
+    def warmup(self) -> tuple[CostEntry, ...]:
+        """Touch all predicted entries before the first D-Cut decision."""
+        return tuple(self.get(entry.verify_len) for entry in self._entries)
+
     def _build_entry(self, verify_len: int) -> CostEntry:
         target_cost = self.target_base_cost + self.target_token_cost * verify_len
         draft_cost = self.draft_token_cost * verify_len
