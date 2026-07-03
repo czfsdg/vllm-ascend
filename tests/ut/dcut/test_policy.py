@@ -33,11 +33,11 @@ def test_cost_table_builds_one_entry_per_verify_len():
         assert table.profiled_lens == set()
 
     profiled = table.update_profile(verify_len=3, target_cost=80.0, draft_cost=8.0)
-    assert table.profile_counts == {3: 5}
-    assert table.profiled_lens == {3}
+    assert table.profile_counts == {(3, 8): 5}
+    assert table.profiled_lens == {(3, 8)}
     assert profiled.total_cost == 12.0
-    assert table.profile_state(3) == "ready"
-    assert "k=4" in table.summary()
+    assert table.profile_state(3, 8) == "ready"
+    assert "k=4" in table.summary(8)
 
 
 def test_policy_never_exceeds_requested_len():
@@ -123,7 +123,7 @@ def test_policy_profiles_each_len_before_scoring():
     table.update_profile(1, target_cost=10.0, draft_cost=1.0)
     third = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
     assert third.selected_len == 2
-    assert table.profile_state(1) == "ready"
+    assert table.profile_state(1, 8) == "ready"
 
 
 def test_cost_table_uses_trimmed_mean_after_five_samples():
@@ -138,7 +138,24 @@ def test_cost_table_uses_trimmed_mean_after_five_samples():
     ):
         table.update_profile(1, target_cost=target_cost, draft_cost=draft_cost)
 
-    assert table.profile_state(1) == "ready"
-    assert table.profile_counts[1] == 5
+    assert table.profile_state(1, 8) == "ready"
+    assert table.profile_counts[(1, 8)] == 5
     assert table.get(1).target_cost == 70.0
     assert table.get(1).draft_cost == 10.333333333333334
+
+
+def test_cost_table_builds_q_buckets_to_max_concurrency_times_spec_len():
+    table = DcutCostTable(max_verify_len=7, max_q_tokens=112)
+
+    assert table.q_bucket_size == 8
+    assert table.q_buckets[-1] == 112
+    assert len(table.entries) == 7 * 14
+    assert table.q_bucket_for(111) == 112
+    assert table.q_bucket_for(113) == 112
+
+    for value in (80, 81, 82, 500, 600):
+        table.update_profile(1, target_cost=value - 10, draft_cost=10, q_tokens=112)
+
+    assert table.profile_state(1, 112) == "ready"
+    assert table.get(1, 112).total_cost == 81
+    assert table.profile_state(1, 8) == "bootstrap"

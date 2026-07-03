@@ -42,9 +42,10 @@ class DcutPolicy:
         observed_acceptance = self.default_acceptance_rate if acceptance_rate is None else acceptance_rate
         observed_acceptance = min(max(observed_acceptance, 0.0), 1.0)
 
+        q_tokens = bounded_batch_size * bounded_requested_len
         for verify_len in range(1, bounded_requested_len + 1):
-            if self.cost_table.needs_profile(verify_len):
-                cost = self.cost_table.get(verify_len)
+            if self.cost_table.needs_profile(verify_len, q_tokens):
+                cost = self.cost_table.get(verify_len, q_tokens)
                 return CutDecision(
                     requested_len=bounded_requested_len,
                     selected_len=verify_len,
@@ -57,7 +58,7 @@ class DcutPolicy:
         best_len = 1
         best_score = float("inf")
         for verify_len in range(1, bounded_requested_len + 1):
-            cost = self.cost_table.get(verify_len)
+            cost = self.cost_table.get(verify_len, q_tokens)
             expected_accepts = max(1.0 + max(verify_len - 1, 0) * observed_acceptance, 1e-6)
             concurrency = max(bounded_batch_size - 1, 0) / self.high_concurrency_batch
             length_penalty = 1.0 + concurrency * max(verify_len - 1, 0) / bounded_requested_len
