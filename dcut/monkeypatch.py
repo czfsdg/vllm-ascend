@@ -128,11 +128,13 @@ def _dcut_truncate(self, scheduler_output):
 
     for req_id, draft_toks in list(new_spec.items()):
         original_len = len(draft_toks)
+        original_num_scheduled = int(new_num_sched[req_id])
+        max_scheduled_draft_len = max(0, original_num_scheduled - 1)
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
         used_adaptive_decision = adaptive_len is not None
         if adaptive_len is None:
             adaptive_len = original_len
-        cut_len = min(adaptive_len, original_len)
+        cut_len = min(adaptive_len, original_len, max_scheduled_draft_len)
         if used_adaptive_decision:
             ctrl.invalidate(req_id)
         accepted_len = cut_len + 1
@@ -156,11 +158,11 @@ def _dcut_truncate(self, scheduler_output):
                 "cut_tokens": original_len - cut_len,
             }
         )
-        if cut_len < original_len:
-            diff = original_len - cut_len
-            updated_num_scheduled = max(1, new_num_sched[req_id] - diff)
-            tokens_delta += new_num_sched[req_id] - updated_num_scheduled
+        updated_num_scheduled = max(1, cut_len + 1)
+        if updated_num_scheduled != original_num_scheduled:
+            tokens_delta += original_num_scheduled - updated_num_scheduled
             new_num_sched[req_id] = updated_num_scheduled
+        if cut_len < original_len:
             if cut_len == 0:
                 del new_spec[req_id]
             else:
