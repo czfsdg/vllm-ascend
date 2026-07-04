@@ -14,7 +14,9 @@ profiled verifier ITL cost table.
 
 from __future__ import annotations
 
+import builtins
 import os
+import sys
 import time
 from dataclasses import replace
 from typing import Any
@@ -444,13 +446,7 @@ def _patch_runner() -> None:
     import vllm.v1.worker.gpu_model_runner as m
 
     _patch_runner_class(m.GPUModelRunner)
-
-    import importlib.util
-
-    if importlib.util.find_spec("vllm_ascend.worker.model_runner_v1") is not None:
-        import vllm_ascend.worker.model_runner_v1 as ascend_m
-
-        _patch_runner_class(ascend_m.NPUModelRunner)
+    _patch_loaded_ascend_classes()
 
 
 def _patch_worker_class(worker_cls) -> None:
@@ -471,16 +467,40 @@ def _patch_worker_class(worker_cls) -> None:
 
 
 def _patch_worker() -> None:
-    import importlib.util
-
     import vllm.v1.worker.gpu_worker as m
 
     _patch_worker_class(m.Worker)
+    _patch_loaded_ascend_classes()
 
-    if importlib.util.find_spec("vllm_ascend.worker.worker") is not None:
-        import vllm_ascend.worker.worker as ascend_worker_m
 
+def _patch_loaded_ascend_classes() -> None:
+    ascend_runner_m = sys.modules.get("vllm_ascend.worker.model_runner_v1")
+    if ascend_runner_m is not None and hasattr(ascend_runner_m, "NPUModelRunner"):
+        _patch_runner_class(ascend_runner_m.NPUModelRunner)
+
+    ascend_worker_m = sys.modules.get("vllm_ascend.worker.worker")
+    if ascend_worker_m is not None and hasattr(ascend_worker_m, "NPUWorker"):
         _patch_worker_class(ascend_worker_m.NPUWorker)
+
+
+def _install_ascend_import_hook() -> None:
+    if getattr(builtins, "_dcut_import_hook_installed", False):
+        return
+
+    original_import = builtins.__import__
+
+    def dcut_import(name, globals=None, locals=None, fromlist=(), level=0):
+        module = original_import(name, globals, locals, fromlist, level)
+        if name in {"vllm_ascend.worker.model_runner_v1", "vllm_ascend.worker.worker"} or name.startswith(
+            "vllm_ascend.worker"
+        ):
+            _patch_loaded_ascend_classes()
+        return module
+
+    builtins.__import__ = dcut_import
+    builtins._dcut_import_hook_installed = True
+    builtins._dcut_original_import = original_import
+    logger.info("D-Cut Ascend import hook installed; NPU runner/worker will be patched after normal import.")
 
 
 def install(*args, **kwargs) -> None:
@@ -491,6 +511,7 @@ def install(*args, **kwargs) -> None:
     _patch_proposer()
     _patch_runner()
     _patch_worker()
+    _install_ascend_import_hook()
     _INSTALLED = True
     logger.info(
         "D-Cut adaptive-verify monkey patch installed "
