@@ -273,6 +273,7 @@ class VerifyAdaptiveController:
         draft_len_hist = dict(sorted(Counter(draft_lens).items()))
         self._last_decision = {
             "batch_size": batch_size,
+            "active_count": len(active_req_ids),
             "bs_key": bs_key,
             "best_Q": result["best_Q"],
             "best_S": result["best_S"],
@@ -282,8 +283,9 @@ class VerifyAdaptiveController:
             "draft_lens_by_req": dict(zip(active_req_ids, draft_lens)),
         }
         logger.info(
-            "D-Cut decision: bs=%d bs_key=%d best_Q=%d best_S=%d effective_S=%d score=%.4f draft_len_hist=%s",
+            "D-Cut decision: bs=%d active=%d bs_key=%d best_Q=%d best_S=%d effective_S=%d score=%.4f draft_len_hist=%s",
             batch_size,
+            len(active_req_ids),
             bs_key,
             result["best_Q"],
             result["best_S"],

@@ -119,9 +119,12 @@ def _dcut_truncate(self, scheduler_output):
     for req_id, draft_toks in list(new_spec.items()):
         original_len = len(draft_toks)
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
+        used_adaptive_decision = adaptive_len is not None
         if adaptive_len is None:
             adaptive_len = original_len
         cut_len = min(adaptive_len, original_len)
+        if used_adaptive_decision:
+            ctrl.invalidate(req_id)
         accepted_len = cut_len + 1
         accepted_tokens_before = None
         accepted_tokens_after = None
@@ -136,6 +139,7 @@ def _dcut_truncate(self, scheduler_output):
                 "req_id": req_id,
                 "original_len": original_len,
                 "verify_len": cut_len,
+                "used_adaptive_decision": used_adaptive_decision,
                 "accepted_len": accepted_len,
                 "accepted_tokens_before": accepted_tokens_before,
                 "accepted_tokens_after": accepted_tokens_after,
@@ -478,6 +482,7 @@ def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
     decision_summary = None
     if decision is not None:
         decision_summary = {
+            "active_count": decision.get("active_count"),
             "bs_key": decision.get("bs_key"),
             "best_Q": decision.get("best_Q"),
             "best_S": decision.get("best_S"),
