@@ -155,6 +155,17 @@ def _dcut_truncate(self, scheduler_output):
             else:
                 new_spec[req_id] = draft_toks[:cut_len]
 
+    if accepted_tokens_cpu is not None:
+        for req_id, num_tokens_scheduled in new_num_sched.items():
+            if req_id not in req_id_to_index:
+                continue
+            req_index = req_id_to_index[req_id]
+            max_accepted_tokens = max(1, int(num_tokens_scheduled))
+            accepted_tokens_cpu[req_index] = min(
+                max(int(accepted_tokens_cpu[req_index]), 1),
+                max_accepted_tokens,
+            )
+
     if tokens_delta > 0:
         # Mutate the original SchedulerOutput object instead of replacing it.
         # EngineCore keeps using the same object after model execution to update
