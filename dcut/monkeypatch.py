@@ -83,9 +83,7 @@ def _dcut_init_controller(self) -> None:
         max_batch_size=self.scheduler_config.max_num_seqs,
         device=self.device,
     )
-    drafter = getattr(self, "drafter", None)
-    if drafter is not None and hasattr(drafter, "needs_draft_probs"):
-        drafter.needs_draft_probs = True
+    _dcut_enable_drafter_probs(self)
     self._adaptive_probs_event = torch.cuda.Event()
     self._adaptive_probs_pinned = torch.empty(
         (self.max_num_reqs, num_spec),
@@ -94,6 +92,12 @@ def _dcut_init_controller(self) -> None:
         pin_memory=self.pin_memory,
     )
     logger.info("D-Cut adaptive verify ENABLED (config=%s).", cfg_path)
+
+
+def _dcut_enable_drafter_probs(runner) -> None:
+    drafter = getattr(runner, "drafter", None)
+    if drafter is not None and hasattr(drafter, "needs_draft_probs"):
+        drafter.needs_draft_probs = True
 
 
 def _dcut_truncate(self, scheduler_output):
@@ -187,6 +191,7 @@ def _maybe_process_adaptive_probs(self) -> None:
 
 def profile_adaptive_cost(self) -> None:
     if getattr(self, "_verify_adaptive_controller", None) is not None:
+        _dcut_enable_drafter_probs(self)
         self._verify_adaptive_controller.profile_cost_table(self)
 
 
@@ -374,6 +379,64 @@ def _patch_proposer() -> None:
     proposer_cls._dcut_patched = True
 
 
+def _patch_ascend_proposer_class(proposer_cls) -> None:
+    if proposer_cls.__dict__.get("_dcut_probs_patched", False):
+        return
+
+    orig_propose = proposer_cls._propose
+
+    def _propose(self, *args, **kwargs):
+        self._last_selected_probs = None
+        self._dcut_selected_probs_steps = []
+        out = orig_propose(self, *args, **kwargs)
+        if getattr(self, "needs_draft_probs", False):
+            steps = getattr(self, "_dcut_selected_probs_steps", [])
+            if steps:
+                min_rows = min(step.shape[0] for step in steps)
+                if min_rows > 0:
+                    stacked = torch.stack([step[:min_rows] for step in steps], dim=1)
+                    num_spec = getattr(self, "num_speculative_tokens", stacked.shape[1])
+                    if stacked.shape[1] < num_spec:
+                        pad = stacked.new_ones((min_rows, num_spec - stacked.shape[1]))
+                        stacked = torch.cat([stacked, pad], dim=1)
+                    self._last_selected_probs = stacked[:, :num_spec].contiguous()
+        return out
+
+    def compute_draft_token_ids(self, hidden_states):
+        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
+        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
+            draft_token_ids = torch.argmax(logits, dim=-1)
+        else:
+            logits = logits.contiguous()
+            draft_token_ids = torch.argmax(logits, dim=-1)
+            bias = torch.index_select(
+                self.model.draft_id_to_target_id,
+                dim=0,
+                index=draft_token_ids.view(-1),
+            ).view(draft_token_ids.shape)
+            target_token_ids = draft_token_ids + bias
+            if getattr(self, "needs_draft_probs", False):
+                probs = torch.softmax(logits, dim=-1)
+                selected = torch.gather(probs, dim=-1, index=draft_token_ids.view(-1, 1)).squeeze(-1)
+                self._dcut_selected_probs_steps.append(selected.detach())
+            return target_token_ids
+
+        if getattr(self, "needs_draft_probs", False):
+            probs = torch.softmax(logits, dim=-1)
+            selected = torch.gather(probs, dim=-1, index=draft_token_ids.view(-1, 1)).squeeze(-1)
+            self._dcut_selected_probs_steps.append(selected.detach())
+        return draft_token_ids
+
+    def take_last_selected_probs(self):
+        return getattr(self, "_last_selected_probs", None)
+
+    proposer_cls._propose = _propose
+    proposer_cls.compute_draft_token_ids = compute_draft_token_ids
+    proposer_cls.take_last_selected_probs = take_last_selected_probs
+    proposer_cls._dcut_probs_patched = True
+    logger.info("D-Cut patched Ascend proposer class: %s.%s", proposer_cls.__module__, proposer_cls.__name__)
+
+
 def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
     records = getattr(runner, "_dcut_last_cut_records", []) or []
     total_before = sum(record["original_len"] for record in records)
@@ -404,6 +467,9 @@ def _patch_runner_class(runner_cls) -> None:
 
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         if getattr(self, "_verify_adaptive_controller", None) is not None:
+            _dcut_enable_drafter_probs(self)
+            if getattr(self, "_adaptive_probs_pending", False):
+                _maybe_process_adaptive_probs(self)
             scheduler_output = _dcut_truncate(self, scheduler_output)
             batch_size = len(getattr(scheduler_output, "num_scheduled_tokens", {}) or {})
             start = time.perf_counter()
@@ -490,6 +556,10 @@ def _patch_loaded_ascend_classes() -> None:
     if ascend_worker_m is not None and hasattr(ascend_worker_m, "NPUWorker"):
         _patch_worker_class(ascend_worker_m.NPUWorker)
 
+    ascend_proposer_m = sys.modules.get("vllm_ascend.spec_decode.llm_base_proposer")
+    if ascend_proposer_m is not None and hasattr(ascend_proposer_m, "AscendSpecDecodeBaseProposer"):
+        _patch_ascend_proposer_class(ascend_proposer_m.AscendSpecDecodeBaseProposer)
+
 
 def _install_ascend_import_hook() -> None:
     if getattr(builtins, "_dcut_import_hook_installed", False):
@@ -499,8 +569,14 @@ def _install_ascend_import_hook() -> None:
 
     def dcut_import(name, globals=None, locals=None, fromlist=(), level=0):
         module = original_import(name, globals, locals, fromlist, level)
-        if name in {"vllm_ascend.worker.model_runner_v1", "vllm_ascend.worker.worker"} or name.startswith(
-            "vllm_ascend.worker"
+        if (
+            name in {
+                "vllm_ascend.worker.model_runner_v1",
+                "vllm_ascend.worker.worker",
+                "vllm_ascend.spec_decode.llm_base_proposer",
+            }
+            or name.startswith("vllm_ascend.worker")
+            or name.startswith("vllm_ascend.spec_decode")
         ):
             _patch_loaded_ascend_classes()
         return module
