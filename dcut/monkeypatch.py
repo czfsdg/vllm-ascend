@@ -158,15 +158,18 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
     if probs is None:
         return
     num_reqs = self.input_batch.num_reqs
+    rows = min(num_reqs, probs.shape[0], self._adaptive_probs_pinned.shape[0])
+    if rows <= 0:
+        return
     self._adaptive_probs_pending = True
-    self._adaptive_num_reqs = num_reqs
-    self._adaptive_req_ids = self.input_batch.req_ids.copy()
+    self._adaptive_num_reqs = rows
+    self._adaptive_req_ids = self.input_batch.req_ids[:rows].copy()
     self._adaptive_active = {
         self.input_batch.req_ids[i]
-        for i in range(num_reqs)
+        for i in range(rows)
         if self.input_batch.num_computed_tokens_cpu[i] >= self.input_batch.num_prompt_tokens[i]
     }
-    self._adaptive_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
+    self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=True)
     self._adaptive_probs_event.record()
 
 
@@ -391,15 +394,21 @@ def _patch_ascend_proposer_class(proposer_cls) -> None:
         out = orig_propose(self, *args, **kwargs)
         if getattr(self, "needs_draft_probs", False):
             steps = getattr(self, "_dcut_selected_probs_steps", [])
-            if steps:
-                min_rows = min(step.shape[0] for step in steps)
-                if min_rows > 0:
-                    stacked = torch.stack([step[:min_rows] for step in steps], dim=1)
-                    num_spec = getattr(self, "num_speculative_tokens", stacked.shape[1])
-                    if stacked.shape[1] < num_spec:
-                        pad = stacked.new_ones((min_rows, num_spec - stacked.shape[1]))
-                        stacked = torch.cat([stacked, pad], dim=1)
-                    self._last_selected_probs = stacked[:, :num_spec].contiguous()
+            expected_rows = out.shape[0] if torch.is_tensor(out) and out.ndim >= 1 else 0
+            if steps and expected_rows > 0:
+                aligned_steps = []
+                for step in steps:
+                    if step.shape[0] >= expected_rows:
+                        aligned_steps.append(step[:expected_rows])
+                    else:
+                        pad = step.new_ones((expected_rows - step.shape[0],))
+                        aligned_steps.append(torch.cat([step, pad], dim=0))
+                stacked = torch.stack(aligned_steps, dim=1)
+                num_spec = getattr(self, "num_speculative_tokens", stacked.shape[1])
+                if stacked.shape[1] < num_spec:
+                    pad = stacked.new_ones((expected_rows, num_spec - stacked.shape[1]))
+                    stacked = torch.cat([stacked, pad], dim=1)
+                self._last_selected_probs = stacked[:, :num_spec].contiguous()
         return out
 
     def compute_draft_token_ids(self, hidden_states):
@@ -439,6 +448,8 @@ def _patch_ascend_proposer_class(proposer_cls) -> None:
 
 def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
     records = getattr(runner, "_dcut_last_cut_records", []) or []
+    if not records:
+        return
     total_before = sum(record["original_len"] for record in records)
     total_after = sum(record["verify_len"] for record in records)
     controller = getattr(runner, "_verify_adaptive_controller", None)
