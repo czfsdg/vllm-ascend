@@ -86,7 +86,10 @@ def _dcut_init_controller(self) -> None:
         device=self.device,
     )
     _dcut_enable_drafter_probs(self)
-    self._adaptive_probs_event = torch.cuda.Event()
+    # Use a synchronous CPU copy for draft probabilities.  NPU Event
+    # synchronization can surface unrelated asynchronous ACL errors and abort
+    # the engine; this path is control-plane only, so stability is preferred.
+    self._adaptive_probs_event = None
     self._adaptive_probs_pinned = torch.empty(
         (self.max_num_reqs, num_spec),
         dtype=torch.float32,
@@ -192,12 +195,7 @@ def _dcut_truncate(self, scheduler_output):
 
 
 def _dcut_queue_probs(self, zeros_only: bool) -> None:
-    if (
-        zeros_only
-        or self._adaptive_probs_pending
-        or self._adaptive_probs_pinned is None
-        or self._adaptive_probs_event is None
-    ):
+    if zeros_only or self._adaptive_probs_pending or self._adaptive_probs_pinned is None:
         return
     drafter = getattr(self, "drafter", None)
     if drafter is None or not hasattr(drafter, "take_last_selected_probs"):
@@ -217,15 +215,15 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
         for i in range(rows)
         if self.input_batch.num_computed_tokens_cpu[i] >= self.input_batch.num_prompt_tokens[i]
     }
-    self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=True)
-    self._adaptive_probs_event.record()
+    self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=False)
+    if self._adaptive_probs_event is not None:
+        self._adaptive_probs_event.record()
 
 
 def _maybe_process_adaptive_probs(self) -> None:
     if not self._adaptive_probs_pending:
         return
-    assert self._adaptive_probs_event is not None
-    if not self._adaptive_probs_event.query():
+    if self._adaptive_probs_event is not None and not self._adaptive_probs_event.query():
         self._adaptive_probs_event.synchronize()
     self._adaptive_probs_pending = False
     num_reqs = self._adaptive_num_reqs
