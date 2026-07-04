@@ -4,7 +4,8 @@
 Ported as a self-contained vLLM general plugin. Enable with:
 
     cd dcut && pip install -e .
-    export VLLM_DCUT_CONFIG=/path/to/verify_adaptive_config.json
+    export DCUT_ENABLE=1
+    export DCUT_CONFIG=/path/to/verify_adaptive_config.json
 
 The drafter still proposes ``num_speculative_tokens`` every step, while the
 verifier checks a batch-adaptive subset selected from draft probabilities and a
@@ -31,7 +32,8 @@ from .verify_adaptive_controller import VerifyAdaptiveController
 
 logger = init_logger(f"vllm.{__name__}")
 _INSTALLED = False
-ENV_CONFIG = "VLLM_DCUT_CONFIG"
+ENV_CONFIG = "DCUT_CONFIG"
+ENV_ENABLE = "DCUT_ENABLE"
 
 
 def _supports_adaptive_verify(spec_cfg: Any) -> bool:
@@ -52,13 +54,17 @@ def _dcut_init_controller(self) -> None:
     self._adaptive_active = set()
     self._dcut_last_cut_records = []
 
+    dcut_enabled = os.environ.get(ENV_ENABLE, "0").lower() in {"1", "true", "yes", "on"}
     cfg_path = os.environ.get(ENV_CONFIG) or None
-    if not cfg_path:
+    if not dcut_enabled and not cfg_path:
+        return
+    if dcut_enabled and not cfg_path:
+        logger.warning("DCUT_ENABLE is set but DCUT_CONFIG is empty; D-Cut disabled.")
         return
     spec_cfg = getattr(self, "speculative_config", None)
     if not _supports_adaptive_verify(spec_cfg):
         logger.warning(
-            "VLLM_DCUT_CONFIG is set but the speculative method does not support adaptive verifier step-length "
+            "DCUT_CONFIG is set but the speculative method does not support adaptive verifier step-length "
             "(requires dflash or draft_model+parallel_drafting); D-Cut disabled."
         )
         return
@@ -362,17 +368,15 @@ def _patch_proposer() -> None:
 
 def _log_dcut_verify_result(runner, elapsed_ms: float) -> None:
     records = getattr(runner, "_dcut_last_cut_records", []) or []
-    if not records:
-        return
     total_before = sum(record["original_len"] for record in records)
     total_after = sum(record["verify_len"] for record in records)
-    logger.info(
-        "D-Cut target verify finished: cut draft tokens %d -> %d, elapsed=%.3f ms, details=%s",
-        total_before,
-        total_after,
-        elapsed_ms,
-        records,
+    message = (
+        "D-Cut target verify finished: "
+        f"cut draft tokens {total_before} -> {total_after}, "
+        f"elapsed={elapsed_ms:.3f} ms, details={records}"
     )
+    print(message, flush=True)
+    logger.info(message)
 
 
 def _patch_runner() -> None:
@@ -466,5 +470,5 @@ def install(*args, **kwargs) -> None:
     _INSTALLED = True
     logger.info(
         "D-Cut adaptive-verify monkey patch installed "
-        "(active only if VLLM_DCUT_CONFIG is set + method is dflash/PARD)."
+        "(active only if DCUT_ENABLE=1 plus DCUT_CONFIG is set + method is dflash/PARD)."
     )

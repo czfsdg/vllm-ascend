@@ -12,7 +12,7 @@ class VerifyAdaptiveConfig:
     """Config for the verifier adaptive step-length controller.
 
     ``query_len = 1 (anchor) + draft_len``.
-    Load from the JSON path in ``VLLM_DCUT_CONFIG``. Unknown keys are ignored.
+    Load from the JSON path in ``DCUT_CONFIG``. Unknown keys are ignored.
     """
 
     # batch-size axis

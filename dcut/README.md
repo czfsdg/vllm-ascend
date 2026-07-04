@@ -12,7 +12,9 @@ pip install -e .
 ## Enable
 
 ```bash
-export VLLM_DCUT_CONFIG=/path/to/verify_adaptive_config.json
+export VLLM_PLUGINS=ascend,dcut_adaptive_verify
+export DCUT_ENABLE=1
+export DCUT_CONFIG=/path/to/verify_adaptive_config.json
 vllm serve <model> --speculative-config '{"method":"dflash","model":"<draft>","num_speculative_tokens":15}'
 ```
 
@@ -23,4 +25,4 @@ The plugin prints every target verification result after verification finishes:
 - per-request `original_len`, `verify_len`, and `cut_tokens`
 - target verifier elapsed time in milliseconds
 
-See `verify_adaptive_config.example.json` for the config schema.
+See `verify_adaptive_config.example.json` for the config schema.  For the Qwen3.5-9B DFlash Ascend launch template, use `run_qwen35_dcut_ascend.sh`.
