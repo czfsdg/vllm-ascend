@@ -566,6 +566,31 @@ def _profile_startup_cost_table(runner) -> str:
     return "npu_profile"
 
 
+def _ensure_dcut_startup_profiled(runner) -> None:
+    cost_table = getattr(runner, "dcut_cost_table", None)
+    if cost_table is None or getattr(runner, "dcut_startup_profile_done", False):
+        return
+
+    startup_profile_source = _profile_startup_cost_table(runner)
+    startup_profile_unit = "ms" if startup_profile_source == "npu_profile" else "unavailable"
+    runner.dcut_startup_profile_source = startup_profile_source
+    runner.dcut_startup_profile_unit = startup_profile_unit
+    runner.dcut_startup_profile_done = True
+    _visible_log(
+        "info",
+        "[dcut][cost-table][simulation] source=%s unit=%s min_profile_samples=%d trim_largest_samples=%d",
+        startup_profile_source,
+        startup_profile_unit,
+        cost_table.min_profile_samples,
+        cost_table.trim_largest_samples,
+    )
+    _log_cost_table_startup(
+        cost_table,
+        startup_profile_source,
+        startup_profile_unit,
+    )
+
+
 def _format_batch_cut_plan(runner, decision) -> str:
     per_request_acceptance = getattr(runner, "dcut_last_per_request_acceptance", None)
     if per_request_acceptance:
@@ -640,7 +665,7 @@ def _log_acceptance_result(runner, acceptance_source: str) -> None:
         "[dcut][result] acceptance_source=%s acceptance_rate=%.3f "
         "effective_tokens=%s drafted_tokens=%s accepted_draft_tokens=%s "
         "per_request_acceptance=%s verify_elapsed_ms=%s draft_elapsed_ms=%s "
-        "target_elapsed_ms=%s planned_cut=%s result_count=%d",
+        "target_elapsed_ms=%s planned_cut=%s q_tokens=%s q_bucket=%s result_count=%d",
         acceptance_source,
         getattr(runner, "dcut_observed_acceptance_rate", UNKNOWN_ACCEPTANCE_RATE),
         getattr(runner, "dcut_last_accepted_tokens", "unknown"),
@@ -651,6 +676,8 @@ def _log_acceptance_result(runner, acceptance_source: str) -> None:
         getattr(runner, "dcut_last_draft_elapsed_ms", None),
         getattr(runner, "dcut_last_target_elapsed_ms", None),
         getattr(runner, "dcut_last_planned_cut", None),
+        getattr(runner, "dcut_last_q_tokens", None),
+        getattr(runner, "dcut_last_q_bucket", None),
         result_count,
     )
 
@@ -666,6 +693,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
     original_init = npu_model_runner.__init__
     original_propose = npu_model_runner.propose_draft_token_ids
     original_bookkeeping = getattr(npu_model_runner, "_bookkeeping_sync", None)
+    original_initialize_kv_cache = getattr(npu_model_runner, "initialize_kv_cache", None)
 
     @wraps(original_init)
     def init_with_dcut(self, *args, **kwargs):
@@ -686,21 +714,9 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         )
         _log_cost_table_prediction(self.dcut_cost_table, config_source)
         _log_cost_table_warmup(self.dcut_cost_table)
-        startup_profile_source = _profile_startup_cost_table(self)
-        startup_profile_unit = "ms" if startup_profile_source == "npu_profile" else "unavailable"
-        _visible_log(
-            "info",
-            "[dcut][cost-table][simulation] source=%s unit=%s min_profile_samples=%d trim_largest_samples=%d",
-            startup_profile_source,
-            startup_profile_unit,
-            self.dcut_cost_table.min_profile_samples,
-            self.dcut_cost_table.trim_largest_samples,
-        )
-        _log_cost_table_startup(
-            self.dcut_cost_table,
-            startup_profile_source,
-            startup_profile_unit,
-        )
+        self.dcut_startup_profile_done = False
+        self.dcut_startup_profile_source = None
+        self.dcut_startup_profile_unit = None
         self.dcut_policy = DcutPolicy(
             self.dcut_cost_table,
             default_acceptance_rate=UNKNOWN_ACCEPTANCE_RATE,
@@ -723,6 +739,8 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         self.dcut_last_draft_elapsed_ms = None
         self.dcut_last_target_elapsed_ms = None
         self.dcut_last_planned_cut = None
+        self.dcut_last_q_tokens = None
+        self.dcut_last_q_bucket = None
         _visible_log(
             "info",
             "[dcut][cost-table] initialized: enabled=%s config=%s max_verify_len=%d "
@@ -743,6 +761,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
     def propose_with_dcut(self, *args, **kwargs):
         policy = getattr(self, "dcut_policy", None)
         if policy is not None and _env_flag("DCUT_ENABLE", "1"):
+            _ensure_dcut_startup_profiled(self)
             requested_len = _num_speculative_tokens(self)
             sampled_token_ids = args[0] if args else kwargs.get("sampled_token_ids")
             acceptance_rate, acceptance_source = _acceptance_rate_from_runner(
@@ -761,6 +780,11 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 acceptance_rate=acceptance_rate,
             )
             self.dcut_last_decision = decision
+            self.dcut_last_q_tokens = _q_tokens_for_decision(decision.batch_size, decision.selected_len)
+            cost_table = getattr(self, "dcut_cost_table", None)
+            self.dcut_last_q_bucket = (
+                cost_table.q_bucket_for(self.dcut_last_q_tokens) if cost_table is not None else None
+            )
             _log_dcut_plan(self, decision, acceptance_source)
             _synchronize_npu_for_profile()
             self.dcut_verify_start_time = time.perf_counter()
@@ -788,6 +812,17 @@ def _patch_runner_class(npu_model_runner: type) -> None:
             )
             return proposed
         return original_propose(self, *args, **kwargs)
+
+    if callable(original_initialize_kv_cache):
+
+        @wraps(original_initialize_kv_cache)
+        def initialize_kv_cache_with_dcut(self, *args, **kwargs):
+            result = original_initialize_kv_cache(self, *args, **kwargs)
+            if _env_flag("DCUT_ENABLE", "1"):
+                _ensure_dcut_startup_profiled(self)
+            return result
+
+        npu_model_runner.initialize_kv_cache = initialize_kv_cache_with_dcut
 
     if callable(original_bookkeeping):
 

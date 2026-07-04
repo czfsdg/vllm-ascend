@@ -116,10 +116,50 @@ def test_patch_runner_installs_default_dummy_profile_hook(monkeypatch):
 
     plugin._patch_runner_class(Runner)
     runner = Runner()
+    assert runner.propose_draft_token_ids() == [[1, 2]]
 
     assert callable(runner._adaptive_profile_run)
     assert runner.dummy_calls
     assert any("[dcut][cost-table][startup] source=npu_profile unit=ms" in log for log in logs)
+
+
+def test_startup_profile_waits_for_kv_cache_initialization(monkeypatch):
+    class FreshSpeculativeConfig:
+        method = "dflash"
+        num_speculative_tokens = 2
+
+    class FreshInputBatch:
+        num_reqs = 2
+
+    class Runner:
+        speculative_config = FreshSpeculativeConfig()
+        input_batch = FreshInputBatch()
+
+        def __init__(self):
+            self.dummy_calls = []
+
+        def initialize_kv_cache(self):
+            self.kv_cache_config = object()
+            return "kv_ready"
+
+        def _dummy_run(self, **kwargs):
+            assert hasattr(self, "kv_cache_config")
+            self.dummy_calls.append(kwargs)
+
+        def propose_draft_token_ids(self):
+            return [[1, 2]]
+
+    monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
+    monkeypatch.setattr(plugin, "_PATCHED", False)
+
+    plugin._patch_runner_class(Runner)
+    runner = Runner()
+
+    assert runner.dummy_calls == []
+    assert runner.initialize_kv_cache() == "kv_ready"
+    assert runner.dummy_calls
+    assert runner.dcut_startup_profile_done is True
+    assert runner.dcut_startup_profile_source == "npu_profile"
 
 
 def test_startup_cost_table_profiles_with_runner_hook():
@@ -310,6 +350,7 @@ def test_acceptance_rate_uses_per_step_sampled_token_lengths(monkeypatch):
     result_logs = [log for log in logs if "[dcut][result]" in log]
     assert "effective_tokens=4" in result_logs[0]
     assert "accepted_draft_tokens=2" in result_logs[0]
+    assert "q_tokens=8" in result_logs[0]
 
 
 def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
@@ -347,12 +388,12 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     q_tokens = plugin._q_tokens_for_decision(plugin._batch_size_from_runner(runner), 4)
     q_bucket = runner.dcut_cost_table.q_bucket_for(q_tokens)
     batch_bucket = runner.dcut_cost_table.batch_bucket_for(plugin._batch_size_from_runner(runner))
-    profile_count_before = runner.dcut_cost_table.profile_counts[(batch_bucket, q_bucket)]
+    profile_count_before = runner.dcut_cost_table.profile_counts.get((batch_bucket, q_bucket), 0)
 
     runner.dcut_verify_start_time = plugin.time.perf_counter()
     runner.dcut_last_planned_cut = 4
     runner._bookkeeping_sync()
-    assert runner.dcut_cost_table.profile_counts[(batch_bucket, q_bucket)] == profile_count_before
+    assert runner.dcut_cost_table.profile_counts.get((batch_bucket, q_bucket), 0) == profile_count_before
     assert runner.propose_draft_token_ids(object()) is not None
 
     assert runner.dcut_last_decision.acceptance_rate == 0.625
@@ -372,5 +413,6 @@ def test_acceptance_rate_prefers_bookkeeping_valid_sampled_tokens(monkeypatch):
     assert "draft_elapsed_ms=" in result_logs[0]
     assert "target_elapsed_ms=" in result_logs[0]
     assert "planned_cut=4" in result_logs[0]
+    assert "q_tokens=8" in result_logs[0]
     profile_logs = [log for log in logs if "[dcut][cost-table][profile]" in log]
     assert profile_logs == []
