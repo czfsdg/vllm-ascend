@@ -360,7 +360,7 @@ def _patch_proposer() -> None:
     def _sample_draft_tokens(self, hidden_states, sampling_metadata):
         self._last_selected_probs = None
         out = orig_sample(self, hidden_states, sampling_metadata)
-        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
+        if getattr(self, "needs_draft_probs", False):
             token_ids = out[0]
             full_probs = out[1] if len(out) > 1 else None
             logits = None if full_probs is not None else self.model.compute_logits(hidden_states)
@@ -378,11 +378,13 @@ def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
     records = getattr(runner, "_dcut_last_cut_records", []) or []
     total_before = sum(record["original_len"] for record in records)
     total_after = sum(record["verify_len"] for record in records)
+    controller = getattr(runner, "_verify_adaptive_controller", None)
+    decision = getattr(controller, "_last_decision", None) if controller is not None else None
     message = (
         "D-Cut target verify finished: "
         f"batch_size={batch_size}, "
         f"cut draft tokens {total_before} -> {total_after}, "
-        f"elapsed={elapsed_ms:.3f} ms, details={records}"
+        f"elapsed={elapsed_ms:.3f} ms, decision={decision}, details={records}"
     )
     print(message, flush=True)
     logger.info(message)
