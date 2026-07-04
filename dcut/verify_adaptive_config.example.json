@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "fallback_on_profile_error": true,
+  "warmup_batch_sizes": [2, 4, 8, 16, 32, 64, 128, 256],
+  "min_warmup_batch_size": 2,
+  "max_warmup_batch_size": null,
+  "min_query_len_per_req": 2,
+  "max_query_len_per_req": null,
+  "query_len_step_per_req": 2,
+  "warmup_seq_lens": 4096,
+  "n_warmup_iters": 1,
+  "n_measure_iters": 2,
+  "cost_table_dump_path": null
+}
