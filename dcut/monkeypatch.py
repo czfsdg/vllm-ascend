@@ -102,10 +102,21 @@ def _dcut_enable_drafter_probs(runner) -> None:
         drafter.needs_draft_probs = True
 
 
+def _dcut_has_prefill_or_encoder_work(scheduler_output) -> bool:
+    if getattr(scheduler_output, "scheduled_new_reqs", None):
+        return True
+    scheduled_encoder_inputs = getattr(scheduler_output, "scheduled_encoder_inputs", None)
+    return bool(scheduled_encoder_inputs)
+
+
 def _dcut_truncate(self, scheduler_output):
     ctrl = self._verify_adaptive_controller
     self._dcut_last_cut_records = []
-    if ctrl is None or not scheduler_output.scheduled_spec_decode_tokens:
+    if (
+        ctrl is None
+        or not scheduler_output.scheduled_spec_decode_tokens
+        or _dcut_has_prefill_or_encoder_work(scheduler_output)
+    ):
         return scheduler_output
 
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
