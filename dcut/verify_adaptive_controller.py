@@ -7,6 +7,7 @@ import bisect
 import json
 import math
 import os
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -124,7 +125,7 @@ class VerifyAdaptiveController:
             levels.append(max_q)
         return sorted(set(levels))
 
-    def _fill_fallback_cost_table(self, reason: str) -> None:
+    def _fill_fallback_cost_table(self, reason: str, warn: bool = True) -> None:
         self._cost_table.clear()
         self._cost_records.clear()
         self._sorted_sql_per_bs.clear()
@@ -150,10 +151,15 @@ class VerifyAdaptiveController:
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs.keys()) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
-        logger.warning("VerifyAdaptiveController: using fallback cost table because profiling failed: %s", reason)
+        log_fn = logger.warning if warn else logger.info
+        log_fn("VerifyAdaptiveController: using fallback cost table: %s", reason)
 
     def profile_cost_table(self, runner: Any) -> None:
         if not self.config.enabled:
+            return
+        if self.config.skip_runtime_profiling:
+            self._fill_fallback_cost_table("skip_runtime_profiling=true", warn=False)
+            self._dump_cost_table_if_requested()
             return
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
             logger.info(
@@ -249,22 +255,24 @@ class VerifyAdaptiveController:
         draft_lens = result["draft_lens"]
         for req_id, draft_len in zip(active_req_ids, draft_lens):
             self._adaptive_draft_lens[req_id] = draft_len
+        draft_len_hist = dict(sorted(Counter(draft_lens).items()))
         self._last_decision = {
             "batch_size": batch_size,
             "bs_key": bs_key,
             "best_Q": result["best_Q"],
             "best_S": result["best_S"],
             "best_score": result["best_score"],
+            "draft_len_hist": draft_len_hist,
             "draft_lens_by_req": dict(zip(active_req_ids, draft_lens)),
         }
         logger.info(
-            "D-Cut decision: bs=%d bs_key=%d best_Q=%d best_S=%d score=%.4f draft_lens=%s",
+            "D-Cut decision: bs=%d bs_key=%d best_Q=%d best_S=%d score=%.4f draft_len_hist=%s",
             batch_size,
             bs_key,
             result["best_Q"],
             result["best_S"],
             result["best_score"],
-            self._last_decision["draft_lens_by_req"],
+            draft_len_hist,
         )
 
     def get_adaptive_draft_len(self, req_id: str) -> int | None:

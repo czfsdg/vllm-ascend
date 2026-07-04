@@ -48,6 +48,9 @@ def _supports_adaptive_verify(spec_cfg: Any) -> bool:
 
 
 def _dcut_init_controller(self) -> None:
+    if getattr(self, "_dcut_controller_initialized", False):
+        return
+    self._dcut_controller_initialized = True
     self._verify_adaptive_controller = None
     self._adaptive_probs_event = None
     self._adaptive_probs_pinned = None
@@ -452,16 +455,34 @@ def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
         return
     total_before = sum(record["original_len"] for record in records)
     total_after = sum(record["verify_len"] for record in records)
+    verify_len_hist: dict[int, int] = {}
+    for record in records:
+        verify_len = int(record["verify_len"])
+        verify_len_hist[verify_len] = verify_len_hist.get(verify_len, 0) + 1
+    verify_len_hist = dict(sorted(verify_len_hist.items()))
     controller = getattr(runner, "_verify_adaptive_controller", None)
     decision = getattr(controller, "_last_decision", None) if controller is not None else None
-    message = (
-        "D-Cut target verify finished: "
-        f"batch_size={batch_size}, "
-        f"cut draft tokens {total_before} -> {total_after}, "
-        f"elapsed={elapsed_ms:.3f} ms, decision={decision}, details={records}"
+    decision_summary = None
+    if decision is not None:
+        decision_summary = {
+            "bs_key": decision.get("bs_key"),
+            "best_Q": decision.get("best_Q"),
+            "best_S": decision.get("best_S"),
+            "best_score": decision.get("best_score"),
+            "draft_len_hist": decision.get("draft_len_hist"),
+        }
+    logger.info(
+        "D-Cut target verify finished: batch_size=%d, draft_tokens=%d->%d, cut=%d, "
+        "elapsed=%.3f ms, verify_len_hist=%s, decision=%s",
+        batch_size,
+        total_before,
+        total_after,
+        total_before - total_after,
+        elapsed_ms,
+        verify_len_hist,
+        decision_summary,
     )
-    print(message, flush=True)
-    logger.info(message)
+    logger.debug("D-Cut target verify details: %s", records)
 
 
 def _patch_runner_class(runner_cls) -> None:

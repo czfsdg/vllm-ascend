@@ -1,6 +1,7 @@
 {
   "enabled": true,
   "fallback_on_profile_error": true,
+  "skip_runtime_profiling": true,
   "warmup_batch_sizes": [2, 4, 8, 16, 32, 64, 128, 256],
   "min_warmup_batch_size": 2,
   "max_warmup_batch_size": null,

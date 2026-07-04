@@ -32,6 +32,7 @@ class VerifyAdaptiveConfig:
     cost_table_dump_path: str | None = None
     enabled: bool = True
     fallback_on_profile_error: bool = True
+    skip_runtime_profiling: bool = False
 
     @classmethod
     def from_json(cls, path: str) -> VerifyAdaptiveConfig:
@@ -70,3 +71,5 @@ class VerifyAdaptiveConfig:
             raise ValueError("max_warmup_batch_size must be >= 1.")
         if not isinstance(self.fallback_on_profile_error, bool):
             raise ValueError("fallback_on_profile_error must be a bool.")
+        if not isinstance(self.skip_runtime_profiling, bool):
+            raise ValueError("skip_runtime_profiling must be a bool.")
