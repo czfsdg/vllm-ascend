@@ -147,8 +147,9 @@ def _dcut_truncate(self, scheduler_output):
         )
         if cut_len < original_len:
             diff = original_len - cut_len
-            tokens_delta += diff
-            new_num_sched[req_id] -= diff
+            updated_num_scheduled = max(1, new_num_sched[req_id] - diff)
+            tokens_delta += new_num_sched[req_id] - updated_num_scheduled
+            new_num_sched[req_id] = updated_num_scheduled
             if cut_len == 0:
                 del new_spec[req_id]
             else:
