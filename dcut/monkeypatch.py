@@ -366,12 +366,13 @@ def _patch_proposer() -> None:
     proposer_cls._dcut_patched = True
 
 
-def _log_dcut_verify_result(runner, elapsed_ms: float) -> None:
+def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
     records = getattr(runner, "_dcut_last_cut_records", []) or []
     total_before = sum(record["original_len"] for record in records)
     total_after = sum(record["verify_len"] for record in records)
     message = (
         "D-Cut target verify finished: "
+        f"batch_size={batch_size}, "
         f"cut draft tokens {total_before} -> {total_after}, "
         f"elapsed={elapsed_ms:.3f} ms, details={records}"
     )
@@ -379,11 +380,8 @@ def _log_dcut_verify_result(runner, elapsed_ms: float) -> None:
     logger.info(message)
 
 
-def _patch_runner() -> None:
-    import vllm.v1.worker.gpu_model_runner as m
-
-    runner_cls = m.GPUModelRunner
-    if getattr(runner_cls, "_dcut_patched", False):
+def _patch_runner_class(runner_cls) -> None:
+    if runner_cls.__dict__.get("_dcut_patched", False):
         return
 
     orig_init = runner_cls.__init__
@@ -397,10 +395,11 @@ def _patch_runner() -> None:
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         if getattr(self, "_verify_adaptive_controller", None) is not None:
             scheduler_output = _dcut_truncate(self, scheduler_output)
+            batch_size = len(getattr(scheduler_output, "num_scheduled_tokens", {}) or {})
             start = time.perf_counter()
             out = orig_exec(self, scheduler_output, intermediate_tensors)
             elapsed_ms = (time.perf_counter() - start) * 1e3
-            _log_dcut_verify_result(self, elapsed_ms)
+            _log_dcut_verify_result(self, batch_size, elapsed_ms)
             return out
         return orig_exec(self, scheduler_output, intermediate_tensors)
 
@@ -438,13 +437,24 @@ def _patch_runner() -> None:
     runner_cls.profile_adaptive_cost = profile_adaptive_cost
     runner_cls._maybe_process_adaptive_probs = _maybe_process_adaptive_probs
     runner_cls._dcut_patched = True
+    logger.info("D-Cut patched runner class: %s.%s", runner_cls.__module__, runner_cls.__name__)
 
 
-def _patch_worker() -> None:
-    import vllm.v1.worker.gpu_worker as m
+def _patch_runner() -> None:
+    import vllm.v1.worker.gpu_model_runner as m
 
-    worker_cls = m.Worker
-    if getattr(worker_cls, "_dcut_patched", False):
+    _patch_runner_class(m.GPUModelRunner)
+
+    import importlib.util
+
+    if importlib.util.find_spec("vllm_ascend.worker.model_runner_v1") is not None:
+        import vllm_ascend.worker.model_runner_v1 as ascend_m
+
+        _patch_runner_class(ascend_m.NPUModelRunner)
+
+
+def _patch_worker_class(worker_cls) -> None:
+    if worker_cls.__dict__.get("_dcut_patched", False):
         return
     orig_warmup = worker_cls.compile_or_warm_up_model
 
@@ -457,6 +467,20 @@ def _patch_worker() -> None:
 
     worker_cls.compile_or_warm_up_model = compile_or_warm_up_model
     worker_cls._dcut_patched = True
+    logger.info("D-Cut patched worker class: %s.%s", worker_cls.__module__, worker_cls.__name__)
+
+
+def _patch_worker() -> None:
+    import importlib.util
+
+    import vllm.v1.worker.gpu_worker as m
+
+    _patch_worker_class(m.Worker)
+
+    if importlib.util.find_spec("vllm_ascend.worker.worker") is not None:
+        import vllm_ascend.worker.worker as ascend_worker_m
+
+        _patch_worker_class(ascend_worker_m.NPUWorker)
 
 
 def install(*args, **kwargs) -> None:
