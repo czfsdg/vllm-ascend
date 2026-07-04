@@ -215,7 +215,14 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
         for i in range(rows)
         if self.input_batch.num_computed_tokens_cpu[i] >= self.input_batch.num_prompt_tokens[i]
     }
-    self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=False)
+    probs_device = getattr(probs, "device", None)
+    if probs_device is not None and probs_device.type == "npu":
+        # Ascend fallback probabilities are conservative all-ones values. Avoid
+        # NPU-to-CPU copies here: the copy op synchronizes the stream and can
+        # surface unrelated vector-core failures from earlier verifier kernels.
+        self._adaptive_probs_pinned[:rows].fill_(1.0)
+    else:
+        self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=False)
     if self._adaptive_probs_event is not None:
         self._adaptive_probs_event.record()
 
