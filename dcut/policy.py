@@ -45,14 +45,13 @@ class DcutPolicy:
         for verify_len in range(1, bounded_requested_len + 1):
             q_tokens = bounded_batch_size * verify_len
             if self.cost_table.needs_profile(q_tokens, bounded_batch_size):
-                cost = self.cost_table.get(q_tokens, bounded_batch_size)
                 return CutDecision(
                     requested_len=bounded_requested_len,
-                    selected_len=verify_len,
+                    selected_len=bounded_requested_len,
                     batch_size=bounded_batch_size,
                     acceptance_rate=observed_acceptance,
-                    score=cost.total_cost,
-                    reason="npu_profile_warmup",
+                    score=float("inf"),
+                    reason="npu_profile_unavailable_keep_full_spec_len",
                 )
 
         best_len = 1

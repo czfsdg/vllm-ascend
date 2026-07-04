@@ -116,14 +116,14 @@ def test_policy_profiles_each_len_before_scoring():
     policy = DcutPolicy(table)
 
     first = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
-    assert first.selected_len == 1
-    assert first.reason == "npu_profile_warmup"
+    assert first.selected_len == 3
+    assert first.reason == "npu_profile_unavailable_keep_full_spec_len"
 
     for _ in range(table.min_profile_samples - 1):
         table.update_profile(q_tokens=8, target_cost=100.0, draft_cost=10.0)
     second = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)
-    assert second.selected_len == 1
-    assert second.reason == "npu_profile_warmup"
+    assert second.selected_len == 3
+    assert second.reason == "npu_profile_unavailable_keep_full_spec_len"
 
     table.update_profile(q_tokens=8, target_cost=10.0, draft_cost=1.0)
     third = policy.decide(requested_len=3, batch_size=1, acceptance_rate=0.5)

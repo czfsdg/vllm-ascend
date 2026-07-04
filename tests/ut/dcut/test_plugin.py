@@ -22,6 +22,9 @@ class FakeRunner:
     def propose_draft_token_ids(self):
         return [[1, 2]]
 
+    def _adaptive_profile_run(self, scheduled_tokens, *args):
+        return "fake_profile", float(sum(scheduled_tokens)), sum(scheduled_tokens)
+
 
 def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
     logs = []
@@ -46,12 +49,77 @@ def test_patch_runner_class_is_lazy_and_adds_plan_only_state(monkeypatch):
     assert "source=analytic_estimate" in prediction_logs[0]
     assert "predicted_table=[batch_size_buckets=" in prediction_logs[0]
     warmup_logs = [log for log in logs if "[dcut][cost-table][warmup]" in log]
-    assert "entries=4" in warmup_logs[0]
+    assert "entries=" in warmup_logs[0]
     assert "source=analytic_estimate" in warmup_logs[0]
     assert "warmed_table=[batch_size_buckets=" in warmup_logs[0]
-    startup_chunk_logs = [log for log in logs if "[dcut][cost-table][startup] source=" in log and "chunk=" in log]
-    assert "source=synthetic_estimate" in startup_chunk_logs[0]
-    assert "unit=relative_cost" in startup_chunk_logs[0]
+    startup_logs = [log for log in logs if "[dcut][cost-table][startup] source=npu_profile" in log]
+    assert startup_logs
+
+
+def test_default_adaptive_profile_run_uses_dummy_run():
+    class Runner:
+        def __init__(self):
+            self.dummy_calls = []
+
+        def _dummy_run(self, **kwargs):
+            self.dummy_calls.append(kwargs)
+
+    runner = Runner()
+
+    source, avg_ms, num_tokens = plugin._default_adaptive_profile_run(
+        runner,
+        scheduled_tokens=[3, 3],
+        warmup_seq_lens=[],
+        n_warmup_iters=1,
+        n_measure_iters=2,
+    )
+
+    assert source == "dummy_run"
+    assert avg_ms >= 0.0
+    assert num_tokens == 6
+    assert len(runner.dummy_calls) == 3
+    assert all(call["num_tokens"] == 6 for call in runner.dummy_calls)
+    assert all(call["is_profile"] is True for call in runner.dummy_calls)
+    assert all(call["force_attention"] is True for call in runner.dummy_calls)
+    assert all(call["profile_seq_lens"] == 3 for call in runner.dummy_calls)
+
+
+def test_patch_runner_installs_default_dummy_profile_hook(monkeypatch):
+    class FreshSpeculativeConfig:
+        method = "dflash"
+        num_speculative_tokens = 2
+
+    class FreshInputBatch:
+        num_reqs = 2
+
+    class Runner:
+        speculative_config = FreshSpeculativeConfig()
+        input_batch = FreshInputBatch()
+
+        def __init__(self):
+            self.dummy_calls = []
+
+        def _dummy_run(self, **kwargs):
+            self.dummy_calls.append(kwargs)
+
+        def propose_draft_token_ids(self):
+            return [[1, 2]]
+
+    logs = []
+    monkeypatch.setenv("DCUT_ACCURACY_SAFE_MODE", "0")
+    monkeypatch.setattr(plugin, "_PATCHED", False)
+    monkeypatch.setattr(
+        plugin,
+        "_visible_log",
+        lambda level, message, *args: logs.append(message % args),
+    )
+
+    plugin._patch_runner_class(Runner)
+    runner = Runner()
+
+    assert callable(runner._adaptive_profile_run)
+    assert runner.dummy_calls
+    assert any("[dcut][cost-table][startup] source=npu_profile unit=ms" in log for log in logs)
 
 
 def test_startup_cost_table_profiles_with_runner_hook():

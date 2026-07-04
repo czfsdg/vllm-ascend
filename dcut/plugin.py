@@ -6,6 +6,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -401,6 +402,74 @@ def _log_cost_table_warmup(cost_table: DcutCostTable) -> None:
     )
 
 
+def _call_dummy_run_for_profile(runner, num_tokens: int, profile_seq_lens: int) -> None:
+    dummy_run = getattr(runner, "_dummy_run", None)
+    if not callable(dummy_run):
+        raise AttributeError("runner does not provide _dummy_run for D-Cut startup profiling")
+
+    supported_params = inspect.signature(dummy_run).parameters
+    accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in supported_params.values())
+    candidate_kwargs = {
+        "num_tokens": num_tokens,
+        "with_prefill": False,
+        "force_attention": True,
+        "uniform_decode": False,
+        "is_profile": True,
+        "allow_microbatching": True,
+        "profile_seq_lens": profile_seq_lens,
+        "profile_cpp": False,
+    }
+    if accepts_var_kwargs:
+        dummy_run(**candidate_kwargs)
+        return
+    kwargs = {name: value for name, value in candidate_kwargs.items() if name in supported_params}
+    if "num_tokens" not in kwargs:
+        dummy_run(num_tokens)
+        return
+    dummy_run(**kwargs)
+
+
+def _default_adaptive_profile_run(
+    runner,
+    scheduled_tokens: list[int],
+    warmup_seq_lens: list[int] | None = None,
+    n_warmup_iters: int = 1,
+    n_measure_iters: int = 1,
+) -> tuple[str, float, int]:
+    """Profile one D-Cut startup bucket by executing the runner's dummy path.
+
+    This is the built-in fallback used when vLLM does not expose a dedicated
+    ``_adaptive_profile_run`` helper.  It still executes the real model runner
+    dummy forward path on the device, so the resulting cost table is measured
+    startup data rather than the analytic bootstrap estimate.
+    """
+    if not scheduled_tokens:
+        raise ValueError("scheduled_tokens must not be empty")
+    num_tokens = sum(max(int(tokens), 0) for tokens in scheduled_tokens)
+    if num_tokens <= 0:
+        raise ValueError("scheduled_tokens must sum to a positive token count")
+    max_query_len = max(max(int(tokens), 1) for tokens in scheduled_tokens)
+    if warmup_seq_lens:
+        profile_seq_lens = max(max(int(seq_len), 1) for seq_len in warmup_seq_lens)
+    else:
+        profile_seq_lens = max_query_len
+
+    for _ in range(max(int(n_warmup_iters), 0)):
+        _call_dummy_run_for_profile(runner, num_tokens, profile_seq_lens)
+        _synchronize_npu_for_profile()
+
+    elapsed_ms_samples: list[float] = []
+    for _ in range(max(int(n_measure_iters), 1)):
+        _synchronize_npu_for_profile()
+        start_time = time.perf_counter()
+        _call_dummy_run_for_profile(runner, num_tokens, profile_seq_lens)
+        _synchronize_npu_for_profile()
+        elapsed_ms_samples.append((time.perf_counter() - start_time) * 1000.0)
+
+    avg_ms = sum(elapsed_ms_samples) / len(elapsed_ms_samples)
+    return "dummy_run", avg_ms, num_tokens
+
+
 def _format_cost_table_bucket_lines(
     cost_table: DcutCostTable,
     buckets_per_line: int = 16,
@@ -438,6 +507,15 @@ def _log_cost_table_startup(cost_table: DcutCostTable, source: str, unit: str) -
         cost_table.min_profile_samples,
         cost_table.trim_largest_samples,
     )
+    if source != "npu_profile":
+        _visible_log(
+            "warning",
+            "[dcut][cost-table][startup] source=%s unit=%s table_ready=False "
+            "reason=missing_or_failed_adaptive_profile_run",
+            source,
+            unit,
+        )
+        return
     for index, line in enumerate(lines, start=1):
         _visible_log(
             "info",
@@ -456,8 +534,7 @@ def _profile_startup_cost_table(runner) -> str:
         return "unavailable"
     profile_run = getattr(runner, "_adaptive_profile_run", None)
     if not callable(profile_run):
-        cost_table.simulate_bootstrap_profiles()
-        return "synthetic_estimate"
+        return "unavailable_missing_profile_hook"
 
     try:
         for batch_size in cost_table.batch_size_buckets:
@@ -466,8 +543,9 @@ def _profile_startup_cost_table(runner) -> str:
             for verify_len in range(1, cost_table.max_verify_len + 1):
                 q_tokens = batch_size * verify_len
                 scheduled_tokens = [verify_len] * batch_size
-                for _ in range(cost_table.min_profile_samples):
-                    profile_result = profile_run(scheduled_tokens, [], 1, 1)
+                for sample_index in range(cost_table.min_profile_samples):
+                    warmup_iters = 1 if sample_index == 0 else 0
+                    profile_result = profile_run(scheduled_tokens, [], warmup_iters, 1)
                     if isinstance(profile_result, tuple):
                         avg_ms = float(profile_result[1])
                     else:
@@ -481,11 +559,10 @@ def _profile_startup_cost_table(runner) -> str:
     except Exception as error:  # pragma: no cover - defensive runtime fallback
         _visible_log(
             "warning",
-            "[dcut][cost-table][startup] npu_profile_failed=%s fallback=synthetic_estimate",
+            "[dcut][cost-table][startup] npu_profile_failed=%s fallback=keep_full_spec_len",
             error,
         )
-        cost_table.simulate_bootstrap_profiles()
-        return "synthetic_estimate"
+        return "unavailable_profile_failed"
     return "npu_profile"
 
 
@@ -583,6 +660,9 @@ def _patch_runner_class(npu_model_runner: type) -> None:
     if _PATCHED:
         return
 
+    if not hasattr(npu_model_runner, "_adaptive_profile_run"):
+        npu_model_runner._adaptive_profile_run = _default_adaptive_profile_run
+
     original_init = npu_model_runner.__init__
     original_propose = npu_model_runner.propose_draft_token_ids
     original_bookkeeping = getattr(npu_model_runner, "_bookkeeping_sync", None)
@@ -607,7 +687,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         _log_cost_table_prediction(self.dcut_cost_table, config_source)
         _log_cost_table_warmup(self.dcut_cost_table)
         startup_profile_source = _profile_startup_cost_table(self)
-        startup_profile_unit = "ms" if startup_profile_source == "npu_profile" else "relative_cost"
+        startup_profile_unit = "ms" if startup_profile_source == "npu_profile" else "unavailable"
         _visible_log(
             "info",
             "[dcut][cost-table][simulation] source=%s unit=%s min_profile_samples=%d trim_largest_samples=%d",
