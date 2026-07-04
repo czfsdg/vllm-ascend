@@ -20,7 +20,7 @@ from types import ModuleType
 
 from dcut.config import load_dcut_config
 from dcut.cost_table import DcutCostTable
-from dcut.policy import DcutPolicy
+from dcut.policy import CutDecision, DcutPolicy
 
 logger = logging.getLogger("dcut")
 
@@ -475,13 +475,13 @@ def _format_cost_table_bucket_lines(
     buckets_per_line: int = 16,
 ) -> list[str]:
     bucket_items = []
-    batch_bucket = cost_table.batch_size_buckets[-1]
-    for q_bucket in cost_table.q_buckets:
+    ready_keys = sorted(cost_table.profiled_lens)
+    for batch_bucket, q_bucket in ready_keys:
         entry = cost_table.get(q_bucket, batch_bucket)
         key = (batch_bucket, q_bucket)
         bucket_items.append(
             f"bs={batch_bucket},q={q_bucket}:state={cost_table.profile_state(q_bucket, batch_bucket)},"
-            f"bootstrap_estimates={cost_table.profile_counts.get(key, 0)},"
+            f"profile_samples={cost_table.profile_counts.get(key, 0)},"
             f"target_cost={entry.target_cost:.3f},draft_cost={entry.draft_cost:.3f},"
             f"total_cost={entry.total_cost:.3f}"
         )
@@ -496,12 +496,13 @@ def _log_cost_table_startup(cost_table: DcutCostTable, source: str, unit: str) -
     _visible_log(
         "info",
         "[dcut][cost-table][startup] source=%s unit=%s "
-        "batch_size_buckets=%d q_buckets=%d q_bucket_size=%d "
+        "batch_size_buckets=%d q_buckets=%d profiled_entries=%d q_bucket_size=%d "
         "max_q_tokens=%d min_profile_samples=%d trim_largest_samples=%d",
         source,
         unit,
         len(cost_table.batch_size_buckets),
         len(cost_table.q_buckets),
+        len(cost_table.profiled_lens),
         cost_table.q_bucket_size,
         cost_table.max_q_tokens,
         cost_table.min_profile_samples,
@@ -591,13 +592,63 @@ def _ensure_dcut_startup_profiled(runner) -> None:
     )
 
 
+def _build_per_request_cut_plan(
+    policy: DcutPolicy,
+    requested_len: int,
+    batch_size: int,
+    per_request_acceptance: list[float] | None,
+) -> list[int] | None:
+    if not per_request_acceptance:
+        return None
+    cut_plan = []
+    for acceptance in per_request_acceptance[:batch_size]:
+        request_decision = policy.decide(
+            requested_len=requested_len,
+            batch_size=batch_size,
+            acceptance_rate=acceptance,
+        )
+        cut_plan.append(request_decision.selected_len)
+    return cut_plan or None
+
+
+def _apply_per_request_cut_plan(runner, policy: DcutPolicy, decision: CutDecision) -> CutDecision:
+    per_request_acceptance = getattr(runner, "dcut_last_per_request_acceptance", None)
+    cut_plan = _build_per_request_cut_plan(
+        policy,
+        decision.requested_len,
+        decision.batch_size,
+        per_request_acceptance,
+    )
+    runner.dcut_last_per_request_cuts = cut_plan
+    if not cut_plan:
+        return decision
+
+    selected_len = max(cut_plan)
+    if selected_len == decision.selected_len:
+        return decision
+    reason = decision.reason
+    if selected_len < decision.requested_len:
+        reason = "per_request_cost_cut"
+    elif decision.selected_len < decision.requested_len:
+        reason = "per_request_max_keep_full_spec_len"
+    return CutDecision(
+        requested_len=decision.requested_len,
+        selected_len=selected_len,
+        batch_size=decision.batch_size,
+        acceptance_rate=decision.acceptance_rate,
+        score=decision.score,
+        reason=reason,
+    )
+
+
 def _format_batch_cut_plan(runner, decision) -> str:
     per_request_acceptance = getattr(runner, "dcut_last_per_request_acceptance", None)
     if per_request_acceptance:
-        plan_items = [
-            f"#{index}:accept={acceptance:.3f},cut={decision.selected_len}"
-            for index, acceptance in enumerate(per_request_acceptance)
-        ]
+        per_request_cuts = getattr(runner, "dcut_last_per_request_cuts", None) or []
+        plan_items = []
+        for index, acceptance in enumerate(per_request_acceptance):
+            cut = per_request_cuts[index] if index < len(per_request_cuts) else decision.selected_len
+            plan_items.append(f"#{index}:accept={acceptance:.3f},cut={cut}")
         return "[" + ",".join(plan_items) + "]"
     return f"[batch_size={decision.batch_size},cut={decision.selected_len}]"
 
@@ -733,6 +784,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
         self.dcut_pending_acceptance_rate = None
         self.dcut_pending_acceptance_source = None
         self.dcut_last_per_request_acceptance = None
+        self.dcut_last_per_request_cuts = None
         self.dcut_last_accepted_draft_tokens = None
         self.dcut_verify_start_time = None
         self.dcut_last_verify_elapsed_ms = None
@@ -779,6 +831,7 @@ def _patch_runner_class(npu_model_runner: type) -> None:
                 batch_size=_batch_size_from_runner(self),
                 acceptance_rate=acceptance_rate,
             )
+            decision = _apply_per_request_cut_plan(self, policy, decision)
             self.dcut_last_decision = decision
             self.dcut_last_q_tokens = _q_tokens_for_decision(decision.batch_size, decision.selected_len)
             cost_table = getattr(self, "dcut_cost_table", None)

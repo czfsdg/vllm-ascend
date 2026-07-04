@@ -84,6 +84,23 @@ def test_default_adaptive_profile_run_uses_dummy_run():
     assert all(call["profile_seq_lens"] == 3 for call in runner.dummy_calls)
 
 
+def test_startup_log_formats_only_profiled_ready_buckets():
+    cost_table = plugin.DcutCostTable(
+        max_verify_len=2,
+        max_q_tokens=16,
+        max_batch_size=4,
+        q_bucket_size=8,
+    )
+    for _ in range(cost_table.min_profile_samples):
+        cost_table.update_profile(q_tokens=8, batch_size=4, target_cost=3.0, draft_cost=0.0)
+
+    lines = plugin._format_cost_table_bucket_lines(cost_table)
+
+    assert len(lines) == 1
+    assert "bs=4,q=8:state=ready,profile_samples=5" in lines[0]
+    assert "q=16:state=bootstrap" not in lines[0]
+
+
 def test_patch_runner_installs_default_dummy_profile_hook(monkeypatch):
     class FreshSpeculativeConfig:
         method = "dflash"
@@ -238,6 +255,27 @@ def test_repeated_identical_decisions_are_logged(monkeypatch):
     assert "plan_count=1" in decision_logs[0]
     assert "plan_count=3" in decision_logs[-1]
     assert runner.dcut_decision_count == 3
+
+
+def test_batch_cut_plan_uses_per_request_cuts():
+    decision = plugin.CutDecision(
+        requested_len=4,
+        selected_len=4,
+        batch_size=2,
+        acceptance_rate=0.5,
+        score=1.0,
+        reason="test",
+    )
+    runner = type(
+        "Runner",
+        (),
+        {
+            "dcut_last_per_request_acceptance": [0.25, 0.75],
+            "dcut_last_per_request_cuts": [2, 4],
+        },
+    )()
+
+    assert plugin._format_batch_cut_plan(runner, decision) == "[#0:accept=0.250,cut=2,#1:accept=0.750,cut=4]"
 
 
 def test_acceptance_rate_uses_runtime_counters(monkeypatch):
