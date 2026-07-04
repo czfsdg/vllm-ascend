@@ -25,6 +25,8 @@ class VerifyAdaptiveConfig:
     max_query_len_per_req: int | None = None
     min_query_len_per_req: int = 2
     min_draft_len_per_req: int = 1
+    min_draft_len_fraction: float = 0.0
+    min_adaptive_batch_size: int = 1
 
     # measurement
     warmup_seq_lens: int = 4096
@@ -62,6 +64,10 @@ class VerifyAdaptiveConfig:
                 f"min_draft_len_per_req ({self.min_draft_len_per_req}) > "
                 f"num_speculative_tokens ({num_speculative_tokens})."
             )
+        if not 0.0 <= self.min_draft_len_fraction <= 1.0:
+            raise ValueError("min_draft_len_fraction must be in [0.0, 1.0].")
+        if self.min_adaptive_batch_size < 1:
+            raise ValueError("min_adaptive_batch_size must be >= 1.")
         if self.warmup_seq_lens < 1:
             raise ValueError("warmup_seq_lens must be >= 1.")
         if self.n_warmup_iters < 0:

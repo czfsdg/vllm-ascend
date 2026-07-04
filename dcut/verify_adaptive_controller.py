@@ -238,6 +238,13 @@ class VerifyAdaptiveController:
             logger.info("VerifyAdaptiveController: cost table ready (%d entries).", len(self._cost_table))
         self._dump_cost_table_if_requested()
 
+    def _effective_min_draft_len(self) -> int:
+        fractional_min = math.ceil(self.num_spec_tokens * self.config.min_draft_len_fraction)
+        return min(
+            self.num_spec_tokens,
+            max(self.config.min_draft_len_per_req, fractional_min),
+        )
+
     def process_draft_output(
         self,
         selected_probs: torch.Tensor,
@@ -246,6 +253,19 @@ class VerifyAdaptiveController:
         batch_size: int,
     ) -> None:
         if not self.config.enabled or not active_draft_req_ids or not self._sorted_bs:
+            return
+        if batch_size < self.config.min_adaptive_batch_size:
+            self._last_decision = {
+                "batch_size": batch_size,
+                "active_count": 0,
+                "skip_reason": "below_min_adaptive_batch_size",
+                "min_adaptive_batch_size": self.config.min_adaptive_batch_size,
+            }
+            logger.debug(
+                "D-Cut decision skipped: bs=%d < min_adaptive_batch_size=%d",
+                batch_size,
+                self.config.min_adaptive_batch_size,
+            )
             return
         n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
         all_probs_np = selected_probs[:n_rows].numpy()
@@ -264,7 +284,7 @@ class VerifyAdaptiveController:
             q_levels=q_levels,
             cost_lookup=lambda q: self._cost_table[(bs_key, q)],
             max_draft_len=self.max_query_len_per_req - 1,
-            min_draft_len=self.config.min_draft_len_per_req,
+            min_draft_len=self._effective_min_draft_len(),
         )
         draft_lens = [min(self.num_spec_tokens, int(draft_len)) for draft_len in result["draft_lens"]]
         effective_s = sum(draft_lens)

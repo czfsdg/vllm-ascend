@@ -12,5 +12,7 @@
     "n_warmup_iters": 1,
     "n_measure_iters": 2,
     "cost_table_dump_path": null,
-    "min_draft_len_per_req": 1
+    "min_draft_len_per_req": 1,
+    "min_draft_len_fraction": 0.5,
+    "min_adaptive_batch_size": 16
 }
