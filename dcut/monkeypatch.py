@@ -112,6 +112,9 @@ def _dcut_truncate(self, scheduler_output):
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
+    input_batch = getattr(self, "input_batch", None)
+    req_id_to_index = getattr(input_batch, "req_id_to_index", {}) if input_batch is not None else {}
+    accepted_tokens_cpu = getattr(input_batch, "num_accepted_tokens_cpu", None) if input_batch is not None else None
 
     for req_id, draft_toks in list(new_spec.items()):
         original_len = len(draft_toks)
@@ -119,11 +122,23 @@ def _dcut_truncate(self, scheduler_output):
         if adaptive_len is None:
             adaptive_len = original_len
         cut_len = min(adaptive_len, original_len)
+        accepted_len = cut_len + 1
+        accepted_tokens_before = None
+        accepted_tokens_after = None
+        if accepted_tokens_cpu is not None and req_id in req_id_to_index:
+            req_index = req_id_to_index[req_id]
+            accepted_tokens_before = int(accepted_tokens_cpu[req_index])
+            accepted_tokens_after = min(max(accepted_tokens_before, 1), accepted_len)
+            if accepted_tokens_after != accepted_tokens_before:
+                accepted_tokens_cpu[req_index] = accepted_tokens_after
         self._dcut_last_cut_records.append(
             {
                 "req_id": req_id,
                 "original_len": original_len,
                 "verify_len": cut_len,
+                "accepted_len": accepted_len,
+                "accepted_tokens_before": accepted_tokens_before,
+                "accepted_tokens_after": accepted_tokens_after,
                 "cut_tokens": original_len - cut_len,
             }
         )
@@ -217,16 +232,14 @@ def _adaptive_profile_run(
         f"adaptive profile: num_tokens={num_tokens_unpadded} > max_num_tokens={self.max_num_tokens}"
     )
 
-    _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
-        self._determine_batch_execution_and_padding(
-            num_tokens=num_tokens_unpadded,
-            num_reqs=num_reqs,
-            num_scheduled_tokens_np=num_scheduled_tokens,
-            max_num_scheduled_tokens=max_query_len,
-            use_cascade_attn=False,
-            allow_microbatching=False,
-            force_eager=False,
-        )
+    _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
+        num_tokens=num_tokens_unpadded,
+        num_reqs=num_reqs,
+        num_scheduled_tokens_np=num_scheduled_tokens,
+        max_num_scheduled_tokens=max_query_len,
+        use_cascade_attn=False,
+        allow_microbatching=False,
+        force_eager=False,
     )
     num_tokens_padded = batch_desc.num_tokens
     num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
@@ -468,6 +481,7 @@ def _log_dcut_verify_result(runner, batch_size: int, elapsed_ms: float) -> None:
             "bs_key": decision.get("bs_key"),
             "best_Q": decision.get("best_Q"),
             "best_S": decision.get("best_S"),
+            "effective_S": decision.get("effective_S"),
             "best_score": decision.get("best_score"),
             "draft_len_hist": decision.get("draft_len_hist"),
         }
@@ -602,7 +616,8 @@ def _install_ascend_import_hook() -> None:
     def dcut_import(name, globals=None, locals=None, fromlist=(), level=0):
         module = original_import(name, globals, locals, fromlist, level)
         if (
-            name in {
+            name
+            in {
                 "vllm_ascend.worker.model_runner_v1",
                 "vllm_ascend.worker.worker",
                 "vllm_ascend.spec_decode.llm_base_proposer",

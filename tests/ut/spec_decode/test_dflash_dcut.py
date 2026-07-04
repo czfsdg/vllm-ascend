@@ -56,3 +56,18 @@ def test_choose_query_lens_discrete_uses_profiled_cost():
     )
     assert result["best_Q"] == 4
     assert result["draft_lens"] == [1, 1]
+
+
+def test_choose_query_lens_discrete_respects_min_draft_len():
+    probs = np.array([[0.9, 0.5, 0.1], [0.8, 0.7, 0.1]], dtype=np.float64)
+    result = choose_query_lens_discrete(
+        probs=probs,
+        base_batch_size=2,
+        q_levels=[3, 4],
+        cost_lookup={3: 1.0, 4: 1.1}.__getitem__,
+        max_draft_len=3,
+        min_draft_len=1,
+    )
+    assert result["best_Q"] == 4
+    assert sum(result["draft_lens"]) == 2
+    assert result["draft_lens"] == [1, 1]

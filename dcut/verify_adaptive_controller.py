@@ -28,38 +28,53 @@ def choose_query_lens_discrete(
     cost_lookup: Callable[[int], float],
     max_draft_len: int,
     collect_records: bool = False,
+    min_draft_len: int = 0,
 ) -> dict[str, Any]:
     """Discrete marginal-gain scan over measured sum-query-len levels."""
     active_count = len(probs)
     mat = np.asarray(probs, dtype=np.float64).reshape(active_count, -1)[:, :max_draft_len]
     gains = np.cumprod(mat, axis=1)
-    seq_ids = np.repeat(np.arange(active_count), gains.shape[1])
-    flat_gains = gains.ravel()
-    order = np.argsort(-flat_gains, kind="stable")
-    sorted_seq = seq_ids[order]
-    prefix_gain = np.concatenate(([0.0], np.cumsum(flat_gains[order])))
-    total_available = flat_gains.shape[0]
+    min_draft_len = min(max(int(min_draft_len), 0), max_draft_len)
+    initial_slots = active_count * min_draft_len
+    initial_gain = float(gains[:, :min_draft_len].sum()) if min_draft_len > 0 else 0.0
+
+    remaining_gains = gains[:, min_draft_len:]
+    if remaining_gains.shape[1] > 0:
+        seq_ids = np.repeat(np.arange(active_count), remaining_gains.shape[1])
+        flat_gains = remaining_gains.ravel()
+        order = np.argsort(-flat_gains, kind="stable")
+        sorted_seq = seq_ids[order]
+        prefix_gain = np.concatenate(([0.0], np.cumsum(flat_gains[order])))
+        total_extra_available = flat_gains.shape[0]
+    else:
+        sorted_seq = np.array([], dtype=np.int64)
+        prefix_gain = np.array([0.0], dtype=np.float64)
+        total_extra_available = 0
 
     best_score = -math.inf
-    best_q, best_s = base_batch_size, 0
+    best_q, best_s, best_extra_s = base_batch_size, initial_slots, 0
     records: list[dict[str, Any]] | None = [] if collect_records else None
 
     for query_len_sum in q_levels:
         draft_slots = query_len_sum - base_batch_size
-        if draft_slots < 0:
+        if draft_slots < initial_slots:
             continue
-        draft_slots = min(draft_slots, total_available)
+        extra_slots = min(draft_slots - initial_slots, total_extra_available)
+        effective_slots = initial_slots + extra_slots
         cost = cost_lookup(query_len_sum)
         if cost <= 0.0:
             continue
-        score = (base_batch_size + prefix_gain[draft_slots]) / cost
+        score = (base_batch_size + initial_gain + prefix_gain[extra_slots]) / cost
         if records is not None:
-            records.append({"Q": query_len_sum, "S": int(draft_slots), "score": score, "cost": cost})
+            records.append({"Q": query_len_sum, "S": int(effective_slots), "score": score, "cost": cost})
         if score > best_score:
             best_score = score
-            best_q, best_s = query_len_sum, draft_slots
+            best_q, best_s, best_extra_s = query_len_sum, effective_slots, extra_slots
 
-    draft_lens = np.bincount(sorted_seq[:best_s], minlength=active_count).tolist()
+    draft_lens = np.full(active_count, min_draft_len, dtype=np.int64)
+    if best_extra_s > 0:
+        draft_lens += np.bincount(sorted_seq[:best_extra_s], minlength=active_count)
+    draft_lens = draft_lens.tolist()
     return {
         "draft_lens": draft_lens,
         "best_Q": best_q,
@@ -106,9 +121,7 @@ class VerifyAdaptiveController:
         if self.config.warmup_batch_sizes:
             return sorted(set(self.config.warmup_batch_sizes))
         cap = (
-            self.config.max_warmup_batch_size
-            if self.config.max_warmup_batch_size is not None
-            else self.max_batch_size
+            self.config.max_warmup_batch_size if self.config.max_warmup_batch_size is not None else self.max_batch_size
         )
         start = self.config.min_warmup_batch_size
         levels = list(range(start, cap + 1, 2))
@@ -251,8 +264,10 @@ class VerifyAdaptiveController:
             q_levels=q_levels,
             cost_lookup=lambda q: self._cost_table[(bs_key, q)],
             max_draft_len=self.max_query_len_per_req - 1,
+            min_draft_len=self.config.min_draft_len_per_req,
         )
-        draft_lens = result["draft_lens"]
+        draft_lens = [min(self.num_spec_tokens, int(draft_len)) for draft_len in result["draft_lens"]]
+        effective_s = sum(draft_lens)
         for req_id, draft_len in zip(active_req_ids, draft_lens):
             self._adaptive_draft_lens[req_id] = draft_len
         draft_len_hist = dict(sorted(Counter(draft_lens).items()))
@@ -261,16 +276,18 @@ class VerifyAdaptiveController:
             "bs_key": bs_key,
             "best_Q": result["best_Q"],
             "best_S": result["best_S"],
+            "effective_S": effective_s,
             "best_score": result["best_score"],
             "draft_len_hist": draft_len_hist,
             "draft_lens_by_req": dict(zip(active_req_ids, draft_lens)),
         }
         logger.info(
-            "D-Cut decision: bs=%d bs_key=%d best_Q=%d best_S=%d score=%.4f draft_len_hist=%s",
+            "D-Cut decision: bs=%d bs_key=%d best_Q=%d best_S=%d effective_S=%d score=%.4f draft_len_hist=%s",
             batch_size,
             bs_key,
             result["best_Q"],
             result["best_S"],
+            effective_s,
             result["best_score"],
             draft_len_hist,
         )

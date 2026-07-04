@@ -24,6 +24,7 @@ class VerifyAdaptiveConfig:
     query_len_step_per_req: int = 2
     max_query_len_per_req: int | None = None
     min_query_len_per_req: int = 2
+    min_draft_len_per_req: int = 1
 
     # measurement
     warmup_seq_lens: int = 4096
@@ -45,17 +46,21 @@ class VerifyAdaptiveConfig:
         return cls(**{k: v for k, v in data.items() if k in known})
 
     def validate(self, num_speculative_tokens: int) -> None:
-        eff_max_q = (
-            self.max_query_len_per_req if self.max_query_len_per_req is not None else num_speculative_tokens + 1
-        )
+        eff_max_q = self.max_query_len_per_req if self.max_query_len_per_req is not None else num_speculative_tokens + 1
         if self.min_query_len_per_req < 2:
             raise ValueError("min_query_len_per_req must be >= 2 (baseline query_len=1 is added automatically).")
         if self.query_len_step_per_req < 1:
             raise ValueError("query_len_step_per_req must be >= 1.")
         if self.min_query_len_per_req > eff_max_q:
             raise ValueError(
-                f"min_query_len_per_req ({self.min_query_len_per_req}) > "
-                f"effective max_query_len_per_req ({eff_max_q})."
+                f"min_query_len_per_req ({self.min_query_len_per_req}) > effective max_query_len_per_req ({eff_max_q})."
+            )
+        if self.min_draft_len_per_req < 0:
+            raise ValueError("min_draft_len_per_req must be >= 0.")
+        if self.min_draft_len_per_req > num_speculative_tokens:
+            raise ValueError(
+                f"min_draft_len_per_req ({self.min_draft_len_per_req}) > "
+                f"num_speculative_tokens ({num_speculative_tokens})."
             )
         if self.warmup_seq_lens < 1:
             raise ValueError("warmup_seq_lens must be >= 1.")
