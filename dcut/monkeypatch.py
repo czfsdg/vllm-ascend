@@ -19,7 +19,6 @@ import inspect
 import os
 import sys
 import time
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -156,12 +155,14 @@ def _dcut_truncate(self, scheduler_output):
                 new_spec[req_id] = draft_toks[:cut_len]
 
     if tokens_delta > 0:
-        scheduler_output = replace(
-            scheduler_output,
-            scheduled_spec_decode_tokens=new_spec,
-            num_scheduled_tokens=new_num_sched,
-            total_num_scheduled_tokens=scheduler_output.total_num_scheduled_tokens - tokens_delta,
-        )
+        # Mutate the original SchedulerOutput object instead of replacing it.
+        # EngineCore keeps using the same object after model execution to update
+        # scheduler state; returning a private copy here would make the verifier
+        # run with shortened drafts while the scheduler still accounts against
+        # the original full draft tokens, which can change outputs under load.
+        scheduler_output.scheduled_spec_decode_tokens = new_spec
+        scheduler_output.num_scheduled_tokens = new_num_sched
+        scheduler_output.total_num_scheduled_tokens -= tokens_delta
     return scheduler_output
 
 
