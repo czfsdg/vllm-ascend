@@ -71,3 +71,21 @@ def test_choose_query_lens_discrete_respects_min_draft_len():
     assert result["best_Q"] == 4
     assert sum(result["draft_lens"]) == 2
     assert result["draft_lens"] == [1, 1]
+
+
+def test_verify_adaptive_config_validation_rejects_bad_concurrency_knobs():
+    bad_fraction = VerifyAdaptiveConfig(min_draft_len_fraction=1.5)
+    try:
+        bad_fraction.validate(num_speculative_tokens=3)
+    except ValueError as exc:
+        assert "min_draft_len_fraction" in str(exc)
+    else:
+        raise AssertionError("expected fraction validation failure")
+
+    bad_batch = VerifyAdaptiveConfig(min_adaptive_batch_size=0)
+    try:
+        bad_batch.validate(num_speculative_tokens=3)
+    except ValueError as exc:
+        assert "min_adaptive_batch_size" in str(exc)
+    else:
+        raise AssertionError("expected batch validation failure")
