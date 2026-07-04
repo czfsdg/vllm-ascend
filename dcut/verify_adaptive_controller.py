@@ -124,6 +124,34 @@ class VerifyAdaptiveController:
             levels.append(max_q)
         return sorted(set(levels))
 
+    def _fill_fallback_cost_table(self, reason: str) -> None:
+        self._cost_table.clear()
+        self._cost_records.clear()
+        self._sorted_sql_per_bs.clear()
+        for bs in self._batch_size_levels:
+            self._sorted_sql_per_bs[bs] = []
+            for ql in self._query_len_levels:
+                sum_query_len = bs * ql
+                cost_s = float(sum_query_len) / 1e6
+                self._cost_table[(bs, sum_query_len)] = cost_s
+                self._sorted_sql_per_bs[bs].append(sum_query_len)
+                self._cost_records.append(
+                    {
+                        "batch_size": bs,
+                        "query_len_per_req": ql,
+                        "sum_query_len": sum_query_len,
+                        "padded_tokens": sum_query_len,
+                        "runtime_mode": "fallback",
+                        "avg_ms": cost_s * 1e3,
+                        "cost_s": cost_s,
+                        "fallback_reason": reason,
+                    }
+                )
+        self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs.keys()) if self._sorted_sql_per_bs[bs]]
+        for bs in self._sorted_bs:
+            self._sorted_sql_per_bs[bs].sort()
+        logger.warning("VerifyAdaptiveController: using fallback cost table because profiling failed: %s", reason)
+
     def profile_cost_table(self, runner: Any) -> None:
         if not self.config.enabled:
             return
@@ -142,12 +170,19 @@ class VerifyAdaptiveController:
                 if max_tokens is not None and num_tokens > max_tokens:
                     logger.info("profile skip: bs=%d ql=%d num_tokens=%d > %d", bs, ql, num_tokens, max_tokens)
                     continue
-                runtime_mode, avg_ms, padded_tokens = runner._adaptive_profile_run(
-                    [ql] * bs,
-                    self.config.warmup_seq_lens,
-                    self.config.n_warmup_iters,
-                    self.config.n_measure_iters,
-                )
+                try:
+                    runtime_mode, avg_ms, padded_tokens = runner._adaptive_profile_run(
+                        [ql] * bs,
+                        self.config.warmup_seq_lens,
+                        self.config.n_warmup_iters,
+                        self.config.n_measure_iters,
+                    )
+                except Exception as exc:
+                    if not self.config.fallback_on_profile_error:
+                        raise
+                    self._fill_fallback_cost_table(str(exc))
+                    self._dump_cost_table_if_requested()
+                    return
                 elapsed_s = avg_ms / 1e3
                 self._cost_table[(bs, num_tokens)] = elapsed_s
                 self._cost_records.append(

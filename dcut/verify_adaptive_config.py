@@ -31,6 +31,7 @@ class VerifyAdaptiveConfig:
     n_measure_iters: int = 5
     cost_table_dump_path: str | None = None
     enabled: bool = True
+    fallback_on_profile_error: bool = True
 
     @classmethod
     def from_json(cls, path: str) -> VerifyAdaptiveConfig:
@@ -67,3 +68,5 @@ class VerifyAdaptiveConfig:
             raise ValueError("min_warmup_batch_size must be >= 1.")
         if self.max_warmup_batch_size is not None and self.max_warmup_batch_size < 1:
             raise ValueError("max_warmup_batch_size must be >= 1.")
+        if not isinstance(self.fallback_on_profile_error, bool):
+            raise ValueError("fallback_on_profile_error must be a bool.")
