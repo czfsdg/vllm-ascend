@@ -441,52 +441,34 @@ def _patch_ascend_proposer_class(proposer_cls) -> None:
         if getattr(self, "needs_draft_probs", False):
             steps = getattr(self, "_dcut_selected_probs_steps", [])
             expected_rows = out.shape[0] if torch.is_tensor(out) and out.ndim >= 1 else 0
-            if steps and expected_rows > 0:
-                aligned_steps = []
-                for step in steps:
-                    if step.shape[0] >= expected_rows:
-                        aligned_steps.append(step[:expected_rows])
-                    else:
-                        pad = step.new_ones((expected_rows - step.shape[0],))
-                        aligned_steps.append(torch.cat([step, pad], dim=0))
-                stacked = torch.stack(aligned_steps, dim=1)
-                num_spec = getattr(self, "num_speculative_tokens", stacked.shape[1])
-                if stacked.shape[1] < num_spec:
-                    pad = stacked.new_ones((expected_rows, num_spec - stacked.shape[1]))
-                    stacked = torch.cat([stacked, pad], dim=1)
-                self._last_selected_probs = stacked[:, :num_spec].contiguous()
+            if expected_rows > 0:
+                num_spec = getattr(self, "num_speculative_tokens", 1)
+                if steps:
+                    aligned_steps = []
+                    for step in steps:
+                        if step.shape[0] >= expected_rows:
+                            aligned_steps.append(step[:expected_rows])
+                        else:
+                            pad = step.new_ones((expected_rows - step.shape[0],))
+                            aligned_steps.append(torch.cat([step, pad], dim=0))
+                    stacked = torch.stack(aligned_steps, dim=1)
+                    if stacked.shape[1] < num_spec:
+                        pad = stacked.new_ones((expected_rows, num_spec - stacked.shape[1]))
+                        stacked = torch.cat([stacked, pad], dim=1)
+                    self._last_selected_probs = stacked[:, :num_spec].contiguous()
+                else:
+                    # Keep Ascend proposer semantics untouched.  Some Ascend
+                    # paths use reduce-sample / TP-specific logic inside the
+                    # original compute_draft_token_ids implementation; if we
+                    # cannot safely observe per-step probabilities, fall back to
+                    # all-ones probabilities so the controller stays conservative.
+                    self._last_selected_probs = out.new_ones((expected_rows, num_spec), dtype=torch.float32)
         return out
-
-    def compute_draft_token_ids(self, hidden_states):
-        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
-            draft_token_ids = torch.argmax(logits, dim=-1)
-        else:
-            logits = logits.contiguous()
-            draft_token_ids = torch.argmax(logits, dim=-1)
-            bias = torch.index_select(
-                self.model.draft_id_to_target_id,
-                dim=0,
-                index=draft_token_ids.view(-1),
-            ).view(draft_token_ids.shape)
-            target_token_ids = draft_token_ids + bias
-            if getattr(self, "needs_draft_probs", False):
-                probs = torch.softmax(logits, dim=-1)
-                selected = torch.gather(probs, dim=-1, index=draft_token_ids.view(-1, 1)).squeeze(-1)
-                self._dcut_selected_probs_steps.append(selected.detach())
-            return target_token_ids
-
-        if getattr(self, "needs_draft_probs", False):
-            probs = torch.softmax(logits, dim=-1)
-            selected = torch.gather(probs, dim=-1, index=draft_token_ids.view(-1, 1)).squeeze(-1)
-            self._dcut_selected_probs_steps.append(selected.detach())
-        return draft_token_ids
 
     def take_last_selected_probs(self):
         return getattr(self, "_last_selected_probs", None)
 
     proposer_cls._propose = _propose
-    proposer_cls.compute_draft_token_ids = compute_draft_token_ids
     proposer_cls.take_last_selected_probs = take_last_selected_probs
     proposer_cls._dcut_probs_patched = True
     logger.info("D-Cut patched Ascend proposer class: %s.%s", proposer_cls.__module__, proposer_cls.__name__)
