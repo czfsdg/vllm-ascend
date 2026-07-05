@@ -233,11 +233,14 @@ inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *
         baseDimChoice.baseDimCnt <= 0 || coreNum == 0 || fnExecutionPlan == FN_EXECUTION_PLAN_INVALID) {
         return tokenBlockChoice;
     }
-    if (tiling.hasNumAcceptedTokens != 0) {
-        OP_LOGD(context, "Varlen token tiling disabled: speculative decode still uses the existing seq mapping.");
-        return tokenBlockChoice;
-    }
-
+    // Spec decode can still arrive as inputMode=0 when the scheduled
+    // token count is varlen (for example after D-Cut truncates each request
+    // to a different accepted length). Older tiling skipped the unified
+    // token plan whenever numAcceptedTokens was present, which left runMode=0
+    // without any fallback plan and caused tiling failure before the kernel
+    // could run. Keep token tiling enabled here; the kernel separately
+    // disables only the rolling fast path for hasNumAcceptedTokens and uses
+    // the generic sequence mapping, which supports variable segment lengths.
     tokenBlockChoice = ChooseFnTokenBlockChoice(tiling.cuSeqlen, baseDimChoice.baseDimCnt, fnExecutionPlan, coreNum);
 
     OP_LOGD(context,

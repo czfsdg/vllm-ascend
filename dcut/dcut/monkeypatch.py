@@ -169,7 +169,6 @@ def _patch_runner(cls):
         self._dcut_active = set()
         self._dcut_missing_probs_warnings = 0
         self._dcut_fallback_probs_warnings = 0
-        self._dcut_accepted_tokens_clamp_warnings = 0
         self._dcut_mixed_batch_skip_warnings = 0
         _dcut_init_controller(self)
 
@@ -290,19 +289,6 @@ def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
         debug_plans[req_id] = {"scheduled": len(draft_toks), "adaptive": adaptive_len}
         if adaptive_len is None or adaptive_len >= len(draft_toks):
             continue
-        min_draft_len = _dcut_min_safe_draft_len(runner, req_id)
-        if adaptive_len < min_draft_len:
-            warnings = getattr(runner, "_dcut_accepted_tokens_clamp_warnings", 0)
-            if warnings < 5:
-                logger.warning(
-                    "D-Cut: clamping draft cut for req_id=%s from %d to %d "
-                    "to keep the verifier segment compatible with already-accepted tokens.",
-                    req_id,
-                    adaptive_len,
-                    min_draft_len,
-                )
-                runner._dcut_accepted_tokens_clamp_warnings = warnings + 1
-            adaptive_len = min(min_draft_len, len(draft_toks))
         diff = len(draft_toks) - adaptive_len
         tokens_delta += diff
         new_num_sched[req_id] -= diff
@@ -322,28 +308,6 @@ def _dcut_truncate_draft_token_ids(runner, draft_token_ids):
         tokens_delta,
     )
     return replace(draft_token_ids, draft_token_ids=truncated_token_ids)
-
-
-def _dcut_min_safe_draft_len(runner, req_id: str) -> int:
-    """Return the minimum draft length that keeps varlen verifier inputs safe.
-
-    Ascend hybrid/Mamba paths pass ``num_accepted_tokens`` to custom kernels.
-    A scheduled speculative segment contains one target token plus the draft
-    tokens. If D-Cut shrinks a segment below ``num_accepted_tokens``, kernels
-    such as GDN causal conv can fail during tiling. Therefore the adaptive
-    draft length must stay at least ``num_accepted_tokens - 1``.
-    """
-    input_batch = getattr(runner, "input_batch", None)
-    if input_batch is None:
-        return 0
-    req_id_to_index = getattr(input_batch, "req_id_to_index", None)
-    accepted_tokens_cpu = getattr(input_batch, "num_accepted_tokens_cpu", None)
-    if not req_id_to_index or accepted_tokens_cpu is None:
-        return 0
-    req_index = req_id_to_index.get(req_id)
-    if req_index is None or req_index < 0 or req_index >= len(accepted_tokens_cpu):
-        return 0
-    return max(int(accepted_tokens_cpu[req_index]) - 1, 0)
 
 
 def _dcut_queue_probs(runner, zeros_only: bool) -> None:
