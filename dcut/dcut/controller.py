@@ -16,6 +16,8 @@ from vllm.logger import logger
 
 from dcut.config import VerifyAdaptiveConfig
 
+MIN_ADAPTIVE_DRAFT_TOKENS = 1
+
 
 def _env_enabled(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
