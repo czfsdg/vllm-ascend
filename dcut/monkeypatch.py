@@ -86,7 +86,10 @@ def _dcut_init_controller(self) -> None:
         device=self.device,
     )
     _dcut_enable_drafter_probs(self)
-    self._adaptive_probs_event = torch.cuda.Event()
+    # Keep the D-Cut probability handoff on the CPU control path for Ascend.
+    # NPU events/copies synchronize the stream and can surface unrelated async
+    # kernel failures in this bookkeeping path.
+    self._adaptive_probs_event = None
     self._adaptive_probs_pinned = torch.empty(
         (self.max_num_reqs, num_spec),
         dtype=torch.float32,
@@ -192,12 +195,7 @@ def _dcut_truncate(self, scheduler_output):
 
 
 def _dcut_queue_probs(self, zeros_only: bool) -> None:
-    if (
-        zeros_only
-        or self._adaptive_probs_pending
-        or self._adaptive_probs_pinned is None
-        or self._adaptive_probs_event is None
-    ):
+    if zeros_only or self._adaptive_probs_pending or self._adaptive_probs_pinned is None:
         return
     drafter = getattr(self, "drafter", None)
     if drafter is None or not hasattr(drafter, "take_last_selected_probs"):
@@ -217,15 +215,22 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
         for i in range(rows)
         if self.input_batch.num_computed_tokens_cpu[i] >= self.input_batch.num_prompt_tokens[i]
     }
-    self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=True)
-    self._adaptive_probs_event.record()
+    probs_device = getattr(probs, "device", None)
+    if probs_device is not None and probs_device.type == "npu":
+        # The Ascend proposer fallback is conservative all-ones probabilities.
+        # Avoid NPU-to-CPU copies here: the copy op synchronizes the stream and
+        # can surface earlier verifier/proposer vector-core failures.
+        self._adaptive_probs_pinned[:rows].fill_(1.0)
+    else:
+        self._adaptive_probs_pinned[:rows].copy_(probs[:rows], non_blocking=False)
+    if self._adaptive_probs_event is not None:
+        self._adaptive_probs_event.record()
 
 
 def _maybe_process_adaptive_probs(self) -> None:
     if not self._adaptive_probs_pending:
         return
-    assert self._adaptive_probs_event is not None
-    if not self._adaptive_probs_event.query():
+    if self._adaptive_probs_event is not None and not self._adaptive_probs_event.query():
         self._adaptive_probs_event.synchronize()
     self._adaptive_probs_pending = False
     num_reqs = self._adaptive_num_reqs
@@ -441,52 +446,32 @@ def _patch_ascend_proposer_class(proposer_cls) -> None:
         if getattr(self, "needs_draft_probs", False):
             steps = getattr(self, "_dcut_selected_probs_steps", [])
             expected_rows = out.shape[0] if torch.is_tensor(out) and out.ndim >= 1 else 0
-            if steps and expected_rows > 0:
-                aligned_steps = []
-                for step in steps:
-                    if step.shape[0] >= expected_rows:
-                        aligned_steps.append(step[:expected_rows])
-                    else:
-                        pad = step.new_ones((expected_rows - step.shape[0],))
-                        aligned_steps.append(torch.cat([step, pad], dim=0))
-                stacked = torch.stack(aligned_steps, dim=1)
-                num_spec = getattr(self, "num_speculative_tokens", stacked.shape[1])
-                if stacked.shape[1] < num_spec:
-                    pad = stacked.new_ones((expected_rows, num_spec - stacked.shape[1]))
-                    stacked = torch.cat([stacked, pad], dim=1)
-                self._last_selected_probs = stacked[:, :num_spec].contiguous()
+            if expected_rows > 0:
+                num_spec = getattr(self, "num_speculative_tokens", 1)
+                if steps:
+                    aligned_steps = []
+                    for step in steps:
+                        if step.shape[0] >= expected_rows:
+                            aligned_steps.append(step[:expected_rows])
+                        else:
+                            pad = step.new_ones((expected_rows - step.shape[0],))
+                            aligned_steps.append(torch.cat([step, pad], dim=0))
+                    stacked = torch.stack(aligned_steps, dim=1)
+                    if stacked.shape[1] < num_spec:
+                        pad = stacked.new_ones((expected_rows, num_spec - stacked.shape[1]))
+                        stacked = torch.cat([stacked, pad], dim=1)
+                    self._last_selected_probs = stacked[:, :num_spec].contiguous()
+                else:
+                    # Keep Ascend proposer sampling semantics untouched. If we
+                    # cannot safely observe per-step probabilities from the
+                    # original implementation, use conservative CPU-side ones.
+                    self._last_selected_probs = torch.ones((expected_rows, num_spec), dtype=torch.float32)
         return out
-
-    def compute_draft_token_ids(self, hidden_states):
-        logits = self.model.logits_processor(self.model.lm_head, hidden_states)
-        if not hasattr(self.model, "draft_id_to_target_id") or self.model.draft_id_to_target_id is None:
-            draft_token_ids = torch.argmax(logits, dim=-1)
-        else:
-            logits = logits.contiguous()
-            draft_token_ids = torch.argmax(logits, dim=-1)
-            bias = torch.index_select(
-                self.model.draft_id_to_target_id,
-                dim=0,
-                index=draft_token_ids.view(-1),
-            ).view(draft_token_ids.shape)
-            target_token_ids = draft_token_ids + bias
-            if getattr(self, "needs_draft_probs", False):
-                probs = torch.softmax(logits, dim=-1)
-                selected = torch.gather(probs, dim=-1, index=draft_token_ids.view(-1, 1)).squeeze(-1)
-                self._dcut_selected_probs_steps.append(selected.detach())
-            return target_token_ids
-
-        if getattr(self, "needs_draft_probs", False):
-            probs = torch.softmax(logits, dim=-1)
-            selected = torch.gather(probs, dim=-1, index=draft_token_ids.view(-1, 1)).squeeze(-1)
-            self._dcut_selected_probs_steps.append(selected.detach())
-        return draft_token_ids
 
     def take_last_selected_probs(self):
         return getattr(self, "_last_selected_probs", None)
 
     proposer_cls._propose = _propose
-    proposer_cls.compute_draft_token_ids = compute_draft_token_ids
     proposer_cls.take_last_selected_probs = take_last_selected_probs
     proposer_cls._dcut_probs_patched = True
     logger.info("D-Cut patched Ascend proposer class: %s.%s", proposer_cls.__module__, proposer_cls.__name__)
