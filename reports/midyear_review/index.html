@@ -53,12 +53,12 @@
         <div class="eyebrow">Mid-year Review</div>
         <h1>年中述职<br><span class="accent">实时视频推理</span> × 投机加速</h1>
         <p>围绕客户成功、版本交付和系统优化，完成实时视频生成关键突破、DFlash / DCut 验证与开发支撑，并沉淀外部技术影响力。</p>
-        <div><span class="pill">客户验收通过</span><span class="pill">305/306 需求零打回</span><span class="pill">2 篇技术文章</span></div>
+        <div><span class="pill">Timestep PP 核心突破</span><span class="pill">客户验收通过</span><span class="pill">2 篇技术文章</span></div>
       </div>
       <div class="card">
         <h3>关键成果快照</h3>
-        <p><span class="metric">16.4</span> FPS<br>SP 方案性能从 10.14 FPS 提升，加速 <b class="green">61.7%</b></p>
         <p><span class="metric">24.06</span> FPS<br>Timestep PP + Self-Forcing / Noisy Latent 最佳验证结果</p>
+        <p><span class="metric">16.4</span> FPS<br>SP 方案性能从 10.14 FPS 提升，加速 <b class="green">61.7%</b></p>
       </div>
     </div>
   </section>
@@ -66,8 +66,8 @@
   <section data-page="02 / 05">
     <h2>项目一：实时视频推理核心突破</h2>
     <div class="grid cols-2">
+      <div class="card"><h3>Timestep PP 新流水线</h3><p>作为最重要的系统优化突破，提出并实现扩散模型 Timestep PP，降低传统 Layer PP 流水线气泡：Self-Forcing / Noisy Latent 达到 <b class="green">24.06 FPS</b>，Rolling Forcing 达到 <b class="green">18.12 FPS</b>，协同新推理方式达到 <b class="green">20.2 FPS</b>。</p></div>
       <div class="card"><h3>SP 实时视频生成</h3><p>突破 8 卡 Ulysses 限制，将 SP 并行扩展至 <b class="accent">15 卡</b>；结合通信计算并行、RoPE 预计算等优化，实现 10.14 → <b class="green">16.4 FPS</b>。</p></div>
-      <div class="card"><h3>Timestep PP 新流水线</h3><p>提出并实现扩散模型 Timestep PP，降低传统 Layer PP 流水线气泡：Rolling Forcing <b class="green">18.12 FPS</b>，协同新推理方式 <b class="green">20.2 FPS</b>。</p></div>
       <div class="card"><h3>压缩策略探索</h3><p>系统评估时间步压缩与空间分辨率压缩；空间分辨率压缩在精度可接受前提下实现 <b class="green">40.49%</b> 推理加速。</p></div>
       <div class="card"><h3>完整系统构建</h3><p>支持 T2V、I2V、实时视频编辑，兼容多种分辨率与时长配置，可用于客户侧验证和应用落地。</p></div>
     </div>
@@ -90,7 +90,7 @@
       <div class="item"><h3>NPU / GPU 完整验证</h3><p>参与 DFlash 在 NPU 与 GPU 平台上的训练、推理、性能测试，为后续落地提供验证基础。</p></div>
       <div class="item"><h3>早期环境与数据支撑</h3><p>修复两台 GPU 机器不可用问题：重装驱动与 Toolkit、定位环境故障、下载并准备训练数据集。</p></div>
       <div class="item"><h3>DCut 验证与开发</h3><p>辅助完成 Qwen3 多数据集验证，得到低接收率下 <b class="green">19.1 out_tokens/s</b> 的有效结论；Qwen3.5 DCut 开发进行中（gdn 算子可变长度入图）。</p></div>
-      <div class="item"><h3>版本需求交付</h3><p>完成 305 版本 2 个需求、306 版本 2 个需求，覆盖开发、联调、自测到转测，全量顺利交付且无打回。</p></div>
+      <div class="item"><h3>版本需求交付</h3><p>完成 305 版本 2 个需求、306 版本 2 个需求，覆盖开发、联调、自测到转测，全量顺利交付，需求零打回。</p></div>
     </div>
   </section>
 
