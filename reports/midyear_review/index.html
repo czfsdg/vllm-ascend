@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>年中述职｜实时视频推理与投机加速</title>
+  <style>
+    :root {
+      --bg: #08111f;
+      --card: rgba(255,255,255,.09);
+      --card-strong: rgba(255,255,255,.15);
+      --text: #eef6ff;
+      --muted: #abc0d8;
+      --cyan: #43d9ff;
+      --blue: #6a8dff;
+      --green: #62e6a6;
+      --orange: #ffbd66;
+      --pink: #ff6ea8;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: radial-gradient(circle at 20% 10%, #183c75 0, transparent 32%), radial-gradient(circle at 80% 15%, #303079 0, transparent 28%), linear-gradient(135deg, #06101d 0%, #0c182b 52%, #111827 100%); color: var(--text); }
+    main { height: 100vh; overflow-y: scroll; scroll-snap-type: y mandatory; }
+    section { min-height: 100vh; padding: 54px 6vw; display: flex; flex-direction: column; justify-content: center; scroll-snap-align: start; position: relative; }
+    section::after { content: attr(data-page); position: absolute; right: 40px; bottom: 28px; color: rgba(255,255,255,.42); font-weight: 700; letter-spacing: .08em; }
+    h1 { font-size: clamp(44px, 7vw, 88px); line-height: 1.05; margin: 0 0 22px; letter-spacing: -0.04em; }
+    h2 { font-size: clamp(34px, 4.8vw, 58px); margin: 0 0 28px; letter-spacing: -0.03em; }
+    h3 { margin: 0 0 10px; font-size: 23px; }
+    p, li { font-size: clamp(18px, 1.8vw, 24px); line-height: 1.55; color: var(--muted); }
+    .eyebrow { color: var(--cyan); font-weight: 800; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 18px; }
+    .hero-grid, .grid { display: grid; gap: 22px; }
+    .hero-grid { grid-template-columns: 1.2fr .8fr; align-items: center; }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .card { background: var(--card); border: 1px solid rgba(255,255,255,.13); border-radius: 26px; padding: 28px; box-shadow: 0 24px 80px rgba(0,0,0,.28); backdrop-filter: blur(14px); }
+    .metric { font-size: clamp(38px, 5vw, 64px); font-weight: 900; color: var(--green); letter-spacing: -0.04em; }
+    .metric small { font-size: .45em; color: var(--muted); }
+    .pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; background: var(--card-strong); color: var(--text); font-weight: 700; margin: 4px 8px 4px 0; }
+    .timeline { display: grid; gap: 14px; }
+    .item { border-left: 4px solid var(--cyan); padding: 8px 0 8px 20px; background: linear-gradient(90deg, rgba(67,217,255,.12), transparent); }
+    .accent { color: var(--cyan); }
+    .green { color: var(--green); }
+    .orange { color: var(--orange); }
+    .pink { color: var(--pink); }
+    .footer-note { margin-top: 28px; font-size: 18px; color: rgba(238,246,255,.7); }
+    @media (max-width: 900px) { .hero-grid, .grid.cols-2, .grid.cols-3 { grid-template-columns: 1fr; } section { padding: 38px 22px; } }
+  </style>
+</head>
+<body>
+<main>
+  <section data-page="01 / 05">
+    <div class="hero-grid">
+      <div>
+        <div class="eyebrow">Mid-year Review</div>
+        <h1>年中述职<br><span class="accent">实时视频推理</span> × 投机加速</h1>
+        <p>围绕客户成功、版本交付和系统优化，完成实时视频生成关键突破、DFlash / DCut 验证与开发支撑，并沉淀外部技术影响力。</p>
+        <div><span class="pill">Timestep PP 核心突破</span><span class="pill">客户验收通过</span><span class="pill">2 篇技术文章</span></div>
+      </div>
+      <div class="card">
+        <h3>关键成果快照</h3>
+        <p><span class="metric">24.06</span> FPS<br>Timestep PP + Self-Forcing / Noisy Latent 最佳验证结果</p>
+        <p><span class="metric">16.4</span> FPS<br>SP 方案性能从 10.14 FPS 提升，加速 <b class="green">61.7%</b></p>
+      </div>
+    </div>
+  </section>
+
+  <section data-page="02 / 05">
+    <h2>项目一：实时视频推理核心突破</h2>
+    <div class="grid cols-2">
+      <div class="card"><h3>Timestep PP 新流水线</h3><p>作为最重要的系统优化突破，提出并实现扩散模型 Timestep PP，降低传统 Layer PP 流水线气泡：Self-Forcing / Noisy Latent 达到 <b class="green">24.06 FPS</b>，Rolling Forcing 达到 <b class="green">18.12 FPS</b>，协同新推理方式达到 <b class="green">20.2 FPS</b>。</p></div>
+      <div class="card"><h3>SP 实时视频生成</h3><p>突破 8 卡 Ulysses 限制，将 SP 并行扩展至 <b class="accent">15 卡</b>；结合通信计算并行、RoPE 预计算等优化，实现 10.14 → <b class="green">16.4 FPS</b>。</p></div>
+      <div class="card"><h3>压缩策略探索</h3><p>系统评估时间步压缩与空间分辨率压缩；空间分辨率压缩在精度可接受前提下实现 <b class="green">40.49%</b> 推理加速。</p></div>
+      <div class="card"><h3>完整系统构建</h3><p>支持 T2V、I2V、实时视频编辑，兼容多种分辨率与时长配置，可用于客户侧验证和应用落地。</p></div>
+    </div>
+  </section>
+
+  <section data-page="03 / 05">
+    <h2>项目一：客户交付与影响力沉淀</h2>
+    <div class="grid cols-3">
+      <div class="card"><div class="metric">✓</div><h3>交付验收</h3><p>完成推理代码整理、客户交付与技术支持，相关代码已提交魔芯科技并顺利通过验收。</p></div>
+      <div class="card"><div class="metric">2</div><h3>技术文章</h3><p>成果发布于稼先社区和 2012 网站，多次推荐至首页，累计 <b class="green">1300+</b> 阅读量。</p></div>
+      <div class="card"><div class="metric">∞</div><h3>外部合作</h3><p>多支海内外团队咨询方案细节并寻求合作，扩大团队在实时视频推理方向的技术影响力。</p></div>
+    </div>
+    <p class="footer-note">价值总结：从性能突破、系统可用到客户验收与外部传播，形成“技术突破 → 工程落地 → 影响力扩散”的闭环。</p>
+  </section>
+
+  <section data-page="04 / 05">
+    <h2>项目二：投机加速 DFlash 训练 & DCut 适配</h2>
+    <div class="timeline">
+      <div class="item"><h3>单向 DFlash 机制探索</h3><p>提出将双向建模改造为单向建模；验证接收率与双向 DFlash 基本一致，具备研究价值。</p></div>
+      <div class="item"><h3>NPU / GPU 完整验证</h3><p>参与 DFlash 在 NPU 与 GPU 平台上的训练、推理、性能测试，为后续落地提供验证基础。</p></div>
+      <div class="item"><h3>早期环境与数据支撑</h3><p>修复两台 GPU 机器不可用问题：重装驱动与 Toolkit、定位环境故障、下载并准备训练数据集。</p></div>
+      <div class="item"><h3>DCut 验证与开发</h3><p>辅助完成 Qwen3 多数据集验证，得到低接收率下 <b class="green">19.1 out_tokens/s</b> 的有效结论；Qwen3.5 DCut 开发进行中（gdn 算子可变长度入图）。</p></div>
+      <div class="item"><h3>版本需求交付</h3><p>完成 305 版本 2 个需求、306 版本 2 个需求，覆盖开发、联调、自测到转测，全量顺利交付，需求零打回。</p></div>
+    </div>
+  </section>
+
+  <section data-page="05 / 05">
+    <h2>协作贡献、他人帮助与改进方向</h2>
+    <div class="grid cols-2">
+      <div class="card"><h3>我对他人成功的贡献</h3><ul><li>协助分析 DFlash 接收率下降瓶颈，提出训练损失与最终接收率目标不完全匹配的判断方向，支撑后续通过调整损失函数恢复效果。</li><li>主动修复框架与环境问题，包括 ffmpeg 安装兼容性、新版镜像显存管理 bug，减少团队阻塞。</li></ul></div>
+      <div class="card"><h3>借助团队帮助做得更好</h3><ul><li>汶轩：技术方案设计、问题定位、项目推进指导。</li><li>鹏哥：技术方向、日常研发与项目推进支持。</li><li>宁哥：vLLM NPU 入门支持与技术文章修改建议。</li></ul></div>
+      <div class="card"><h3>待改进点</h3><p>进一步提升 Agent 工具使用能力，深化对能力边界和研发最佳实践的理解。</p></div>
+      <div class="card"><h3>下阶段行动</h3><p>将 Agent 更有效应用于代码开发、问题排查、测试验证、文档沉淀与信息检索，提升研发效率和问题解决速度。</p></div>
+    </div>
+  </section>
+</main>
+</body>
+</html>
