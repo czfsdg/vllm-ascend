@@ -135,6 +135,7 @@ class VerifyAdaptiveController:
             os.getenv("VLLM_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path,
             os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT") or self.config.cost_table_markdown_path,
         )
+        candidates: list[tuple[int, int, int]] = []
         for bs in self._batch_size_levels:
             self._sorted_sql_per_bs[bs] = []
             for ql in self._query_len_levels:
@@ -142,37 +143,91 @@ class VerifyAdaptiveController:
                 if max_tokens is not None and num_tokens > max_tokens:
                     logger.info("profile skip: bs=%d ql=%d num_tokens=%d > %d", bs, ql, num_tokens, max_tokens)
                     continue
-                runtime_mode, avg_ms, padded_tokens = runner._adaptive_profile_run(
-                    [ql] * bs,
-                    self.config.warmup_seq_lens,
-                    self.config.n_warmup_iters,
-                    self.config.n_measure_iters,
-                )
-                elapsed_s = avg_ms / 1e3
-                logger.info(
-                    "VerifyAdaptiveController: profile row bs=%d query_len=%d "
-                    "sum_query_len=%d runtime_mode=%s padded_tokens=%d avg_ms=%.6f",
-                    bs,
-                    ql,
-                    num_tokens,
-                    runtime_mode,
-                    padded_tokens,
-                    avg_ms,
-                )
-                self._cost_table[(bs, num_tokens)] = elapsed_s
-                self._cost_records.append(
-                    {
-                        "batch_size": bs,
-                        "query_len_per_req": ql,
-                        "sum_query_len": num_tokens,
-                        "padded_tokens": padded_tokens,
-                        "seq_lens": self.config.warmup_seq_lens,
-                        "runtime_mode": runtime_mode,
-                        "avg_ms": avg_ms,
-                        "cost_s": elapsed_s,
-                    }
-                )
-                self._sorted_sql_per_bs[bs].append(num_tokens)
+                candidates.append((bs, ql, num_tokens))
+
+        if not candidates:
+            logger.warning("VerifyAdaptiveController: no valid cost-profile candidates.")
+            return
+
+        logger.info(
+            "VerifyAdaptiveController: graph prewarm pass START candidates=%d",
+            len(candidates),
+        )
+        for bs, ql, _ in candidates:
+            runner._adaptive_profile_run(
+                [ql] * bs,
+                self.config.warmup_seq_lens,
+                max(1, self.config.n_warmup_iters),
+                0,
+            )
+        logger.info("VerifyAdaptiveController: graph prewarm pass END")
+
+        raw_records: list[dict[str, Any]] = []
+        for bs, ql, num_tokens in candidates:
+            runtime_mode, avg_ms, padded_tokens, timing_stats = runner._adaptive_profile_run(
+                [ql] * bs,
+                self.config.warmup_seq_lens,
+                self.config.n_warmup_iters,
+                self.config.n_measure_iters,
+            )
+            raw_cost_ms = float(timing_stats.get("median_ms", avg_ms))
+            record = {
+                "batch_size": bs,
+                "query_len_per_req": ql,
+                "sum_query_len": num_tokens,
+                "padded_tokens": padded_tokens,
+                "seq_lens": self.config.warmup_seq_lens,
+                "runtime_mode": runtime_mode,
+                "raw_avg_ms": float(timing_stats.get("avg_ms", avg_ms)),
+                "raw_median_ms": raw_cost_ms,
+                "raw_min_ms": float(timing_stats.get("min_ms", avg_ms)),
+                "raw_max_ms": float(timing_stats.get("max_ms", avg_ms)),
+                "raw_std_ms": float(timing_stats.get("std_ms", 0.0)),
+                "samples_ms": timing_stats.get("samples_ms", []),
+            }
+            raw_records.append(record)
+
+        bucket_costs: dict[tuple[int, int], list[float]] = {}
+        bucket_modes: dict[tuple[int, int], str] = {}
+        for record in raw_records:
+            key = (int(record["batch_size"]), int(record["padded_tokens"]))
+            bucket_costs.setdefault(key, []).append(float(record["raw_median_ms"]))
+            bucket_modes[key] = str(record["runtime_mode"])
+        bucket_cost_ms = {
+            key: float(np.median(np.asarray(values, dtype=np.float64))) for key, values in bucket_costs.items()
+        }
+
+        for record in raw_records:
+            bs = int(record["batch_size"])
+            num_tokens = int(record["sum_query_len"])
+            bucket_key = (bs, int(record["padded_tokens"]))
+            cost_ms = bucket_cost_ms[bucket_key]
+            elapsed_s = cost_ms / 1e3
+            logger.info(
+                "VerifyAdaptiveController: profile row bs=%d query_len=%d "
+                "sum_query_len=%d runtime_mode=%s padded_tokens=%d "
+                "cost_ms=%.6f raw_median_ms=%.6f raw_avg_ms=%.6f raw_std_ms=%.6f",
+                bs,
+                int(record["query_len_per_req"]),
+                num_tokens,
+                bucket_modes[bucket_key],
+                int(record["padded_tokens"]),
+                cost_ms,
+                float(record["raw_median_ms"]),
+                float(record["raw_avg_ms"]),
+                float(record["raw_std_ms"]),
+            )
+            self._cost_table[(bs, num_tokens)] = elapsed_s
+            record["avg_ms"] = cost_ms
+            record["cost_ms"] = cost_ms
+            record["cost_s"] = elapsed_s
+            record["bucket_key"] = {
+                "batch_size": bs,
+                "padded_tokens": int(record["padded_tokens"]),
+            }
+            self._cost_records.append(record)
+            self._sorted_sql_per_bs[bs].append(num_tokens)
+
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()

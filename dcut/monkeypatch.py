@@ -434,13 +434,38 @@ def _adaptive_profile_run(
         for _ in range(max(n_warmup, 0)):
             _forward()
         torch.cuda.synchronize()
-        if n_measure > 0:
+        samples_ms: list[float] = []
+        for _ in range(max(n_measure, 0)):
             start_time = time.perf_counter()
-            for _ in range(n_measure):
-                _forward()
+            _forward()
             torch.cuda.synchronize()
-            avg_ms = (time.perf_counter() - start_time) * 1000.0 / n_measure
-    return _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)), avg_ms, int(num_tokens_padded)
+            samples_ms.append((time.perf_counter() - start_time) * 1000.0)
+        if samples_ms:
+            samples = np.asarray(samples_ms, dtype=np.float64)
+            avg_ms = float(samples.mean())
+            timing_stats = {
+                "avg_ms": avg_ms,
+                "median_ms": float(np.median(samples)),
+                "min_ms": float(samples.min()),
+                "max_ms": float(samples.max()),
+                "std_ms": float(samples.std()),
+                "samples_ms": samples_ms,
+            }
+        else:
+            timing_stats = {
+                "avg_ms": 0.0,
+                "median_ms": 0.0,
+                "min_ms": 0.0,
+                "max_ms": 0.0,
+                "std_ms": 0.0,
+                "samples_ms": [],
+            }
+    return (
+        _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)),
+        avg_ms,
+        int(num_tokens_padded),
+        timing_stats,
+    )
 
 
 def _dcut_profile_runner_if_needed(runner, reason: str) -> None:
