@@ -423,13 +423,27 @@ def _adaptive_profile_run(
     with forward_context_manager:
 
         def _forward() -> None:
-            self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
+            # Use the runner forward path instead of calling ``self.model``
+            # directly. On Ascend this preserves the same graph/context
+            # handling used by warmup/capture/dummy runs, including FULL graph
+            # parameter updates and PIECEWISE compiled subgraph dispatch.
+            if hasattr(self, "_model_forward"):
+                self._model_forward(
+                    num_tokens_padded,
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+            else:
+                self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
         for _ in range(max(n_warmup, 0)):
             _forward()
