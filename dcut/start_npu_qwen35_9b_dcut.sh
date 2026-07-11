@@ -13,7 +13,7 @@ export VLLM_DCUT_CONFIG="${VLLM_DCUT_CONFIG:-/data/c00954457/codex_vllm/vllm-asc
 export VLLM_DCUT_COST_TABLE_OUT="${VLLM_DCUT_COST_TABLE_OUT:-/data/c00954457/codex_vllm/vllm-ascend/dcut/cost_table.json}"
 export VLLM_DCUT_TRIM_STATS_OUT="${VLLM_DCUT_TRIM_STATS_OUT:-/data/c00954457/codex_vllm/vllm-ascend/dcut/trim_stats.txt}"
 export VLLM_DCUT_STAT_EVERY="${VLLM_DCUT_STAT_EVERY:-1}"
-export VLLM_DCUT_PROFILE_FORCE_EAGER="${VLLM_DCUT_PROFILE_FORCE_EAGER:-0}"
+export VLLM_DCUT_PROFILE_FORCE_EAGER="${VLLM_DCUT_PROFILE_FORCE_EAGER:-1}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export VLLM_ASCEND_MODEL_PLUGIN="${VLLM_ASCEND_MODEL_PLUGIN:-vllm_ascend.patch_qwen3_5}"
 

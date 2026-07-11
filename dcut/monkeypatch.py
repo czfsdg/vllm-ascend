@@ -75,7 +75,8 @@ def _dcut_init_controller(self) -> None:
     self._dcut_step_idx = 0
     self._dcut_total_trimmed_tokens = 0
     self._dcut_total_trimmed_reqs = 0
-    self._dcut_profile_force_eager = _env_flag(ENV_PROFILE_FORCE_EAGER, False)
+    device_type = str(getattr(getattr(self, "device", None), "type", ""))
+    self._dcut_profile_force_eager = _env_flag(ENV_PROFILE_FORCE_EAGER, False) or device_type == "npu"
     self._dcut_cost_profile_done = False
     self._dcut_cost_profile_failed = False
 
