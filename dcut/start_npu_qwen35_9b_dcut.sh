@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+
+export VLLM_PLUGINS=ascend
+export VLLM_TARGET_DEVICE=ascend
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-11}"
 export VLLM_DCUT_CONFIG="${VLLM_DCUT_CONFIG:-/data/c00954457/codex_vllm/vllm-ascend/dcut/verify_adaptive_config.example.json}"
 export VLLM_DCUT_COST_TABLE_OUT="${VLLM_DCUT_COST_TABLE_OUT:-/data/c00954457/cost_table.json}"
@@ -13,11 +16,10 @@ export VLLM_DCUT_STAT_EVERY="${VLLM_DCUT_STAT_EVERY:-1}"
 export VLLM_DCUT_PROFILE_FORCE_EAGER="${VLLM_DCUT_PROFILE_FORCE_EAGER:-0}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export VLLM_ASCEND_MODEL_PLUGIN="${VLLM_ASCEND_MODEL_PLUGIN:-vllm_ascend.patch_qwen3_5}"
-export VLLM_PLUGINS="${VLLM_PLUGINS:-dcut_adaptive_verify}"
 
 python3 -m vllm.entrypoints.openai.api_server \
   --model /data/models/Qwen3.5-9B \
-  --served-model-name qwen35 \
+  --served-model-name qwen35 qwen3.5-9b \
   --port 8305 \
   --tensor-parallel-size 1 \
   --max-model-len 16384 \

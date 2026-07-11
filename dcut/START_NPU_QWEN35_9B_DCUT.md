@@ -17,10 +17,11 @@ VLLM_DCUT_STAT_EVERY=1
 VLLM_DCUT_PROFILE_FORCE_EAGER=0
 VLLM_USE_V1=1
 VLLM_ASCEND_MODEL_PLUGIN=vllm_ascend.patch_qwen3_5
-VLLM_PLUGINS=dcut_adaptive_verify
+VLLM_PLUGINS=ascend
+VLLM_TARGET_DEVICE=ascend
 ```
 
-启动命令使用 `python3 -m vllm.entrypoints.openai.api_server`，模型为 `/data/models/Qwen3.5-9B`，draft 模型为 `/data/models/Qwen3.5-9B-DFlash`，端口 `8305`，TP=1，并使用：
+启动命令使用 `python3 -m vllm.entrypoints.openai.api_server`，模型为 `/data/models/Qwen3.5-9B`，draft 模型为 `/data/models/Qwen3.5-9B-DFlash`，端口 `8305`，TP=1，并把 served model names 设置为 `qwen35 qwen3.5-9b`，因此请求里的 `model=qwen3.5-9b` 也能命中；并使用：
 
 ```bash
 -cc '{"cudagraph_mode":"piecewise","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256,512]}'
