@@ -18,6 +18,7 @@
 import torch
 import torch_npu
 from einops import rearrange
+from torch.nn import functional as F
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
@@ -259,6 +260,94 @@ def get_non_spec_chunked_prefill_meta(attn_metadata):
     return fallback_meta.chunk
 
 
+def _conv1d_spec_varlen_eager(
+    output_spec: torch.Tensor,
+    mixed_qkv_spec: torch.Tensor,
+    conv_weights: torch.Tensor,
+    conv_state: torch.Tensor,
+    bias: torch.Tensor | None,
+    activation: bool,
+    num_spec: int,
+    spec_query_start_loc: torch.Tensor,
+    spec_state_indices_tensor: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    num_spec_decodes: int,
+):
+    """Per-request conv1d for variable query_len spec-decode (D-Cut on hybrid Mamba/GDN).
+
+    When D-Cut truncates draft tokens, spec-decode requests have variable
+    query_len.  The CANN operator ``npu_causal_conv1d_custom`` with
+    ``run_mode=1`` requires uniform ``q_per_seq = num_spec + 1`` and crashes
+    on variable-length input.  This fallback processes each request
+    independently using ``F.conv1d`` and updates the conv_state following the
+    kernel's spec-decode state-update semantics (shift=1, offset from
+    num_accepted_tokens).
+
+    conv_state layout is SD: (num_cache_lines, state_len, dim).
+    """
+    width = conv_weights.size(1)  # conv_kernel_size
+    state_len = width - 1 + num_spec  # conv_kernel_size - 1 + num_spec
+    dim = conv_weights.size(0)
+    # Depthwise conv weight: (dim, 1, width)
+    dw_weight = conv_weights.unsqueeze(1)
+
+    for b in range(num_spec_decodes):
+        qs = int(spec_query_start_loc[b])
+        qe = int(spec_query_start_loc[b + 1])
+        ql = qe - qs
+        ci = int(spec_state_indices_tensor[b, 0])
+        nat_b = min(int(num_accepted_tokens[b]), ql)
+
+        if ci == PAD_SLOT_ID or ql <= 0:
+            continue
+
+        offset = nat_b - 1  # conv_state_token_offset in kernel
+
+        # --- Conv1d computation ---
+        # Read initial history from the correct offset
+        initial_state = conv_state[ci, offset:offset + width - 1, :].t()  # SD layout: (width-1, dim) -> (dim, width-1)
+
+        # Tokens for this request: (ql, dim) -> (dim, ql)
+        x_b = mixed_qkv_spec[qs:qe].t()
+
+        # Concatenate initial state with new tokens and run depthwise conv1d
+        x_concat = torch.cat([initial_state, x_b], dim=1)  # (dim, width-1+ql)
+        out = F.conv1d(
+            x_concat.unsqueeze(0),  # (1, dim, width-1+ql)
+            dw_weight,               # (dim, 1, width)
+            bias,
+            padding=0,
+            groups=dim,
+        )  # (1, dim, ql)
+
+        if activation:
+            out = F.silu(out)
+
+        output_spec[qs:qe] = out.squeeze(0).t()  # (ql, dim)
+
+        # --- Conv-state update (kernel spec-decode semantics) ---
+        # In spec-decode mode, the kernel writes updated state starting from
+        # position 0 of the cache line (NOT from the read offset).  This
+        # mirrors the Triton kernel where state_dst_base has no
+        # conv_state_token_offset.
+        # Semantics: conv_state[ci] <- concat(old_state, x)[-state_len_run:]
+        #   shift = 1, state_len_run = width - 2 + ql, keep = state_len_run - ql
+        state_len_run = width - 2 + ql
+        keep = state_len_run - ql  # = width - 2
+
+        # Read old state at offset: (state_len_run, dim) in SD layout
+        old_state = conv_state[ci, offset:offset + state_len_run, :].clone()
+
+        # Write updated state from position 0 (NOT offset)
+        # Shift old state by 1 and keep first `keep` positions
+        if keep > 0:
+            conv_state[ci, 0:keep, :] = old_state[1:1 + keep, :]
+
+        # Append new tokens after the shifted state
+        # x_b is (dim, ql), need to transpose back to (ql, dim) for SD layout
+        conv_state[ci, keep:keep + ql, :] = x_b.t()  # x_b is (dim, ql), SD needs (ql, dim)
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
@@ -493,22 +582,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv_spec = output_spec
             else:
                 # for enforce eager
-                output_spec = torch.empty_like(mixed_qkv_spec)
-                torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    output_spec,
-                    mixed_qkv_spec,
-                    conv_weights_T,
-                    conv_state=self_kv_cache[0],
-                    bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=spec_qsl_host,
-                    cache_indices_opt=spec_ci_host,
-                    initial_state_mode_opt=(),
-                    num_accepted_tokens_opt=spec_nat_host,
-                    activation_mode=activation_num,
-                    pad_slot_id=PAD_SLOT_ID,
-                    run_mode=1,
-                )
-                mixed_qkv_spec = output_spec
+                num_spec_decodes = attn_metadata.num_spec_decodes
+                use_cann = False  # CANN op crashes in eager mode; always use fallback
+
+                if use_cann:
+                    # Uniform query_len: use fast CANN operator
+                    output_spec = torch.empty_like(mixed_qkv_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        output_spec,
+                        mixed_qkv_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=spec_qsl_host,
+                        cache_indices_opt=spec_ci_host,
+                        initial_state_mode_opt=(),
+                        num_accepted_tokens_opt=spec_nat_host,
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=1,
+                    )
+                    mixed_qkv_spec = output_spec
+                else:
+                    # Variable query_len (D-Cut truncation on hybrid Mamba/GDN):
+                    # CANN operator requires uniform q_per_seq = num_spec + 1,
+                    # so we fall back to per-request F.conv1d with correct
+                    # conv_state update following the kernel's spec-decode logic.
+                    output_spec = torch.empty_like(mixed_qkv_spec)
+                    _conv1d_spec_varlen_eager(
+                        output_spec,
+                        mixed_qkv_spec,
+                        conv_weights,
+                        self_kv_cache[0],
+                        self.conv1d.bias,
+                        self.activation,
+                        self.num_spec,
+                        spec_query_start_loc,
+                        spec_state_indices_tensor,
+                        num_accepted_tokens,
+                        num_spec_decodes,
+                    )
+                    mixed_qkv_spec = output_spec
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -655,6 +769,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
+            # Align ssm_state_indices with actual token positions for D-Cut
+            # variable lengths. spec_state_indices_tensor is [num_spec_decodes,
+            # num_spec+1] but the C++ kernel indexes the flat array with
+            # cumulative token positions. D-Cut trims requests to variable
+            # lengths, so we must select only valid entries per request.
+            per_seq_lens = actual_seq_lengths[1:]
+            max_tokens = spec_state_indices_tensor.size(1)
+            col_idx = torch.arange(max_tokens, device=spec_state_indices_tensor.device)
+            mask = col_idx.unsqueeze(0) < per_seq_lens.unsqueeze(1)
+            aligned_ssm_indices = spec_state_indices_tensor[mask]
+            # Clamp num_accepted_tokens to actual seq lengths.
+            # D-Cut trims draft after num_scheduled_tokens is set,
+            # so num_accepted_tokens may exceed actual seq length.
+            # C++ kernel silently returns when acceptedTokenNum > seqLen.
+            clamped_nat = torch.minimum(
+                num_accepted_tokens.to(torch.int32),
+                per_seq_lens.to(torch.int32)
+            )
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             # The custom op extends dtype support (e.g. float32 state) and is
@@ -668,8 +800,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=num_accepted_tokens.to(torch.int32),
+                ssm_state_indices=aligned_ssm_indices,
+                num_accepted_tokens=clamped_nat,
             ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
