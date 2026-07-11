@@ -9,6 +9,7 @@ confidence scores.
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import types
@@ -324,16 +325,21 @@ def _adaptive_profile_run(
             self.num_accepted_tokens.gpu[:num_reqs] = max_query_len
             self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
     pad_attn = _cudagraph_mode == CUDAGraphMode.FULL
-    attn_metadata, _ = self._build_attention_metadata(
-        num_tokens=num_tokens_unpadded,
-        num_tokens_padded=num_tokens_padded if pad_attn else None,
-        num_reqs=num_reqs_padded,
-        max_query_len=max_query_len,
-        ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
-        for_cudagraph_capture=False,
-        slot_mappings=slot_mappings_by_group,
-        use_spec_decode=self.speculative_config is not None,
-    )
+    attn_kwargs = {
+        "num_tokens": num_tokens_unpadded,
+        "num_tokens_padded": num_tokens_padded if pad_attn else None,
+        "num_reqs": num_reqs_padded,
+        "num_reqs_padded": num_reqs_padded,
+        "max_query_len": max_query_len,
+        "ubatch_slices": ubatch_slices_padded if pad_attn else ubatch_slices,
+        "for_cudagraph_capture": False,
+        "slot_mappings": slot_mappings_by_group,
+        "use_spec_decode": self.speculative_config is not None,
+        "num_scheduled_tokens_np": num_scheduled_tokens,
+    }
+    build_attn_params = inspect.signature(self._build_attention_metadata).parameters
+    attn_kwargs = {name: value for name, value in attn_kwargs.items() if name in build_attn_params}
+    attn_metadata, _ = self._build_attention_metadata(**attn_kwargs)
     if ubatch_slices_padded is not None:
         num_tokens_padded = ubatch_slices_padded[0].num_tokens
     if num_tokens_across_dp is not None:
