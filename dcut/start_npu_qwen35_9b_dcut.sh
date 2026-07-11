@@ -38,5 +38,5 @@ python3 -m vllm.entrypoints.openai.api_server \
   --max-model-len 16384 \
   --allowed-local-media-path /data \
   --gpu-memory-utilization 0.50 \
-  -cc '{"cudagraph_mode":"full_decode_only","cudagraph_capture_sizes":[8,16,32,64,128,256,512]}' \
+  -cc '{"cudagraph_mode":"piecewise","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256,512]}' \
   --speculative-config '{"method":"dflash","model":"/data/models/Qwen3.5-9B-DFlash","num_speculative_tokens":7,"enforce_eager":true}'

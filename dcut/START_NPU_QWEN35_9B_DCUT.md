@@ -24,7 +24,7 @@ VLLM_TARGET_DEVICE=ascend
 启动命令使用 `python3 -m vllm.entrypoints.openai.api_server`，模型为 `/data/models/Qwen3.5-9B`，draft 模型为 `/data/models/Qwen3.5-9B-DFlash`，端口 `8305`，TP=1，并把 served model names 设置为 `qwen35 qwen3.5-9b`，因此请求里的 `model=qwen3.5-9b` 也能命中；并使用：
 
 ```bash
--cc '{"cudagraph_mode":"full_decode_only","cudagraph_capture_sizes":[8,16,32,64,128,256,512]}'
+-cc '{"cudagraph_mode":"piecewise","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256,512]}'
 --speculative-config '{"method":"dflash","model":"/data/models/Qwen3.5-9B-DFlash","num_speculative_tokens":7,"enforce_eager":true}'
 ```
 
@@ -73,7 +73,7 @@ D-Cut patched worker hooks for vllm_ascend.worker.worker.Worker
 D-Cut adaptive verify ENABLED
 D-Cut worker warmup hook reached: vllm_ascend.worker.worker.Worker.compile_or_warm_up_model
 D-Cut cost profiling START
-D-Cut adaptive profile run: runtime_mode=FCG ...
+D-Cut adaptive profile run: runtime_mode=PCG ...
 # 如果 warmup hook 没走，第一次请求时应看到：
 D-Cut cost profiling LAZY START from vllm_ascend.worker.worker.Worker.execute_model
 VerifyAdaptiveController: begin cost profiling
@@ -82,6 +82,6 @@ VerifyAdaptiveController: dumped JSON cost table to .../cost_table.json
 D-Cut cost profiling END
 ```
 
-当前 NPU 脚本默认用 `full_decode_only` 并设置 `VLLM_DCUT_PROFILE_FORCE_EAGER=0`，因此 cost profiling 的关键行必须显示 `runtime_mode=FCG`（或在显式改回 PIECEWISE 时显示 `runtime_mode=PCG`），否则说明没有入图。
+当前 NPU 脚本默认用 `piecewise` 并设置 `VLLM_DCUT_PROFILE_FORCE_EAGER=0`，因此 cost profiling 的关键行必须显示 `runtime_mode=PCG`，否则说明没有入图。FULL_DECODE_ONLY 当前会在启动阶段的 GDN spec-decode graph capture 中触发 mask/state-index 形状不匹配，不能作为默认路径。
 
 如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果看到 `Ascend NPUModelRunner patch skipped` 或循环导入错误，说明还在用旧脚本/旧代码。当前代码不会在 plugin install 阶段主动 import Ascend runner，而是在 runner 实例初始化完成后检查已经加载的 `vllm_ascend.worker.worker.Worker` 并动态 patch，因此应在 `D-Cut adaptive verify ENABLED` 附近看到 `D-Cut runner init concrete class`、`D-Cut patched execute_model for vllm_ascend.worker.model_runner_v1.NPUModelRunner`，以及 `D-Cut Ascend worker module watch installed` 或 `D-Cut patched worker hooks for vllm_ascend.worker.worker.Worker`。当前 vLLM 启动路径如果仍然不走 worker warmup hook，第一次请求应触发 `D-Cut cost profiling LAZY START from vllm_ascend.worker.worker.Worker.execute_model` 并生成 cost table。
