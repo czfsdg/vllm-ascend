@@ -389,6 +389,35 @@ def _adaptive_profile_run(
     return _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)), avg_ms, int(num_tokens_padded)
 
 
+
+def _dcut_prepare_execute_model(self, scheduler_output):
+    if getattr(self, "_verify_adaptive_controller", None) is None:
+        return scheduler_output
+    if not getattr(self, "_dcut_cost_profile_done", False) and not getattr(
+            self, "_dcut_cost_profile_failed", False):
+        logger.info(
+            "D-Cut cost profiling LAZY START from execute_model: warmup hook did not produce a cost table before this batch.")
+        try:
+            self.profile_adaptive_cost()
+        except Exception:
+            # profile_adaptive_cost already logged the stack and marks failure.
+            pass
+    return _dcut_truncate(self, scheduler_output)
+
+
+def _dcut_patch_execute_model(cls, class_label: str) -> None:
+    if getattr(cls, "_dcut_execute_model_patched", False):
+        return
+    original_execute_model = cls.execute_model
+
+    def execute_model(self, scheduler_output, *args, **kwargs):
+        scheduler_output = _dcut_prepare_execute_model(self, scheduler_output)
+        return original_execute_model(self, scheduler_output, *args, **kwargs)
+
+    cls.execute_model = execute_model
+    cls._dcut_execute_model_patched = True
+    logger.info("D-Cut patched execute_model for %s", class_label)
+
 def _patch_proposer() -> None:
     import vllm.v1.spec_decode.llm_base_proposer as m
 
@@ -450,22 +479,6 @@ def _patch_runner() -> None:
             logger.error("D-Cut init failed; running vanilla: %s", e)
             self._verify_adaptive_controller = None
 
-    _orig_exec = R.execute_model
-
-    def execute_model(self, scheduler_output, intermediate_tensors=None):
-        if getattr(self, "_verify_adaptive_controller", None) is not None:
-            if not getattr(self, "_dcut_cost_profile_done", False) and not getattr(
-                    self, "_dcut_cost_profile_failed", False):
-                logger.info(
-                    "D-Cut cost profiling LAZY START from execute_model: worker warmup hook did not run before first batch.")
-                try:
-                    self.profile_adaptive_cost()
-                except Exception:
-                    # profile_adaptive_cost already logged the stack and marks failure.
-                    pass
-            scheduler_output = _dcut_truncate(self, scheduler_output)
-        return _orig_exec(self, scheduler_output, intermediate_tensors)
-
     _orig_sample_tokens = R.sample_tokens
 
     def sample_tokens(self, *a, **k):
@@ -499,7 +512,7 @@ def _patch_runner() -> None:
         return ret
 
     R.__init__ = __init__
-    R.execute_model = execute_model
+    _dcut_patch_execute_model(R, "vllm.v1.worker.gpu_model_runner.GPUModelRunner")
     R.sample_tokens = sample_tokens
     R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     R._update_states = _update_states
@@ -508,6 +521,20 @@ def _patch_runner() -> None:
     R._maybe_process_adaptive_probs = _maybe_process_adaptive_probs
     R._dcut_patched = True
 
+
+
+def _patch_ascend_runner() -> None:
+    try:
+        import vllm_ascend.worker.model_runner_v1 as m
+    except Exception as exc:  # pragma: no cover - optional outside Ascend
+        logger.info("D-Cut: Ascend NPUModelRunner patch skipped: %s", exc)
+        return
+    runner_cls = getattr(m, "NPUModelRunner", None)
+    if runner_cls is None:
+        logger.info("D-Cut: Ascend NPUModelRunner patch skipped: class not found.")
+        return
+    _dcut_patch_execute_model(
+        runner_cls, "vllm_ascend.worker.model_runner_v1.NPUModelRunner")
 
 def _patch_worker() -> None:
     import vllm.v1.worker.gpu_worker as m
@@ -552,6 +579,7 @@ def install(*args, **kwargs) -> None:
             os.getenv(ENV_PROFILE_FORCE_EAGER), os.getenv("VLLM_PLUGINS"))
         _patch_proposer()
         _patch_runner()
+        _patch_ascend_runner()
         _patch_worker()
         _INSTALLED = True
         logger.info(
