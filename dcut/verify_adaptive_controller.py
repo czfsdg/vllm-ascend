@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 
 def choose_query_lens_discrete(
-    probs: "list[list[float]] | np.ndarray",
+    probs: list[list[float]] | np.ndarray,
     base_batch_size: int,
     q_levels: list[int],
     cost_lookup: Callable[[int], float],
@@ -82,8 +82,8 @@ class VerifyAdaptiveController:
         self.max_batch_size = max_batch_size
         self.device = device
         self.max_query_len_per_req = (
-            config.max_query_len_per_req
-            if config.max_query_len_per_req is not None else num_spec_tokens + 1)
+            config.max_query_len_per_req if config.max_query_len_per_req is not None else num_spec_tokens + 1
+        )
         self._batch_size_levels = self._build_batch_size_levels()
         self._query_len_levels = self._build_query_len_levels()
         self._cost_table: dict[tuple[int, int], float] = {}
@@ -92,15 +92,16 @@ class VerifyAdaptiveController:
         self._sorted_sql_per_bs: dict[int, list[int]] = {}
         self._adaptive_draft_lens: dict[str, int] = {}
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
-            logger.info("VerifyAdaptiveController: bs_levels=%s ql_levels=%s",
-                        self._batch_size_levels, self._query_len_levels)
+            logger.info(
+                "VerifyAdaptiveController: bs_levels=%s ql_levels=%s", self._batch_size_levels, self._query_len_levels
+            )
 
     def _build_batch_size_levels(self) -> list[int]:
         if self.config.warmup_batch_sizes:
             return sorted(set(self.config.warmup_batch_sizes))
-        cap = (self.config.max_warmup_batch_size
-               if self.config.max_warmup_batch_size is not None
-               else self.max_batch_size)
+        cap = (
+            self.config.max_warmup_batch_size if self.config.max_warmup_batch_size is not None else self.max_batch_size
+        )
         start = self.config.min_warmup_batch_size
         levels = list(range(start, cap + 1, 2))
         if not levels or levels[-1] < cap:
@@ -122,19 +123,24 @@ class VerifyAdaptiveController:
             return
         max_tokens = getattr(runner, "max_num_tokens", None)
         logger.info(
-            "VerifyAdaptiveController: begin cost profiling bs_levels=%s ql_levels=%s warmup_seq_lens=%s n_warmup_iters=%s n_measure_iters=%s max_tokens=%s json_out=%s markdown_out=%s",
-            self._batch_size_levels, self._query_len_levels,
-            self.config.warmup_seq_lens, self.config.n_warmup_iters,
-            self.config.n_measure_iters, max_tokens,
+            "VerifyAdaptiveController: begin cost profiling bs_levels=%s ql_levels=%s "
+            "warmup_seq_lens=%s n_warmup_iters=%s n_measure_iters=%s "
+            "max_tokens=%s json_out=%s markdown_out=%s",
+            self._batch_size_levels,
+            self._query_len_levels,
+            self.config.warmup_seq_lens,
+            self.config.n_warmup_iters,
+            self.config.n_measure_iters,
+            max_tokens,
             os.getenv("VLLM_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path,
-            os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT") or self.config.cost_table_markdown_path)
+            os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT") or self.config.cost_table_markdown_path,
+        )
         for bs in self._batch_size_levels:
             self._sorted_sql_per_bs[bs] = []
             for ql in self._query_len_levels:
                 num_tokens = bs * ql
                 if max_tokens is not None and num_tokens > max_tokens:
-                    logger.info("profile skip: bs=%d ql=%d num_tokens=%d > %d",
-                                bs, ql, num_tokens, max_tokens)
+                    logger.info("profile skip: bs=%d ql=%d num_tokens=%d > %d", bs, ql, num_tokens, max_tokens)
                     continue
                 runtime_mode, avg_ms, padded_tokens = runner._adaptive_profile_run(
                     [ql] * bs,
@@ -144,30 +150,36 @@ class VerifyAdaptiveController:
                 )
                 elapsed_s = avg_ms / 1e3
                 logger.info(
-                    "VerifyAdaptiveController: profile row bs=%d query_len=%d sum_query_len=%d runtime_mode=%s padded_tokens=%d avg_ms=%.6f",
-                    bs, ql, num_tokens, runtime_mode, padded_tokens, avg_ms)
+                    "VerifyAdaptiveController: profile row bs=%d query_len=%d "
+                    "sum_query_len=%d runtime_mode=%s padded_tokens=%d avg_ms=%.6f",
+                    bs,
+                    ql,
+                    num_tokens,
+                    runtime_mode,
+                    padded_tokens,
+                    avg_ms,
+                )
                 self._cost_table[(bs, num_tokens)] = elapsed_s
-                self._cost_records.append({
-                    "batch_size": bs,
-                    "query_len_per_req": ql,
-                    "sum_query_len": num_tokens,
-                    "padded_tokens": padded_tokens,
-                    "seq_lens": self.config.warmup_seq_lens,
-                    "runtime_mode": runtime_mode,
-                    "avg_ms": avg_ms,
-                    "cost_s": elapsed_s,
-                })
+                self._cost_records.append(
+                    {
+                        "batch_size": bs,
+                        "query_len_per_req": ql,
+                        "sum_query_len": num_tokens,
+                        "padded_tokens": padded_tokens,
+                        "seq_lens": self.config.warmup_seq_lens,
+                        "runtime_mode": runtime_mode,
+                        "avg_ms": avg_ms,
+                        "cost_s": elapsed_s,
+                    }
+                )
                 self._sorted_sql_per_bs[bs].append(num_tokens)
-        self._sorted_bs = [
-            bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]
-        ]
+        self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
         tp_group = get_tp_group()
         if tp_group.world_size > 1:
             self._cost_table = tp_group.broadcast_object(self._cost_table, src=0)
-        logger.info("VerifyAdaptiveController: cost table ready (%d entries).",
-                    len(self._cost_table))
+        logger.info("VerifyAdaptiveController: cost table ready (%d entries).", len(self._cost_table))
         self._log_cost_table()
         self._dump_cost_table_if_requested()
 
@@ -210,21 +222,22 @@ class VerifyAdaptiveController:
     def _cost_table_rows(self) -> list[dict[str, Any]]:
         rows = []
         for (bs, sum_query_len), cost_s in sorted(self._cost_table.items()):
-            rows.append({
-                "batch_size": bs,
-                "sum_query_len": sum_query_len,
-                "query_len_per_req": sum_query_len // bs
-                if bs > 0 and sum_query_len % bs == 0 else None,
-                "cost_s": cost_s,
-                "cost_ms": cost_s * 1e3,
-            })
+            rows.append(
+                {
+                    "batch_size": bs,
+                    "sum_query_len": sum_query_len,
+                    "query_len_per_req": sum_query_len // bs if bs > 0 and sum_query_len % bs == 0 else None,
+                    "cost_s": cost_s,
+                    "cost_ms": cost_s * 1e3,
+                }
+            )
         return rows
 
     def _format_cost_table_markdown(self, rows: list[dict[str, Any]]) -> str:
         lines = [
             "# D-Cut verifier cost table",
             "",
-            f"- runtime target: Qwen3.5 GDN with PIECEWISE graph capture",
+            "- runtime target: Qwen3.5 GDN graph capture",
             f"- num_spec_tokens: {self.num_spec_tokens}",
             f"- max_batch_size: {self.max_batch_size}",
             f"- warmup_seq_lens: {self.config.warmup_seq_lens}",
@@ -238,7 +251,8 @@ class VerifyAdaptiveController:
             lines.append(
                 f"| {row['batch_size']} | {row['query_len_per_req']} | "
                 f"{row['sum_query_len']} | {row['cost_ms']:.6f} | "
-                f"{row['cost_s']:.9f} |")
+                f"{row['cost_s']:.9f} |"
+            )
         lines.append("")
         return "\n".join(lines)
 
@@ -249,13 +263,11 @@ class VerifyAdaptiveController:
         if not rows:
             logger.warning("VerifyAdaptiveController: empty cost table.")
             return
-        logger.info("D-Cut verifier cost table (Qwen3.5 GDN PIECEWISE):\n%s",
-                    self._format_cost_table_markdown(rows))
+        logger.info("D-Cut verifier cost table (Qwen3.5 GDN graph):\n%s", self._format_cost_table_markdown(rows))
 
     def _dump_cost_table_if_requested(self) -> None:
         dump_path = os.getenv("VLLM_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path
-        markdown_path = (os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT")
-                         or self.config.cost_table_markdown_path)
+        markdown_path = os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT") or self.config.cost_table_markdown_path
         if not dump_path and not markdown_path:
             return
         if get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:
@@ -282,8 +294,7 @@ class VerifyAdaptiveController:
                 json.dump(payload, f, indent=2, sort_keys=True)
                 f.write("\n")
             os.replace(tmp_path, dump_path)
-            logger.info("VerifyAdaptiveController: dumped JSON cost table to %s",
-                        dump_path)
+            logger.info("VerifyAdaptiveController: dumped JSON cost table to %s", dump_path)
         if markdown_path:
             dirname = os.path.dirname(markdown_path)
             if dirname:
@@ -292,8 +303,7 @@ class VerifyAdaptiveController:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(self._format_cost_table_markdown(rows))
             os.replace(tmp_path, markdown_path)
-            logger.info("VerifyAdaptiveController: dumped Markdown cost table to %s",
-                        markdown_path)
+            logger.info("VerifyAdaptiveController: dumped Markdown cost table to %s", markdown_path)
 
 
 def _ceil_lookup(val: int, sorted_keys: list[int]) -> int:

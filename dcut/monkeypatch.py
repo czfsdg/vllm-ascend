@@ -75,8 +75,7 @@ def _dcut_init_controller(self) -> None:
     self._dcut_step_idx = 0
     self._dcut_total_trimmed_tokens = 0
     self._dcut_total_trimmed_reqs = 0
-    device_type = str(getattr(getattr(self, "device", None), "type", ""))
-    self._dcut_profile_force_eager = _env_flag(ENV_PROFILE_FORCE_EAGER, False) or device_type == "npu"
+    self._dcut_profile_force_eager = _env_flag(ENV_PROFILE_FORCE_EAGER, False)
     self._dcut_cost_profile_done = False
     self._dcut_cost_profile_failed = False
 
@@ -248,12 +247,13 @@ def profile_adaptive_cost(self) -> None:
             return
         logger.info(
             "D-Cut cost profiling START: config=%s cost_table_out=%s "
-            "trim_stats_out=%s stat_every=%s profile_force_eager=%s",
+            "trim_stats_out=%s stat_every=%s profile_force_eager=%s cudagraph_mode=%s",
             os.getenv(ENV_CONFIG),
             os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
             os.getenv(ENV_TRIM_STATS_OUT),
             os.getenv(ENV_STAT_EVERY),
-            os.getenv(ENV_PROFILE_FORCE_EAGER),
+            getattr(self, "_dcut_profile_force_eager", None),
+            getattr(getattr(self, "compilation_config", None), "cudagraph_mode", None),
         )
         try:
             ctrl.profile_cost_table(self)
@@ -283,6 +283,14 @@ def _adaptive_profile_run(
     num_tokens_unpadded = int(num_scheduled_tokens.sum())
     max_query_len = int(num_scheduled_tokens.max())
     assert num_tokens_unpadded <= self.max_num_tokens
+    logger.info(
+        "D-Cut adaptive profile dispatch: scheduled_tokens=%s sum_query_len=%d "
+        "force_eager=%s configured_cudagraph_mode=%s",
+        scheduled_tokens,
+        num_tokens_unpadded,
+        getattr(self, "_dcut_profile_force_eager", False),
+        getattr(getattr(self, "compilation_config", None), "cudagraph_mode", None),
+    )
     _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
         num_tokens=num_tokens_unpadded,
         num_reqs=num_reqs,
@@ -318,6 +326,11 @@ def _adaptive_profile_run(
         self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
         self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(cum_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
+        if getattr(self, "_has_gdn", False):
+            self.gdn_query_start_loc.np[0] = 0
+            self.gdn_query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+            self.gdn_query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(cum_num_tokens[-1])
+            self.gdn_query_start_loc.copy_to_gpu()
         self.input_batch.block_table.commit_block_table(num_reqs_padded)
         if self.speculative_config is not None:
             draft_len = max_query_len - 1
@@ -326,6 +339,9 @@ def _adaptive_profile_run(
             self.num_decode_draft_tokens.copy_to_gpu()
             self.num_accepted_tokens.gpu[:num_reqs] = max_query_len
             self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+    ascend_attention_mod = sys.modules.get("vllm_ascend.attention.attention_v1")
+    if ascend_attention_mod is not None and hasattr(ascend_attention_mod, "AscendAttentionState"):
+        self.attn_state = ascend_attention_mod.AscendAttentionState.DecodeOnly
     pad_attn = _cudagraph_mode == CUDAGraphMode.FULL
     attn_kwargs = {
         "num_tokens": num_tokens_unpadded,
@@ -371,16 +387,40 @@ def _adaptive_profile_run(
         CUDAGraphMode.NONE: "eager",
     }
     avg_ms = 0.0
-    with set_forward_context(
-        attn_metadata,
-        self.vllm_config,
-        num_tokens=num_tokens_padded,
-        num_tokens_across_dp=num_tokens_across_dp,
-        cudagraph_runtime_mode=_cudagraph_mode,
-        batch_descriptor=batch_desc,
-        ubatch_slices=ubatch_slices_padded,
-        slot_mapping=slot_mappings,
-    ):
+    ascend_ctx_mod = sys.modules.get("vllm_ascend.ascend_forward_context")
+    if ascend_ctx_mod is not None and hasattr(ascend_ctx_mod, "set_ascend_forward_context"):
+        forward_context_manager = ascend_ctx_mod.set_ascend_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens_padded,
+            num_tokens_across_dp=num_tokens_across_dp,
+            in_profile_run=False,
+            num_actual_tokens=num_tokens_padded,
+            aclgraph_runtime_mode=_cudagraph_mode,
+            batch_descriptor=batch_desc,
+            model_instance=self.model,
+            input_ids=input_ids,
+        )
+    else:
+        forward_context_manager = set_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens_padded,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=_cudagraph_mode,
+            batch_descriptor=batch_desc,
+            ubatch_slices=ubatch_slices_padded,
+            slot_mapping=slot_mappings,
+        )
+
+    logger.info(
+        "D-Cut adaptive profile run: runtime_mode=%s batch_descriptor=%s padded_tokens=%d padded_reqs=%d",
+        _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)),
+        batch_desc,
+        num_tokens_padded,
+        num_reqs_padded,
+    )
+    with forward_context_manager:
 
         def _forward() -> None:
             self.model(
