@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from contextlib import suppress
 from dataclasses import replace
 
@@ -425,7 +426,7 @@ def _dcut_profile_runner_if_needed(runner, reason: str) -> None:
 
 
 def _patch_worker_class(worker_cls, class_label: str) -> None:
-    if getattr(worker_cls, "_dcut_worker_hooks_patched", False):
+    if worker_cls.__dict__.get("_dcut_worker_hooks_patched", False):
         return
 
     if hasattr(worker_cls, "compile_or_warm_up_model"):
@@ -454,6 +455,24 @@ def _patch_worker_class(worker_cls, class_label: str) -> None:
     logger.info("D-Cut patched worker hooks for %s", class_label)
 
 
+def _watch_ascend_worker_module(module) -> None:
+    if getattr(module, "_dcut_worker_module_watch_installed", False):
+        return
+
+    base_cls = module.__class__
+
+    class DcutWorkerModuleWatch(base_cls):
+        def __setattr__(self, name, value):
+            super().__setattr__(name, value)
+            if name == "Worker":
+                _patch_worker_class(value, "vllm_ascend.worker.worker.Worker")
+
+    if issubclass(base_cls, types.ModuleType):
+        module.__class__ = DcutWorkerModuleWatch
+        module._dcut_worker_module_watch_installed = True
+        logger.info("D-Cut Ascend worker module watch installed; waiting for Worker class definition.")
+
+
 def _patch_loaded_ascend_worker() -> None:
     module = sys.modules.get("vllm_ascend.worker.worker")
     if module is None:
@@ -462,6 +481,7 @@ def _patch_loaded_ascend_worker() -> None:
     worker_cls = getattr(module, "Worker", None)
     if worker_cls is None:
         logger.info("D-Cut Ascend worker hooks pending: Worker class is not available yet.")
+        _watch_ascend_worker_module(module)
         return
     _patch_worker_class(worker_cls, "vllm_ascend.worker.worker.Worker")
 
@@ -481,7 +501,7 @@ def _dcut_prepare_execute_model(self, scheduler_output):
 
 
 def _dcut_patch_execute_model(cls, class_label: str) -> None:
-    if getattr(cls, "_dcut_execute_model_patched", False):
+    if cls.__dict__.get("_dcut_execute_model_patched", False):
         return
     original_execute_model = cls.execute_model
 
