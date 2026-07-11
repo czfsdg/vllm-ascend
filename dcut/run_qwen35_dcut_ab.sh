@@ -29,6 +29,7 @@ STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-1800}"
 DCUT_CONFIG="${DCUT_CONFIG:-$SCRIPT_DIR/verify_adaptive_config.example.json}"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/qwen35_dcut_results/$(date +%Y%m%d_%H%M%S)}"
 DCUT_COST_TABLE_OUT="${DCUT_COST_TABLE_OUT:-$OUT_DIR/dcut_cost_table.json}"
+DCUT_COST_TABLE_MD_OUT="${DCUT_COST_TABLE_MD_OUT:-$OUT_DIR/dcut_cost_table.md}"
 VARIANTS="${VARIANTS:-vanilla,dcut}"
 EXTRA_SERVE_ARGS="${EXTRA_SERVE_ARGS:-}"
 BENCH_EXTRA_ARGS="${BENCH_EXTRA_ARGS:-}"
@@ -101,6 +102,7 @@ start_server() {
     --tensor-parallel-size "$TP"
     --max-num-seqs "$MAX_NUM_SEQS"
     --speculative-config "$spec_config"
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
     --default-chat-template-kwargs '{"enable_thinking": false}'
   )
   if [[ -n "$MAX_NUM_BATCHED_TOKENS" ]]; then
@@ -116,6 +118,7 @@ start_server() {
     env \
       VLLM_DCUT_CONFIG="$DCUT_CONFIG" \
       VLLM_DCUT_COST_TABLE_OUT="$DCUT_COST_TABLE_OUT" \
+      VLLM_DCUT_COST_TABLE_MD_OUT="$DCUT_COST_TABLE_MD_OUT" \
       VLLM_PLUGINS="${VLLM_PLUGINS:-dcut_adaptive_verify}" \
       VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
       no_proxy="${no_proxy:-localhost,127.0.0.1}" \
@@ -124,6 +127,7 @@ start_server() {
     env \
       VLLM_DCUT_CONFIG="" \
       VLLM_DCUT_COST_TABLE_OUT="" \
+      VLLM_DCUT_COST_TABLE_MD_OUT="" \
       VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
       no_proxy="${no_proxy:-localhost,127.0.0.1}" \
       "${cmd[@]}" >"$log_file" 2>&1 &
@@ -228,9 +232,15 @@ print_dcut_server_check() {
     echo "[warn] no D-Cut activation/profiling lines found in $log_file"
   fi
   if [[ -f "$DCUT_COST_TABLE_OUT" ]]; then
-    echo "[cost-table] $DCUT_COST_TABLE_OUT"
+    echo "[cost-table-json] $DCUT_COST_TABLE_OUT"
   else
-    echo "[warn] no exported D-Cut cost table found at $DCUT_COST_TABLE_OUT"
+    echo "[warn] no exported D-Cut JSON cost table found at $DCUT_COST_TABLE_OUT"
+  fi
+  if [[ -f "$DCUT_COST_TABLE_MD_OUT" ]]; then
+    echo "[cost-table-md] $DCUT_COST_TABLE_MD_OUT"
+    sed -n '1,120p' "$DCUT_COST_TABLE_MD_OUT"
+  else
+    echo "[warn] no exported D-Cut Markdown cost table found at $DCUT_COST_TABLE_MD_OUT"
   fi
 }
 
@@ -240,6 +250,8 @@ echo "[config] draft=$DRAFT_MODEL"
 echo "[config] dataset=$DATASET"
 echo "[config] out=$OUT_DIR"
 echo "[config] dcut_cost_table_out=$DCUT_COST_TABLE_OUT"
+echo "[config] dcut_cost_table_md_out=$DCUT_COST_TABLE_MD_OUT"
+echo "[config] compilation_config={\"cudagraph_mode\":\"PIECEWISE\"}"
 echo "[config] variants=$VARIANTS concurrency=$CONCURRENCY_LIST num=$NUM warmup=$WARMUP tail_frac=$TAIL_FRAC"
 
 IFS=',' read -r -a variants <<< "$VARIANTS"

@@ -44,6 +44,9 @@ class VerifyAdaptiveConfig:
     cost_table_dump_path: Optional[str] = None
     """Optional JSON path for exporting the profiled verifier cost table."""
 
+    cost_table_markdown_path: Optional[str] = None
+    """Optional Markdown path for a human-readable cost table."""
+
     enabled: bool = True
 
     @classmethod

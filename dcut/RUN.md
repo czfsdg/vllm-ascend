@@ -77,3 +77,29 @@ vllm serve /data/wenxuan/Qwen3.5-122B-A10B \
   --max-num-seqs 64 \
   --no-async-scheduling
 ```
+
+## Qwen3.5 GDN PIECEWISE graph target
+
+For the current Qwen3.5 GDN PIECEWISE graph target, use the dedicated launcher and config:
+
+```bash
+MODEL=/data/models/Qwen3.5-GDN \
+DRAFT_MODEL=/data/models/Qwen3.5-GDN-Draft \
+TP=8 \
+bash dcut/start_qwen35_gdn_piecewise.sh
+```
+
+This launcher always passes:
+
+```bash
+--compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+```
+
+and writes both JSON and Markdown cost tables via:
+
+```bash
+VLLM_DCUT_COST_TABLE_OUT=.../qwen35_gdn_piecewise_cost_table.json
+VLLM_DCUT_COST_TABLE_MD_OUT=.../qwen35_gdn_piecewise_cost_table.md
+```
+
+See `dcut/START_QWEN35_GDN_PIECEWISE.md` for the full command and cost-table inspection steps.
