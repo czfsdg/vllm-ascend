@@ -71,6 +71,8 @@ def _dcut_init_controller(self) -> None:
     self._dcut_total_trimmed_tokens = 0
     self._dcut_total_trimmed_reqs = 0
     self._dcut_profile_force_eager = _env_flag(ENV_PROFILE_FORCE_EAGER, False)
+    self._dcut_cost_profile_done = False
+    self._dcut_cost_profile_failed = False
 
     cfg_path = os.environ.get(ENV_CONFIG) or None
     if not cfg_path:
@@ -227,17 +229,29 @@ def _maybe_process_adaptive_probs(self) -> None:
 def profile_adaptive_cost(self) -> None:
     ctrl = getattr(self, "_verify_adaptive_controller", None)
     if ctrl is not None:
+        if getattr(self, "_dcut_cost_profile_done", False):
+            logger.info("D-Cut cost profiling SKIP: already done.")
+            return
+        if getattr(self, "_dcut_cost_profile_failed", False):
+            logger.info("D-Cut cost profiling SKIP: previous attempt failed.")
+            return
         logger.info(
             "D-Cut cost profiling START: config=%s cost_table_out=%s trim_stats_out=%s stat_every=%s profile_force_eager=%s",
             os.getenv(ENV_CONFIG), os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
             os.getenv(ENV_TRIM_STATS_OUT), os.getenv(ENV_STAT_EVERY),
             os.getenv(ENV_PROFILE_FORCE_EAGER))
-        ctrl.profile_cost_table(self)
-        logger.info(
-            "D-Cut cost profiling END: entries=%d json_out=%s markdown_out=%s",
-            len(getattr(ctrl, "_cost_table", {})),
-            os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
-            os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT"))
+        try:
+            ctrl.profile_cost_table(self)
+            self._dcut_cost_profile_done = True
+            logger.info(
+                "D-Cut cost profiling END: entries=%d json_out=%s markdown_out=%s",
+                len(getattr(ctrl, "_cost_table", {})),
+                os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
+                os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT"))
+        except Exception:
+            self._dcut_cost_profile_failed = True
+            logger.exception("D-Cut cost profiling FAILED; adaptive trimming will stay disabled until restart.")
+            raise
 
 
 @torch.inference_mode()
@@ -440,6 +454,15 @@ def _patch_runner() -> None:
 
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         if getattr(self, "_verify_adaptive_controller", None) is not None:
+            if not getattr(self, "_dcut_cost_profile_done", False) and not getattr(
+                    self, "_dcut_cost_profile_failed", False):
+                logger.info(
+                    "D-Cut cost profiling LAZY START from execute_model: worker warmup hook did not run before first batch.")
+                try:
+                    self.profile_adaptive_cost()
+                except Exception:
+                    # profile_adaptive_cost already logged the stack and marks failure.
+                    pass
             scheduler_output = _dcut_truncate(self, scheduler_output)
         return _orig_exec(self, scheduler_output, intermediate_tensors)
 
@@ -495,18 +518,21 @@ def _patch_worker() -> None:
     _orig = W.compile_or_warm_up_model
 
     def compile_or_warm_up_model(self, *a, **k):
+        logger.info("D-Cut worker warmup hook reached: compile_or_warm_up_model")
         ret = _orig(self, *a, **k)
         runner = getattr(self, "model_runner", None)
         if runner is not None and hasattr(runner, "profile_adaptive_cost"):
             try:
                 runner.profile_adaptive_cost()
             except Exception as e:
-                logger.error("D-Cut: cost profiling failed; falling back: %s", e)
+                logger.error("D-Cut: cost profiling failed during worker warmup; lazy execute_model fallback may retry only after restart: %s", e)
                 ctrl = getattr(runner, "_verify_adaptive_controller", None)
                 if ctrl is not None:
                     ctrl._cost_table.clear()
                     ctrl._sorted_bs.clear()
                     ctrl._sorted_sql_per_bs.clear()
+        else:
+            logger.info("D-Cut worker warmup hook reached but model_runner/profile_adaptive_cost is unavailable.")
         return ret
 
     W.compile_or_warm_up_model = compile_or_warm_up_model

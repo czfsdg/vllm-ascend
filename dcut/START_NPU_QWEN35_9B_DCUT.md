@@ -66,11 +66,14 @@ step=1 batch_size=4 scheduled_reqs=4 total_scheduled_tokens=32 trimmed_reqs=2 tr
 D-Cut install requested
 D-Cut adaptive-verify monkey patch installed
 D-Cut adaptive verify ENABLED
+D-Cut worker warmup hook reached: compile_or_warm_up_model
 D-Cut cost profiling START
+# 如果 warmup hook 没走，第一次请求时应看到：
+D-Cut cost profiling LAZY START from execute_model
 VerifyAdaptiveController: begin cost profiling
 VerifyAdaptiveController: profile row ... avg_ms=...
 VerifyAdaptiveController: dumped JSON cost table to .../cost_table.json
 D-Cut cost profiling END
 ```
 
-如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果没有 `D-Cut cost profiling START`，说明 worker warmup/profile hook 没跑。
+如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果没有 `D-Cut worker warmup hook reached`，说明当前 vLLM 启动路径没有走 worker warmup hook，此时第一次请求应触发 `D-Cut cost profiling LAZY START from execute_model` 并生成 cost table。
