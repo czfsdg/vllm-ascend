@@ -77,4 +77,4 @@ VerifyAdaptiveController: dumped JSON cost table to .../cost_table.json
 D-Cut cost profiling END
 ```
 
-如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果没有 `D-Cut patched execute_model for vllm_ascend.worker.model_runner_v1.NPUModelRunner`，说明 Ascend runner 没有被 patch。当前 vLLM 启动路径可能不走 worker warmup hook，因此如果没有 `D-Cut worker warmup hook reached`，第一次请求应触发 `D-Cut cost profiling LAZY START from execute_model` 并生成 cost table。
+如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果看到 `Ascend NPUModelRunner patch skipped` 或循环导入错误，说明还在用旧脚本/旧代码。当前代码不会在 plugin install 阶段主动 import Ascend runner，而是在 runner 实例初始化完成后动态 patch，因此应在 `D-Cut adaptive verify ENABLED` 附近看到 `D-Cut patched execute_model for vllm_ascend.worker.model_runner_v1.NPUModelRunner`。当前 vLLM 启动路径可能不走 worker warmup hook，因此如果没有 `D-Cut worker warmup hook reached`，第一次请求应触发 `D-Cut cost profiling LAZY START from execute_model` 并生成 cost table。

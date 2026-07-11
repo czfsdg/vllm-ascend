@@ -475,6 +475,14 @@ def _patch_runner() -> None:
         _orig_init(self, *a, **k)
         try:
             _dcut_init_controller(self)
+            # For Ascend, the actual request path is usually an NPUModelRunner
+            # subclass that overrides GPUModelRunner.execute_model. Patch the
+            # concrete class lazily here, after vllm_ascend imports have
+            # completed, to avoid circular imports during plugin installation.
+            if self.__class__ is not R:
+                _dcut_patch_execute_model(
+                    self.__class__,
+                    f"{self.__class__.__module__}.{self.__class__.__name__}")
         except Exception as e:
             logger.error("D-Cut init failed; running vanilla: %s", e)
             self._verify_adaptive_controller = None
@@ -523,19 +531,6 @@ def _patch_runner() -> None:
 
 
 
-def _patch_ascend_runner() -> None:
-    try:
-        import vllm_ascend.worker.model_runner_v1 as m
-    except Exception as exc:  # pragma: no cover - optional outside Ascend
-        logger.info("D-Cut: Ascend NPUModelRunner patch skipped: %s", exc)
-        return
-    runner_cls = getattr(m, "NPUModelRunner", None)
-    if runner_cls is None:
-        logger.info("D-Cut: Ascend NPUModelRunner patch skipped: class not found.")
-        return
-    _dcut_patch_execute_model(
-        runner_cls, "vllm_ascend.worker.model_runner_v1.NPUModelRunner")
-
 def _patch_worker() -> None:
     import vllm.v1.worker.gpu_worker as m
 
@@ -579,7 +574,6 @@ def install(*args, **kwargs) -> None:
             os.getenv(ENV_PROFILE_FORCE_EAGER), os.getenv("VLLM_PLUGINS"))
         _patch_proposer()
         _patch_runner()
-        _patch_ascend_runner()
         _patch_worker()
         _INSTALLED = True
         logger.info(
