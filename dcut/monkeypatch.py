@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import os
 import sys
+import time
 import types
 from contextlib import suppress
 from dataclasses import replace
@@ -393,14 +394,11 @@ def _adaptive_profile_run(
             _forward()
         torch.cuda.synchronize()
         if n_measure > 0:
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            start_ev.record()
+            start_time = time.perf_counter()
             for _ in range(n_measure):
                 _forward()
-            end_ev.record()
             torch.cuda.synchronize()
-            avg_ms = start_ev.elapsed_time(end_ev) / n_measure
+            avg_ms = (time.perf_counter() - start_time) * 1000.0 / n_measure
     return _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)), avg_ms, int(num_tokens_padded)
 
 
