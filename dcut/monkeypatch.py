@@ -225,8 +225,19 @@ def _maybe_process_adaptive_probs(self) -> None:
 
 
 def profile_adaptive_cost(self) -> None:
-    if getattr(self, "_verify_adaptive_controller", None) is not None:
-        self._verify_adaptive_controller.profile_cost_table(self)
+    ctrl = getattr(self, "_verify_adaptive_controller", None)
+    if ctrl is not None:
+        logger.info(
+            "D-Cut cost profiling START: config=%s cost_table_out=%s trim_stats_out=%s stat_every=%s profile_force_eager=%s",
+            os.getenv(ENV_CONFIG), os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
+            os.getenv(ENV_TRIM_STATS_OUT), os.getenv(ENV_STAT_EVERY),
+            os.getenv(ENV_PROFILE_FORCE_EAGER))
+        ctrl.profile_cost_table(self)
+        logger.info(
+            "D-Cut cost profiling END: entries=%d json_out=%s markdown_out=%s",
+            len(getattr(ctrl, "_cost_table", {})),
+            os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
+            os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT"))
 
 
 @torch.inference_mode()
@@ -508,6 +519,11 @@ def install(*args, **kwargs) -> None:
     if _INSTALLED:
         return
     try:
+        logger.info(
+            "D-Cut install requested: VLLM_DCUT_CONFIG=%s VLLM_DCUT_COST_TABLE_OUT=%s VLLM_DCUT_TRIM_STATS_OUT=%s VLLM_DCUT_STAT_EVERY=%s VLLM_DCUT_PROFILE_FORCE_EAGER=%s VLLM_PLUGINS=%s",
+            os.getenv(ENV_CONFIG), os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
+            os.getenv(ENV_TRIM_STATS_OUT), os.getenv(ENV_STAT_EVERY),
+            os.getenv(ENV_PROFILE_FORCE_EAGER), os.getenv("VLLM_PLUGINS"))
         _patch_proposer()
         _patch_runner()
         _patch_worker()

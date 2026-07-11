@@ -118,8 +118,16 @@ class VerifyAdaptiveController:
 
     def profile_cost_table(self, runner: Any) -> None:
         if not self.config.enabled:
+            logger.info("VerifyAdaptiveController: disabled; skip cost profiling.")
             return
         max_tokens = getattr(runner, "max_num_tokens", None)
+        logger.info(
+            "VerifyAdaptiveController: begin cost profiling bs_levels=%s ql_levels=%s warmup_seq_lens=%s n_warmup_iters=%s n_measure_iters=%s max_tokens=%s json_out=%s markdown_out=%s",
+            self._batch_size_levels, self._query_len_levels,
+            self.config.warmup_seq_lens, self.config.n_warmup_iters,
+            self.config.n_measure_iters, max_tokens,
+            os.getenv("VLLM_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path,
+            os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT") or self.config.cost_table_markdown_path)
         for bs in self._batch_size_levels:
             self._sorted_sql_per_bs[bs] = []
             for ql in self._query_len_levels:
@@ -135,6 +143,9 @@ class VerifyAdaptiveController:
                     self.config.n_measure_iters,
                 )
                 elapsed_s = avg_ms / 1e3
+                logger.info(
+                    "VerifyAdaptiveController: profile row bs=%d query_len=%d sum_query_len=%d runtime_mode=%s padded_tokens=%d avg_ms=%.6f",
+                    bs, ql, num_tokens, runtime_mode, padded_tokens, avg_ms)
                 self._cost_table[(bs, num_tokens)] = elapsed_s
                 self._cost_records.append({
                     "batch_size": bs,
