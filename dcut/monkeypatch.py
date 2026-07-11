@@ -26,6 +26,27 @@ from .verify_adaptive_controller import VerifyAdaptiveController
 logger = init_logger(f"vllm.{__name__}")
 _INSTALLED = False
 ENV_CONFIG = "VLLM_DCUT_CONFIG"
+ENV_TRIM_STATS_OUT = "VLLM_DCUT_TRIM_STATS_OUT"
+ENV_STAT_EVERY = "VLLM_DCUT_STAT_EVERY"
+ENV_PROFILE_FORCE_EAGER = "VLLM_DCUT_PROFILE_FORCE_EAGER"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("D-Cut: invalid %s=%r; using %d", name, value, default)
+        return default
 
 
 def _supports_adaptive_verify(spec_cfg) -> bool:
@@ -44,6 +65,12 @@ def _dcut_init_controller(self) -> None:
     self._adaptive_num_reqs = 0
     self._adaptive_req_ids = []
     self._adaptive_active = set()
+    self._dcut_trim_stats_out = os.environ.get(ENV_TRIM_STATS_OUT) or None
+    self._dcut_stat_every = max(1, _env_int(ENV_STAT_EVERY, 1))
+    self._dcut_step_idx = 0
+    self._dcut_total_trimmed_tokens = 0
+    self._dcut_total_trimmed_reqs = 0
+    self._dcut_profile_force_eager = _env_flag(ENV_PROFILE_FORCE_EAGER, False)
 
     cfg_path = os.environ.get(ENV_CONFIG) or None
     if not cfg_path:
@@ -75,7 +102,44 @@ def _dcut_init_controller(self) -> None:
         device="cpu",
         pin_memory=self.pin_memory,
     )
-    logger.info("D-Cut adaptive verify ENABLED (config=%s).", cfg_path)
+    logger.info(
+        "D-Cut adaptive verify ENABLED (config=%s trim_stats=%s stat_every=%d profile_force_eager=%s).",
+        cfg_path, self._dcut_trim_stats_out, self._dcut_stat_every,
+        self._dcut_profile_force_eager)
+
+
+def _dcut_write_trim_stats(
+    self,
+    *,
+    batch_size: int,
+    trimmed_tokens: int,
+    trimmed_reqs: int,
+    scheduled_reqs: int,
+    total_scheduled_tokens: int,
+) -> None:
+    self._dcut_step_idx += 1
+    self._dcut_total_trimmed_tokens += trimmed_tokens
+    self._dcut_total_trimmed_reqs += trimmed_reqs
+    if not self._dcut_trim_stats_out:
+        return
+    if trimmed_tokens == 0 and self._dcut_step_idx % self._dcut_stat_every != 0:
+        return
+    dirname = os.path.dirname(self._dcut_trim_stats_out)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+    line = (
+        f"step={self._dcut_step_idx} batch_size={batch_size} "
+        f"scheduled_reqs={scheduled_reqs} "
+        f"total_scheduled_tokens={total_scheduled_tokens} "
+        f"trimmed_reqs={trimmed_reqs} trimmed_tokens={trimmed_tokens} "
+        f"total_trimmed_reqs={self._dcut_total_trimmed_reqs} "
+        f"total_trimmed_tokens={self._dcut_total_trimmed_tokens}\n")
+    try:
+        with open(self._dcut_trim_stats_out, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as exc:
+        logger.warning("D-Cut: failed to write trim stats to %s: %s",
+                       self._dcut_trim_stats_out, exc)
 
 
 def _dcut_truncate(self, scheduler_output):
@@ -85,11 +149,15 @@ def _dcut_truncate(self, scheduler_output):
     new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
+    trimmed_reqs = 0
+    scheduled_reqs = len(new_spec)
+    original_total_tokens = scheduler_output.total_num_scheduled_tokens
     for req_id, draft_toks in list(new_spec.items()):
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
         if adaptive_len is not None and adaptive_len < len(draft_toks):
             diff = len(draft_toks) - adaptive_len
             tokens_delta += diff
+            trimmed_reqs += 1
             new_num_sched[req_id] -= diff
             if adaptive_len == 0:
                 del new_spec[req_id]
@@ -103,6 +171,14 @@ def _dcut_truncate(self, scheduler_output):
             total_num_scheduled_tokens=(
                 scheduler_output.total_num_scheduled_tokens - tokens_delta),
         )
+    _dcut_write_trim_stats(
+        self,
+        batch_size=getattr(self.input_batch, "num_reqs", scheduled_reqs),
+        trimmed_tokens=tokens_delta,
+        trimmed_reqs=trimmed_reqs,
+        scheduled_reqs=scheduled_reqs,
+        total_scheduled_tokens=original_total_tokens,
+    )
     return scheduler_output
 
 
@@ -174,7 +250,7 @@ def _adaptive_profile_run(
             max_num_scheduled_tokens=max_query_len,
             use_cascade_attn=False,
             allow_microbatching=False,
-            force_eager=False,
+            force_eager=getattr(self, "_dcut_profile_force_eager", False),
         ))
     num_tokens_padded = batch_desc.num_tokens
     num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs

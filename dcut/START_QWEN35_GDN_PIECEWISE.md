@@ -76,3 +76,13 @@ D-Cut verifier cost table (Qwen3.5 GDN PIECEWISE):
 2. `VLLM_DCUT_CONFIG` 是否指向可读 JSON。
 3. speculative config 是否是 `dflash` 或 PARD parallel drafting。
 4. server 是否真的完成了 `compile_or_warm_up_model`。
+
+## NPU one-shot script
+
+按照当前 NPU 环境，直接运行下面这个脚本即可，不需要手改命令行：
+
+```bash
+bash dcut/start_npu_qwen35_9b_dcut.sh
+```
+
+兼容入口 `bash dcut/start_qwen35_gdn_piecewise.sh` 也会转到同一个 NPU 启动脚本。
