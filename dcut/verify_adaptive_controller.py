@@ -197,16 +197,26 @@ class VerifyAdaptiveController:
             key: float(np.median(np.asarray(values, dtype=np.float64))) for key, values in bucket_costs.items()
         }
 
+        bucket_representative: dict[tuple[int, int], int] = {}
+        for record in raw_records:
+            bs = int(record["batch_size"])
+            bucket_key = (bs, int(record["padded_tokens"]))
+            num_tokens = int(record["sum_query_len"])
+            bucket_representative[bucket_key] = max(bucket_representative.get(bucket_key, 0), num_tokens)
+
         for record in raw_records:
             bs = int(record["batch_size"])
             num_tokens = int(record["sum_query_len"])
             bucket_key = (bs, int(record["padded_tokens"]))
             cost_ms = bucket_cost_ms[bucket_key]
             elapsed_s = cost_ms / 1e3
+            representative_num_tokens = bucket_representative[bucket_key]
+            is_representative = num_tokens == representative_num_tokens
             logger.info(
                 "VerifyAdaptiveController: profile row bs=%d query_len=%d "
                 "sum_query_len=%d runtime_mode=%s padded_tokens=%d "
-                "cost_ms=%.6f raw_median_ms=%.6f raw_avg_ms=%.6f raw_std_ms=%.6f",
+                "cost_ms=%.6f raw_median_ms=%.6f raw_avg_ms=%.6f raw_std_ms=%.6f "
+                "cost_table_representative=%s representative_sum_query_len=%d",
                 bs,
                 int(record["query_len_per_req"]),
                 num_tokens,
@@ -216,8 +226,9 @@ class VerifyAdaptiveController:
                 float(record["raw_median_ms"]),
                 float(record["raw_avg_ms"]),
                 float(record["raw_std_ms"]),
+                is_representative,
+                representative_num_tokens,
             )
-            self._cost_table[(bs, num_tokens)] = elapsed_s
             record["avg_ms"] = cost_ms
             record["cost_ms"] = cost_ms
             record["cost_s"] = elapsed_s
@@ -225,8 +236,12 @@ class VerifyAdaptiveController:
                 "batch_size": bs,
                 "padded_tokens": int(record["padded_tokens"]),
             }
+            record["cost_table_representative"] = is_representative
+            record["representative_sum_query_len"] = representative_num_tokens
             self._cost_records.append(record)
-            self._sorted_sql_per_bs[bs].append(num_tokens)
+            if is_representative:
+                self._cost_table[(bs, num_tokens)] = elapsed_s
+                self._sorted_sql_per_bs[bs].append(num_tokens)
 
         self._sorted_bs = [bs for bs in sorted(self._sorted_sql_per_bs) if self._sorted_sql_per_bs[bs]]
         for bs in self._sorted_bs:
