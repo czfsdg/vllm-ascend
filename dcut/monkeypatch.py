@@ -10,6 +10,8 @@ confidence scores.
 from __future__ import annotations
 
 import os
+import sys
+from contextlib import suppress
 from dataclasses import replace
 
 import numpy as np
@@ -81,7 +83,8 @@ def _dcut_init_controller(self) -> None:
     if not _supports_adaptive_verify(spec_cfg):
         logger.warning(
             "VLLM_DCUT_CONFIG is set but the speculative method does not "
-            "support adaptive verifier step-length; D-Cut disabled.")
+            "support adaptive verifier step-length; D-Cut disabled."
+        )
         return
     num_spec = getattr(self, "num_spec_tokens", 0) or 0
     if num_spec <= 0:
@@ -106,8 +109,11 @@ def _dcut_init_controller(self) -> None:
     )
     logger.info(
         "D-Cut adaptive verify ENABLED (config=%s trim_stats=%s stat_every=%d profile_force_eager=%s).",
-        cfg_path, self._dcut_trim_stats_out, self._dcut_stat_every,
-        self._dcut_profile_force_eager)
+        cfg_path,
+        self._dcut_trim_stats_out,
+        self._dcut_stat_every,
+        self._dcut_profile_force_eager,
+    )
 
 
 def _dcut_write_trim_stats(
@@ -135,13 +141,13 @@ def _dcut_write_trim_stats(
         f"total_scheduled_tokens={total_scheduled_tokens} "
         f"trimmed_reqs={trimmed_reqs} trimmed_tokens={trimmed_tokens} "
         f"total_trimmed_reqs={self._dcut_total_trimmed_reqs} "
-        f"total_trimmed_tokens={self._dcut_total_trimmed_tokens}\n")
+        f"total_trimmed_tokens={self._dcut_total_trimmed_tokens}\n"
+    )
     try:
         with open(self._dcut_trim_stats_out, "a", encoding="utf-8") as f:
             f.write(line)
     except OSError as exc:
-        logger.warning("D-Cut: failed to write trim stats to %s: %s",
-                       self._dcut_trim_stats_out, exc)
+        logger.warning("D-Cut: failed to write trim stats to %s: %s", self._dcut_trim_stats_out, exc)
 
 
 def _dcut_truncate(self, scheduler_output):
@@ -170,8 +176,7 @@ def _dcut_truncate(self, scheduler_output):
             scheduler_output,
             scheduled_spec_decode_tokens=new_spec,
             num_scheduled_tokens=new_num_sched,
-            total_num_scheduled_tokens=(
-                scheduler_output.total_num_scheduled_tokens - tokens_delta),
+            total_num_scheduled_tokens=(scheduler_output.total_num_scheduled_tokens - tokens_delta),
         )
     _dcut_write_trim_stats(
         self,
@@ -185,9 +190,12 @@ def _dcut_truncate(self, scheduler_output):
 
 
 def _dcut_queue_probs(self, zeros_only: bool) -> None:
-    if (zeros_only or self._adaptive_probs_pending
-            or self._adaptive_probs_pinned is None
-            or self._adaptive_probs_event is None):
+    if (
+        zeros_only
+        or self._adaptive_probs_pending
+        or self._adaptive_probs_pinned is None
+        or self._adaptive_probs_event is None
+    ):
         return
     drafter = getattr(self, "drafter", None)
     if drafter is None or not hasattr(drafter, "take_last_selected_probs"):
@@ -202,8 +210,7 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
     self._adaptive_active = {
         self.input_batch.req_ids[i]
         for i in range(num_reqs)
-        if self.input_batch.num_computed_tokens_cpu[i]
-        >= self.input_batch.num_prompt_tokens[i]
+        if self.input_batch.num_computed_tokens_cpu[i] >= self.input_batch.num_prompt_tokens[i]
     }
     self._adaptive_probs_pinned[:num_reqs].copy_(probs, non_blocking=True)
     self._adaptive_probs_event.record()
@@ -219,7 +226,7 @@ def _maybe_process_adaptive_probs(self) -> None:
     if self._adaptive_active and self._verify_adaptive_controller is not None:
         assert self._adaptive_probs_pinned is not None
         self._verify_adaptive_controller.process_draft_output(
-            selected_probs=self._adaptive_probs_pinned[:self._adaptive_num_reqs],
+            selected_probs=self._adaptive_probs_pinned[: self._adaptive_num_reqs],
             req_ids=self._adaptive_req_ids,
             active_draft_req_ids=self._adaptive_active,
             batch_size=self._adaptive_num_reqs,
@@ -236,10 +243,14 @@ def profile_adaptive_cost(self) -> None:
             logger.info("D-Cut cost profiling SKIP: previous attempt failed.")
             return
         logger.info(
-            "D-Cut cost profiling START: config=%s cost_table_out=%s trim_stats_out=%s stat_every=%s profile_force_eager=%s",
-            os.getenv(ENV_CONFIG), os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
-            os.getenv(ENV_TRIM_STATS_OUT), os.getenv(ENV_STAT_EVERY),
-            os.getenv(ENV_PROFILE_FORCE_EAGER))
+            "D-Cut cost profiling START: config=%s cost_table_out=%s "
+            "trim_stats_out=%s stat_every=%s profile_force_eager=%s",
+            os.getenv(ENV_CONFIG),
+            os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
+            os.getenv(ENV_TRIM_STATS_OUT),
+            os.getenv(ENV_STAT_EVERY),
+            os.getenv(ENV_PROFILE_FORCE_EAGER),
+        )
         try:
             ctrl.profile_cost_table(self)
             self._dcut_cost_profile_done = True
@@ -247,7 +258,8 @@ def profile_adaptive_cost(self) -> None:
                 "D-Cut cost profiling END: entries=%d json_out=%s markdown_out=%s",
                 len(getattr(ctrl, "_cost_table", {})),
                 os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
-                os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT"))
+                os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT"),
+            )
         except Exception:
             self._dcut_cost_profile_failed = True
             logger.exception("D-Cut cost profiling FAILED; adaptive trimming will stay disabled until restart.")
@@ -257,7 +269,7 @@ def profile_adaptive_cost(self) -> None:
 @torch.inference_mode()
 def _adaptive_profile_run(
     self,
-    scheduled_tokens: "list[int]",
+    scheduled_tokens: list[int],
     seq_lens: int = 1024,
     n_warmup: int = 3,
     n_measure: int = 5,
@@ -267,16 +279,15 @@ def _adaptive_profile_run(
     num_tokens_unpadded = int(num_scheduled_tokens.sum())
     max_query_len = int(num_scheduled_tokens.max())
     assert num_tokens_unpadded <= self.max_num_tokens
-    _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
-        self._determine_batch_execution_and_padding(
-            num_tokens=num_tokens_unpadded,
-            num_reqs=num_reqs,
-            num_scheduled_tokens_np=num_scheduled_tokens,
-            max_num_scheduled_tokens=max_query_len,
-            use_cascade_attn=False,
-            allow_microbatching=False,
-            force_eager=getattr(self, "_dcut_profile_force_eager", False),
-        ))
+    _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
+        num_tokens=num_tokens_unpadded,
+        num_reqs=num_reqs,
+        num_scheduled_tokens_np=num_scheduled_tokens,
+        max_num_scheduled_tokens=max_query_len,
+        use_cascade_attn=False,
+        allow_microbatching=False,
+        force_eager=getattr(self, "_dcut_profile_force_eager", False),
+    )
     num_tokens_padded = batch_desc.num_tokens
     num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
     ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
@@ -299,11 +310,9 @@ def _adaptive_profile_run(
         self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
         self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
-        cum_num_tokens = self._get_cumsum_and_arange(
-            num_scheduled_tokens, self.query_pos.np)
-        self.query_start_loc.np[1:num_reqs + 1] = cum_num_tokens
-        self.query_start_loc.np[num_reqs + 1:num_reqs_padded + 1].fill(
-            cum_num_tokens[-1])
+        cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
+        self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+        self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(cum_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
         self.input_batch.block_table.commit_block_table(num_reqs_padded)
         if self.speculative_config is not None:
@@ -329,8 +338,7 @@ def _adaptive_profile_run(
     if num_tokens_across_dp is not None:
         num_tokens_across_dp[:] = num_tokens_padded
     model_kwargs = self._init_model_kwargs()
-    use_embeds = self.enable_prompt_embeds or (
-        self.supports_mm_inputs and not self.model_config.is_encoder_decoder)
+    use_embeds = self.enable_prompt_embeds or (self.supports_mm_inputs and not self.model_config.is_encoder_decoder)
     input_ids = None if use_embeds else self.input_ids.gpu[:num_tokens_padded]
     inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded] if use_embeds else None
     if self.uses_mrope:
@@ -347,8 +355,7 @@ def _adaptive_profile_run(
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
-        intermediate_tensors = self.sync_and_gather_intermediate_tensors(
-            num_tokens_padded, None, False)
+        intermediate_tensors = self.sync_and_gather_intermediate_tensors(num_tokens_padded, None, False)
     _mode_names = {
         CUDAGraphMode.FULL: "FCG",
         CUDAGraphMode.PIECEWISE: "PCG",
@@ -365,6 +372,7 @@ def _adaptive_profile_run(
         ubatch_slices=ubatch_slices_padded,
         slot_mapping=slot_mappings,
     ):
+
         def _forward() -> None:
             self.model(
                 input_ids=input_ids,
@@ -389,19 +397,86 @@ def _adaptive_profile_run(
     return _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)), avg_ms, int(num_tokens_padded)
 
 
+def _dcut_profile_runner_if_needed(runner, reason: str) -> None:
+    if runner is None or not hasattr(runner, "profile_adaptive_cost"):
+        logger.info("D-Cut %s hook reached but model_runner/profile_adaptive_cost is unavailable.", reason)
+        return
+    if getattr(runner, "_verify_adaptive_controller", None) is None:
+        logger.info("D-Cut %s hook reached but adaptive controller is not enabled on runner.", reason)
+        return
+    if getattr(runner, "_dcut_cost_profile_done", False):
+        logger.info("D-Cut %s hook reached; cost table already profiled.", reason)
+        return
+    if getattr(runner, "_dcut_cost_profile_failed", False):
+        logger.info("D-Cut %s hook reached; previous cost profiling attempt failed.", reason)
+        return
+    logger.info("D-Cut cost profiling LAZY START from %s: startup warmup hook is generating the cost table.", reason)
+    try:
+        runner.profile_adaptive_cost()
+    except Exception as e:
+        logger.error(
+            "D-Cut: cost profiling failed during %s; execute_model fallback will not retry until restart: %s", reason, e
+        )
+        ctrl = getattr(runner, "_verify_adaptive_controller", None)
+        if ctrl is not None:
+            ctrl._cost_table.clear()
+            ctrl._sorted_bs.clear()
+            ctrl._sorted_sql_per_bs.clear()
+
+
+def _patch_worker_class(worker_cls, class_label: str) -> None:
+    if getattr(worker_cls, "_dcut_worker_hooks_patched", False):
+        return
+
+    if hasattr(worker_cls, "compile_or_warm_up_model"):
+        original_warmup = worker_cls.compile_or_warm_up_model
+
+        def compile_or_warm_up_model(self, *a, **k):
+            logger.info("D-Cut worker warmup hook reached: %s.compile_or_warm_up_model", class_label)
+            ret = original_warmup(self, *a, **k)
+            _dcut_profile_runner_if_needed(
+                getattr(self, "model_runner", None), f"{class_label}.compile_or_warm_up_model"
+            )
+            return ret
+
+        worker_cls.compile_or_warm_up_model = compile_or_warm_up_model
+
+    if hasattr(worker_cls, "execute_model"):
+        original_worker_execute = worker_cls.execute_model
+
+        def execute_model(self, scheduler_output, *args, **kwargs):
+            _dcut_profile_runner_if_needed(getattr(self, "model_runner", None), f"{class_label}.execute_model")
+            return original_worker_execute(self, scheduler_output, *args, **kwargs)
+
+        worker_cls.execute_model = execute_model
+
+    worker_cls._dcut_worker_hooks_patched = True
+    logger.info("D-Cut patched worker hooks for %s", class_label)
+
+
+def _patch_loaded_ascend_worker() -> None:
+    module = sys.modules.get("vllm_ascend.worker.worker")
+    if module is None:
+        logger.info("D-Cut Ascend worker hooks pending: vllm_ascend.worker.worker is not loaded yet.")
+        return
+    worker_cls = getattr(module, "Worker", None)
+    if worker_cls is None:
+        logger.info("D-Cut Ascend worker hooks pending: Worker class is not available yet.")
+        return
+    _patch_worker_class(worker_cls, "vllm_ascend.worker.worker.Worker")
+
 
 def _dcut_prepare_execute_model(self, scheduler_output):
     if getattr(self, "_verify_adaptive_controller", None) is None:
         return scheduler_output
-    if not getattr(self, "_dcut_cost_profile_done", False) and not getattr(
-            self, "_dcut_cost_profile_failed", False):
+    if not getattr(self, "_dcut_cost_profile_done", False) and not getattr(self, "_dcut_cost_profile_failed", False):
         logger.info(
-            "D-Cut cost profiling LAZY START from execute_model: warmup hook did not produce a cost table before this batch.")
-        try:
+            "D-Cut cost profiling LAZY START from execute_model: warmup hook "
+            "did not produce a cost table before this batch."
+        )
+        # profile_adaptive_cost already logs the stack and marks failure.
+        with suppress(Exception):
             self.profile_adaptive_cost()
-        except Exception:
-            # profile_adaptive_cost already logged the stack and marks failure.
-            pass
     return _dcut_truncate(self, scheduler_output)
 
 
@@ -417,6 +492,7 @@ def _dcut_patch_execute_model(cls, class_label: str) -> None:
     cls.execute_model = execute_model
     cls._dcut_execute_model_patched = True
     logger.info("D-Cut patched execute_model for %s", class_label)
+
 
 def _patch_proposer() -> None:
     import vllm.v1.spec_decode.llm_base_proposer as m
@@ -443,15 +519,13 @@ def _patch_proposer() -> None:
     def _sample_draft_tokens(self, hidden_states, sampling_metadata):
         self._last_selected_probs = None
         out = _orig_sample(self, hidden_states, sampling_metadata)
-        if getattr(self, "needs_draft_probs", False) and getattr(
-                self, "parallel_drafting", False):
+        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
             token_ids = out[0]
             full_probs = out[1] if len(out) > 1 else None
             try:
                 logits = None if full_probs is not None else self.model.compute_logits(hidden_states)
                 sel = P._gather_selected_probs(logits, token_ids, full_probs)
-                self._last_selected_probs = sel.view(
-                    -1, self.num_speculative_tokens).contiguous()
+                self._last_selected_probs = sel.view(-1, self.num_speculative_tokens).contiguous()
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("D-Cut: gather selected probs failed: %s", e)
                 self._last_selected_probs = None
@@ -479,10 +553,11 @@ def _patch_runner() -> None:
             # subclass that overrides GPUModelRunner.execute_model. Patch the
             # concrete class lazily here, after vllm_ascend imports have
             # completed, to avoid circular imports during plugin installation.
+            class_label = f"{self.__class__.__module__}.{self.__class__.__name__}"
+            logger.info("D-Cut runner init concrete class: %s", class_label)
             if self.__class__ is not R:
-                _dcut_patch_execute_model(
-                    self.__class__,
-                    f"{self.__class__.__module__}.{self.__class__.__name__}")
+                _dcut_patch_execute_model(self.__class__, class_label)
+            _patch_loaded_ascend_worker()
         except Exception as e:
             logger.error("D-Cut init failed; running vanilla: %s", e)
             self._verify_adaptive_controller = None
@@ -530,35 +605,11 @@ def _patch_runner() -> None:
     R._dcut_patched = True
 
 
-
 def _patch_worker() -> None:
     import vllm.v1.worker.gpu_worker as m
 
-    W = m.Worker
-    if getattr(W, "_dcut_patched", False):
-        return
-    _orig = W.compile_or_warm_up_model
-
-    def compile_or_warm_up_model(self, *a, **k):
-        logger.info("D-Cut worker warmup hook reached: compile_or_warm_up_model")
-        ret = _orig(self, *a, **k)
-        runner = getattr(self, "model_runner", None)
-        if runner is not None and hasattr(runner, "profile_adaptive_cost"):
-            try:
-                runner.profile_adaptive_cost()
-            except Exception as e:
-                logger.error("D-Cut: cost profiling failed during worker warmup; lazy execute_model fallback may retry only after restart: %s", e)
-                ctrl = getattr(runner, "_verify_adaptive_controller", None)
-                if ctrl is not None:
-                    ctrl._cost_table.clear()
-                    ctrl._sorted_bs.clear()
-                    ctrl._sorted_sql_per_bs.clear()
-        else:
-            logger.info("D-Cut worker warmup hook reached but model_runner/profile_adaptive_cost is unavailable.")
-        return ret
-
-    W.compile_or_warm_up_model = compile_or_warm_up_model
-    W._dcut_patched = True
+    _patch_worker_class(m.Worker, "vllm.v1.worker.gpu_worker.Worker")
+    _patch_loaded_ascend_worker()
 
 
 def install(*args, **kwargs) -> None:
@@ -568,16 +619,24 @@ def install(*args, **kwargs) -> None:
         return
     try:
         logger.info(
-            "D-Cut install requested: VLLM_DCUT_CONFIG=%s VLLM_DCUT_COST_TABLE_OUT=%s VLLM_DCUT_TRIM_STATS_OUT=%s VLLM_DCUT_STAT_EVERY=%s VLLM_DCUT_PROFILE_FORCE_EAGER=%s VLLM_PLUGINS=%s",
-            os.getenv(ENV_CONFIG), os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
-            os.getenv(ENV_TRIM_STATS_OUT), os.getenv(ENV_STAT_EVERY),
-            os.getenv(ENV_PROFILE_FORCE_EAGER), os.getenv("VLLM_PLUGINS"))
+            "D-Cut install requested: VLLM_DCUT_CONFIG=%s "
+            "VLLM_DCUT_COST_TABLE_OUT=%s VLLM_DCUT_TRIM_STATS_OUT=%s "
+            "VLLM_DCUT_STAT_EVERY=%s VLLM_DCUT_PROFILE_FORCE_EAGER=%s "
+            "VLLM_PLUGINS=%s",
+            os.getenv(ENV_CONFIG),
+            os.getenv("VLLM_DCUT_COST_TABLE_OUT"),
+            os.getenv(ENV_TRIM_STATS_OUT),
+            os.getenv(ENV_STAT_EVERY),
+            os.getenv(ENV_PROFILE_FORCE_EAGER),
+            os.getenv("VLLM_PLUGINS"),
+        )
         _patch_proposer()
         _patch_runner()
         _patch_worker()
         _INSTALLED = True
         logger.info(
             "D-Cut adaptive-verify monkey patch installed "
-            "(active only if VLLM_DCUT_CONFIG is set + method is dflash/PARD).")
+            "(active only if VLLM_DCUT_CONFIG is set + method is dflash/PARD)."
+        )
     except Exception as e:  # pragma: no cover - never break vLLM startup
         logger.error("D-Cut install failed (vLLM continues normally): %s", e)

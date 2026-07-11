@@ -65,16 +65,18 @@ step=1 batch_size=4 scheduled_reqs=4 total_scheduled_tokens=32 trimmed_reqs=2 tr
 ```text
 D-Cut install requested
 D-Cut adaptive-verify monkey patch installed
-D-Cut patched execute_model for vllm_ascend.worker.model_runner_v1.NPUModelRunner
+D-Cut patched execute_model for vllm.v1.worker.gpu_model_runner.GPUModelRunner
+D-Cut runner init concrete class: ...
+D-Cut patched worker hooks for vllm_ascend.worker.worker.Worker
 D-Cut adaptive verify ENABLED
-D-Cut worker warmup hook reached: compile_or_warm_up_model
+D-Cut worker warmup hook reached: vllm_ascend.worker.worker.Worker.compile_or_warm_up_model
 D-Cut cost profiling START
 # 如果 warmup hook 没走，第一次请求时应看到：
-D-Cut cost profiling LAZY START from execute_model
+D-Cut cost profiling LAZY START from vllm_ascend.worker.worker.Worker.execute_model
 VerifyAdaptiveController: begin cost profiling
 VerifyAdaptiveController: profile row ... avg_ms=...
 VerifyAdaptiveController: dumped JSON cost table to .../cost_table.json
 D-Cut cost profiling END
 ```
 
-如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果看到 `Ascend NPUModelRunner patch skipped` 或循环导入错误，说明还在用旧脚本/旧代码。当前代码不会在 plugin install 阶段主动 import Ascend runner，而是在 runner 实例初始化完成后动态 patch，因此应在 `D-Cut adaptive verify ENABLED` 附近看到 `D-Cut patched execute_model for vllm_ascend.worker.model_runner_v1.NPUModelRunner`。当前 vLLM 启动路径可能不走 worker warmup hook，因此如果没有 `D-Cut worker warmup hook reached`，第一次请求应触发 `D-Cut cost profiling LAZY START from execute_model` 并生成 cost table。
+如果没有 `D-Cut install requested`，说明 `dcut_adaptive_verify` 插件没有加载；如果看到 `Ascend NPUModelRunner patch skipped` 或循环导入错误，说明还在用旧脚本/旧代码。当前代码不会在 plugin install 阶段主动 import Ascend runner，而是在 runner 实例初始化完成后检查已经加载的 `vllm_ascend.worker.worker.Worker` 并动态 patch，因此应在 `D-Cut adaptive verify ENABLED` 附近看到 `D-Cut runner init concrete class` 和/或 `D-Cut patched worker hooks for vllm_ascend.worker.worker.Worker`。当前 vLLM 启动路径如果仍然不走 worker warmup hook，第一次请求应触发 `D-Cut cost profiling LAZY START from vllm_ascend.worker.worker.Worker.execute_model` 并生成 cost table。
