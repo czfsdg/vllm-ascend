@@ -53,6 +53,12 @@ from vllm_ascend.utils import (
     enable_sp,
 )
 
+GDN_PIECEWISE_SPLITTING_OPS = (
+    "vllm::qwen_gdn_attention_core",
+    "vllm::gdn_attention_core_xpu",
+    "vllm::olmo_hybrid_gdn_full_forward",
+)
+
 # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
 # carry @support_torch_compile. This makes vLLM auto-enable the breakable
 # cudagraph PIECEWISE path, which is not supported on Ascend yet.
@@ -608,12 +614,14 @@ class NPUPlatform(Platform):
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
             # If splitting ops does not contain the this value, this configuration issue will
             # not be detected in advance assert.
-            compilation_config.splitting_ops.extend(
-                [
-                    "vllm::mla_forward",
-                    "vllm::dsa_forward",
-                ]
-            )
+            splitting_ops_to_add = [
+                "vllm::mla_forward",
+                "vllm::dsa_forward",
+                *GDN_PIECEWISE_SPLITTING_OPS,
+            ]
+            for op_name in splitting_ops_to_add:
+                if op_name not in compilation_config.splitting_ops:
+                    compilation_config.splitting_ops.append(op_name)
             # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
             if get_ascend_device_type() == AscendDeviceType.A5:
                 prune_capture_sizes_for_950(vllm_config)

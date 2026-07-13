@@ -196,19 +196,11 @@ class VerifyAdaptiveController:
             logger.warning("VerifyAdaptiveController: no valid cost-profile candidates.")
             return
 
-        logger.info(
-            "VerifyAdaptiveController: graph prewarm pass START candidates=%d",
-            len(candidates),
-        )
-        for bs, _, _, scheduled_tokens in candidates:
-            runner._adaptive_profile_run(
-                scheduled_tokens,
-                self.config.warmup_seq_lens,
-                max(1, self.config.n_warmup_iters),
-                0,
-            )
-        logger.info("VerifyAdaptiveController: graph prewarm pass END")
-
+        # Do not run a separate full-table prewarm pass here. vLLM has already
+        # completed its graph capture before the service-ready probe triggers
+        # D-Cut profiling, and each measured row still runs its own small
+        # warmup loop. A second pass over every candidate makes GDN/PIECEWISE
+        # startup profiling noticeably slower without changing the cost table.
         raw_records: list[dict[str, Any]] = []
         for bs, ql, num_tokens, scheduled_tokens in candidates:
             runtime_mode, avg_ms, padded_tokens, timing_stats = runner._adaptive_profile_run(

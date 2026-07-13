@@ -54,6 +54,23 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _make_device_event(device: torch.device | None = None):
+    """Create an event for the active accelerator backend."""
+    device_type = getattr(device, "type", None)
+    if device_type == "npu" and hasattr(torch, "npu"):
+        return torch.npu.Event()
+    return torch.cuda.Event()
+
+
+def _sync_device(device: torch.device | None = None) -> None:
+    """Synchronize the active accelerator backend for profiling timings."""
+    device_type = getattr(device, "type", None)
+    if device_type == "npu" and hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    else:
+        torch.cuda.synchronize()
+
+
 def _supports_adaptive_verify(spec_cfg) -> bool:
     if spec_cfg is None:
         return False
@@ -103,7 +120,7 @@ def _dcut_init_controller(self) -> None:
     drafter = getattr(self, "drafter", None)
     if drafter is not None and hasattr(drafter, "needs_draft_probs"):
         drafter.needs_draft_probs = True
-    self._adaptive_probs_event = torch.cuda.Event()
+    self._adaptive_probs_event = _make_device_event(getattr(self, "device", None))
     self._adaptive_probs_pinned = torch.empty(
         (self.max_num_reqs, num_spec),
         dtype=torch.float32,
@@ -447,12 +464,12 @@ def _adaptive_profile_run(
 
         for _ in range(max(n_warmup, 0)):
             _forward()
-        torch.cuda.synchronize()
+        _sync_device(getattr(self, "device", None))
         samples_ms: list[float] = []
         for _ in range(max(n_measure, 0)):
             start_time = time.perf_counter()
             _forward()
-            torch.cuda.synchronize()
+            _sync_device(getattr(self, "device", None))
             samples_ms.append((time.perf_counter() - start_time) * 1000.0)
         if samples_ms:
             samples = np.asarray(samples_ms, dtype=np.float64)
