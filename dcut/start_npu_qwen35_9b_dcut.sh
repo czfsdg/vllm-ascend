@@ -64,10 +64,6 @@ if [[ "${DCUT_PROFILE_AFTER_READY}" == "1" ]]; then
   echo "[dcut-start] waiting for service health before cost-table probe..."
   deadline=$((SECONDS + DCUT_READY_TIMEOUT_S))
   until curl -fsS "http://${DCUT_HOST}:${DCUT_PORT}/health" >/dev/null 2>&1; do
-    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-      wait "${SERVER_PID}"
-      exit $?
-    fi
     if (( SECONDS >= deadline )); then
       echo "[dcut-start] timed out waiting for /health" >&2
       exit 1
@@ -84,10 +80,6 @@ if [[ "${DCUT_PROFILE_AFTER_READY}" == "1" ]]; then
   echo "[dcut-start] waiting for cost table: ${VLLM_DCUT_COST_TABLE_OUT}"
   deadline=$((SECONDS + DCUT_COST_TABLE_TIMEOUT_S))
   until [[ -s "${VLLM_DCUT_COST_TABLE_OUT}" ]]; do
-    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-      wait "${SERVER_PID}"
-      exit $?
-    fi
     if (( SECONDS >= deadline )); then
       echo "[dcut-start] timed out waiting for cost table; continuing with server logs for diagnosis" >&2
       break
@@ -99,4 +91,13 @@ if [[ "${DCUT_PROFILE_AFTER_READY}" == "1" ]]; then
   fi
 fi
 
-wait "${SERVER_PID}"
+if kill -0 "${SERVER_PID}" 2>/dev/null; then
+  wait "${SERVER_PID}"
+else
+  echo "[dcut-start] launcher process exited; monitoring healthy service on ${DCUT_HOST}:${DCUT_PORT}"
+  while curl -fsS "http://${DCUT_HOST}:${DCUT_PORT}/health" >/dev/null 2>&1; do
+    sleep 5
+  done
+  echo "[dcut-start] service health check failed; exiting" >&2
+  exit 1
+fi
