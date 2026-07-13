@@ -670,14 +670,16 @@ def _patch_proposer() -> None:
         return (chosen - logits.logsumexp(dim=-1)).exp()
 
     def take_last_selected_probs(self):
-        return getattr(self, "_last_selected_probs", None)
+        probs = getattr(self, "_last_selected_probs", None)
+        self._last_selected_probs = None
+        return probs
 
     _orig_sample = P._sample_draft_tokens
 
     def _sample_draft_tokens(self, hidden_states, sampling_metadata):
         self._last_selected_probs = None
         out = _orig_sample(self, hidden_states, sampling_metadata)
-        if getattr(self, "needs_draft_probs", False) and getattr(self, "parallel_drafting", False):
+        if getattr(self, "needs_draft_probs", False):
             token_ids = out[0]
             full_probs = out[1] if len(out) > 1 else None
             try:
