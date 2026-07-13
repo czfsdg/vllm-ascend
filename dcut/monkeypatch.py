@@ -575,8 +575,8 @@ def _dcut_prepare_execute_model(self, scheduler_output):
         return scheduler_output
     if not getattr(self, "_dcut_cost_profile_done", False) and not getattr(self, "_dcut_cost_profile_failed", False):
         logger.info(
-            "D-Cut cost profiling LAZY START from execute_model: warmup hook "
-            "did not produce a cost table before this batch."
+            "D-Cut cost profiling START from execute_model: service is loaded; "
+            "the launcher should trigger this with a local probe request before user traffic."
         )
         # profile_adaptive_cost already logs the stack and marks failure.
         with suppress(Exception):
