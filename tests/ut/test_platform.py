@@ -180,6 +180,46 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
 
+
+    @patch("vllm_ascend.platform.refresh_block_size")
+    @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    def test_check_and_update_config_adds_gdn_piecewise_split_ops(
+        self,
+        mock_auto_detect,
+        mock_init_ascend,
+        _mock_enable_sp,
+        _mock_device_type,
+        _mock_refresh_block_size,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        vllm_config.compilation_config.splitting_ops = []
+        vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4]
+        vllm_config.compilation_config.max_cudagraph_capture_size = 4
+        vllm_config.compilation_config.custom_ops = []
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.model_config.enable_sleep_mode = False
+        vllm_config.parallel_config.worker_cls = "auto"
+        vllm_config.parallel_config.all2all_backend = None
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.scheduler_config = MagicMock()
+
+        self.platform.check_and_update_config(vllm_config)
+
+        self.assertIn("vllm::qwen_gdn_attention_core", vllm_config.compilation_config.splitting_ops)
+        self.assertIn("vllm::gdn_attention_core_xpu", vllm_config.compilation_config.splitting_ops)
+        self.assertIn("vllm::olmo_hybrid_gdn_full_forward", vllm_config.compilation_config.splitting_ops)
+
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
