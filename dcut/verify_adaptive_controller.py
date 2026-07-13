@@ -117,6 +117,51 @@ class VerifyAdaptiveController:
             levels.append(max_q)
         return sorted(set(levels))
 
+    def _build_profile_scheduled_tokens(
+        self,
+        batch_size: int,
+        target_sum_query_len: int,
+        rng: np.random.Generator,
+    ) -> list[int]:
+        """Create a deterministic-random heterogeneous profile batch.
+
+        Real D-Cut trims each request independently, so profiling every row as
+        ``[query_len] * batch_size`` overstates uniform batches. Keep the same
+        total query length used by the cost table, but randomize each request's
+        query length within the configured verifier range.
+        """
+        min_q = self.config.min_query_len_per_req
+        max_q = self.max_query_len_per_req
+        if batch_size <= 1:
+            return [target_sum_query_len]
+        if target_sum_query_len <= batch_size * min_q:
+            return [min_q] * batch_size
+
+        scheduled = [min_q] * batch_size
+        remaining = target_sum_query_len - batch_size * min_q
+        while remaining > 0:
+            candidates = [idx for idx, value in enumerate(scheduled) if value < max_q]
+            if not candidates:
+                break
+            idx = int(rng.choice(candidates))
+            delta = min(remaining, max_q - scheduled[idx], int(rng.integers(1, remaining + 1)))
+            scheduled[idx] += delta
+            remaining -= delta
+
+        if remaining != 0:
+            # This should not happen for valid query_len levels, but keep the
+            # profiler safe and explicit if future configs exceed the cap.
+            logger.warning(
+                "VerifyAdaptiveController: profile scheduled token sum clipped: "
+                "batch_size=%d target=%d actual=%d max_query_len_per_req=%d",
+                batch_size,
+                target_sum_query_len,
+                sum(scheduled),
+                max_q,
+            )
+        rng.shuffle(scheduled)
+        return scheduled
+
     def profile_cost_table(self, runner: Any) -> None:
         if not self.config.enabled:
             logger.info("VerifyAdaptiveController: disabled; skip cost profiling.")
@@ -135,7 +180,8 @@ class VerifyAdaptiveController:
             os.getenv("VLLM_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path,
             os.getenv("VLLM_DCUT_COST_TABLE_MD_OUT") or self.config.cost_table_markdown_path,
         )
-        candidates: list[tuple[int, int, int]] = []
+        rng = np.random.default_rng(20240713)
+        candidates: list[tuple[int, int, int, list[int]]] = []
         for bs in self._batch_size_levels:
             self._sorted_sql_per_bs[bs] = []
             for ql in self._query_len_levels:
@@ -143,7 +189,8 @@ class VerifyAdaptiveController:
                 if max_tokens is not None and num_tokens > max_tokens:
                     logger.info("profile skip: bs=%d ql=%d num_tokens=%d > %d", bs, ql, num_tokens, max_tokens)
                     continue
-                candidates.append((bs, ql, num_tokens))
+                scheduled_tokens = self._build_profile_scheduled_tokens(bs, num_tokens, rng)
+                candidates.append((bs, ql, num_tokens, scheduled_tokens))
 
         if not candidates:
             logger.warning("VerifyAdaptiveController: no valid cost-profile candidates.")
@@ -153,9 +200,9 @@ class VerifyAdaptiveController:
             "VerifyAdaptiveController: graph prewarm pass START candidates=%d",
             len(candidates),
         )
-        for bs, ql, _ in candidates:
+        for bs, _, _, scheduled_tokens in candidates:
             runner._adaptive_profile_run(
-                [ql] * bs,
+                scheduled_tokens,
                 self.config.warmup_seq_lens,
                 max(1, self.config.n_warmup_iters),
                 0,
@@ -163,9 +210,9 @@ class VerifyAdaptiveController:
         logger.info("VerifyAdaptiveController: graph prewarm pass END")
 
         raw_records: list[dict[str, Any]] = []
-        for bs, ql, num_tokens in candidates:
+        for bs, ql, num_tokens, scheduled_tokens in candidates:
             runtime_mode, avg_ms, padded_tokens, timing_stats = runner._adaptive_profile_run(
-                [ql] * bs,
+                scheduled_tokens,
                 self.config.warmup_seq_lens,
                 self.config.n_warmup_iters,
                 self.config.n_measure_iters,
@@ -175,6 +222,7 @@ class VerifyAdaptiveController:
                 "batch_size": bs,
                 "query_len_per_req": ql,
                 "sum_query_len": num_tokens,
+                "scheduled_tokens": scheduled_tokens,
                 "padded_tokens": padded_tokens,
                 "seq_lens": self.config.warmup_seq_lens,
                 "runtime_mode": runtime_mode,
@@ -214,12 +262,13 @@ class VerifyAdaptiveController:
             is_representative = num_tokens == representative_num_tokens
             logger.info(
                 "VerifyAdaptiveController: profile row bs=%d query_len=%d "
-                "sum_query_len=%d runtime_mode=%s padded_tokens=%d "
+                "sum_query_len=%d scheduled_tokens=%s runtime_mode=%s padded_tokens=%d "
                 "cost_ms=%.6f raw_median_ms=%.6f raw_avg_ms=%.6f raw_std_ms=%.6f "
                 "cost_table_representative=%s representative_sum_query_len=%d",
                 bs,
                 int(record["query_len_per_req"]),
                 num_tokens,
+                record["scheduled_tokens"],
                 bucket_modes[bucket_key],
                 int(record["padded_tokens"]),
                 cost_ms,
@@ -334,6 +383,10 @@ class VerifyAdaptiveController:
             logger.warning("VerifyAdaptiveController: empty cost table.")
             return
         logger.info("D-Cut verifier cost table (Qwen3.5 GDN graph):\n%s", self._format_cost_table_markdown(rows))
+        compact = "; ".join(
+            f"bs={row['batch_size']} sumQ={row['sum_query_len']} cost_ms={row['cost_ms']:.3f}" for row in rows
+        )
+        logger.info("D-Cut cost table compact: %s", compact)
 
     def _dump_cost_table_if_requested(self) -> None:
         dump_path = os.getenv("VLLM_DCUT_COST_TABLE_OUT") or self.config.cost_table_dump_path
