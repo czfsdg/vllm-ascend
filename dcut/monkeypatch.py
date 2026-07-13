@@ -143,11 +143,32 @@ def _dcut_write_trim_stats(
     trimmed_tokens: int,
     trimmed_reqs: int,
     scheduled_reqs: int,
+    dcut_reqs: int,
+    spec_tokens_before: int,
+    spec_tokens_after: int,
     total_scheduled_tokens: int,
+    request_stats: list[str],
 ) -> None:
     self._dcut_step_idx += 1
     self._dcut_total_trimmed_tokens += trimmed_tokens
     self._dcut_total_trimmed_reqs += trimmed_reqs
+    request_stats_text = ",".join(request_stats)
+    logger.info(
+        "D-Cut verify batch: step=%d batch_size=%d scheduled_reqs=%d "
+        "dcut_reqs=%d trimmed_reqs=%d spec_tokens_before=%d "
+        "spec_tokens_after=%d trimmed_tokens=%d total_scheduled_tokens=%d "
+        "req_lens=%s",
+        self._dcut_step_idx,
+        batch_size,
+        scheduled_reqs,
+        dcut_reqs,
+        trimmed_reqs,
+        spec_tokens_before,
+        spec_tokens_after,
+        trimmed_tokens,
+        total_scheduled_tokens,
+        request_stats_text or "-",
+    )
     if not self._dcut_trim_stats_out:
         return
     if trimmed_tokens == 0 and self._dcut_step_idx % self._dcut_stat_every != 0:
@@ -157,11 +178,14 @@ def _dcut_write_trim_stats(
         os.makedirs(dirname, exist_ok=True)
     line = (
         f"step={self._dcut_step_idx} batch_size={batch_size} "
-        f"scheduled_reqs={scheduled_reqs} "
+        f"scheduled_reqs={scheduled_reqs} dcut_reqs={dcut_reqs} "
+        f"spec_tokens_before={spec_tokens_before} "
+        f"spec_tokens_after={spec_tokens_after} "
         f"total_scheduled_tokens={total_scheduled_tokens} "
         f"trimmed_reqs={trimmed_reqs} trimmed_tokens={trimmed_tokens} "
         f"total_trimmed_reqs={self._dcut_total_trimmed_reqs} "
-        f"total_trimmed_tokens={self._dcut_total_trimmed_tokens}\n"
+        f"total_trimmed_tokens={self._dcut_total_trimmed_tokens} "
+        f"req_lens={request_stats_text}\n"
     )
     try:
         with open(self._dcut_trim_stats_out, "a", encoding="utf-8") as f:
@@ -178,12 +202,20 @@ def _dcut_truncate(self, scheduler_output):
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
     trimmed_reqs = 0
+    dcut_reqs = 0
+    request_stats: list[str] = []
     scheduled_reqs = len(new_spec)
     original_total_tokens = scheduler_output.total_num_scheduled_tokens
+    spec_tokens_before = sum(len(draft_toks) for draft_toks in new_spec.values())
     for req_id, draft_toks in list(new_spec.items()):
+        original_len = len(draft_toks)
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
-        if adaptive_len is not None and adaptive_len < len(draft_toks):
-            diff = len(draft_toks) - adaptive_len
+        final_len = original_len
+        if adaptive_len is not None:
+            dcut_reqs += 1
+            final_len = min(adaptive_len, original_len)
+        if adaptive_len is not None and adaptive_len < original_len:
+            diff = original_len - adaptive_len
             tokens_delta += diff
             trimmed_reqs += 1
             new_num_sched[req_id] -= diff
@@ -191,6 +223,7 @@ def _dcut_truncate(self, scheduler_output):
                 del new_spec[req_id]
             else:
                 new_spec[req_id] = draft_toks[:adaptive_len]
+        request_stats.append(f"{req_id}:{original_len}->{final_len}")
     if tokens_delta > 0:
         scheduler_output = replace(
             scheduler_output,
@@ -204,7 +237,11 @@ def _dcut_truncate(self, scheduler_output):
         trimmed_tokens=tokens_delta,
         trimmed_reqs=trimmed_reqs,
         scheduled_reqs=scheduled_reqs,
+        dcut_reqs=dcut_reqs,
+        spec_tokens_before=spec_tokens_before,
+        spec_tokens_after=spec_tokens_before - tokens_delta,
         total_scheduled_tokens=original_total_tokens,
+        request_stats=request_stats,
     )
     return scheduler_output
 
