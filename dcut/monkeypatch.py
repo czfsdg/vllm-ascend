@@ -1975,4 +1975,116 @@ def _patch_gdn_dcut() -> None:
                     )
                     mixed_qkv_spec = output_spec
 
-        
+        # 1.2: Process the remaining part
+        if attn_metadata.num_prefills > 0:
+            if mixed_qkv_non_spec is not None:
+                if get_pcp_group().world_size > 1:
+                    mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+                    has_initial_state = attn_metadata.has_initial_state
+                    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+                    conv_state = self_kv_cache[0].transpose(-1, -2)
+                    mixed_qkv_non_spec = causal_conv1d_fn(
+                        mixed_qkv_non_spec_T,
+                        conv_weights,
+                        self.conv1d.bias,
+                        activation=self.activation,
+                        conv_states=conv_state,
+                        has_initial_state=has_initial_state,
+                        cache_indices=non_spec_state_indices_tensor,
+                        query_start_loc=non_spec_query_start_loc,
+                        metadata=attn_metadata,
+                    ).transpose(0, 1)
+                else:
+                    conv_weights_T = conv_weights.transpose(0, 1)
+                    activation_num = 1 if self.activation else 0
+                    (
+                        query_start_loc_opt,
+                        cache_indices_opt,
+                        initial_state_mode_opt,
+                    ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
+                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec_output,
+                        mixed_qkv_non_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=query_start_loc_opt,
+                        cache_indices_opt=cache_indices_opt,
+                        initial_state_mode_opt=initial_state_mode_opt,
+                        num_accepted_tokens_opt=[],
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=0,
+                    )
+                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
+        elif attn_metadata.num_decodes > 0:
+            conv_weights_T = conv_weights.transpose(0, 1)
+            activation_num = 1 if self.activation else 0
+            non_spec_qsl_host, non_spec_ci_host = get_causal_conv1d_update_host_args(attn_metadata)
+            if _EXTRA_CTX.capturing or torch.compiler.is_compiling():
+                stream = torch_npu.npu.current_stream()
+                event = torch.npu.ExternalEvent()
+                event.wait(stream)
+                event.reset(stream)
+                graph_params = get_graph_params() if not _EXTRA_CTX.is_draft_model else get_draft_graph_params()
+                graph_params.conv1d_events[num_actual_tokens].append(event)
+
+                output_non_spec = torch.empty_like(mixed_qkv_non_spec)
+                non_spec_q_per_seq = 1
+                graph_params.conv1d_params[num_actual_tokens].append(
+                    (
+                        weak_ref_tensors(output_non_spec),
+                        weak_ref_tensors(mixed_qkv_non_spec),
+                        weak_ref_tensors(conv_weights_T),
+                        weak_ref_tensors(self_kv_cache[0]),
+                        self.conv1d.bias,
+                        activation_num,
+                        PAD_SLOT_ID,
+                        1,
+                        "non_spec_decode",
+                        self.prefix,
+                        non_spec_qsl_host,
+                        non_spec_ci_host,
+                        [],
+                        non_spec_q_per_seq,
+                    )
+                )
+
+                torch.npu.graph_task_group_begin(stream)
+                torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    output_non_spec,
+                    mixed_qkv_non_spec,
+                    conv_weights_T,
+                    conv_state=self_kv_cache[0],
+                    bias_opt=self.conv1d.bias,
+                    query_start_loc_opt=non_spec_qsl_host,
+                    cache_indices_opt=non_spec_ci_host,
+                    initial_state_mode_opt=(),
+                    num_accepted_tokens_opt=[],
+                    activation_mode=activation_num,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
+                handle = torch.npu.graph_task_group_end(stream)
+                graph_params.conv1d_handles[num_actual_tokens].append(handle)
+                mixed_qkv_non_spec = output_non_spec
+            else:
+                output_non_spec = torch.empty_like(mixed_qkv_non_spec)
+                torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    output_non_spec,
+                    mixed_qkv_non_spec,
+                    conv_weights_T,
+                    conv_state=self_kv_cache[0],
+                    bias_opt=self.conv1d.bias,
+                    query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc[: num_actual_tokens + 1]),
+                    cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor[:num_actual_tokens]),
+                    initial_state_mode_opt=[],
+                    num_accepted_tokens_opt=[],
+                    activation_mode=activation_num,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
+                mixed_qkv_non_spec = output_non_spec
+        else:
+            mixed_qkv_non_spec = None
