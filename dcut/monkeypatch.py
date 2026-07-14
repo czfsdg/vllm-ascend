@@ -2127,3 +2127,4 @@ def _patch_gdn_dcut() -> None:
                 actual_seq_lengths = _gdn_bufs["asl"]
                 aligned_ssm_indices = _gdn_bufs["ssi"]
                 clamped_nat = _gdn_bufs["nat"]
+why
