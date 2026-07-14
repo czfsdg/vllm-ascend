@@ -997,3 +997,982 @@ def _patch_proposer() -> None:
         if getattr(owner, "_dcut_compute_patched", False):
             continue
         _orig_compute = owner.compute_draft_token_ids
+      
+        def _make_compute_wrapper(orig):
+            def compute_draft_token_ids(self, hidden_states):
+                self._last_selected_probs = None
+                if not type(self)._should_collect_draft_probs(self):
+                    return orig(self, hidden_states)
+                try:
+                    logits = self.model.logits_processor(
+                        self.model.lm_head, hidden_states
+                    )
+                    logits = logits.contiguous()
+                    next_token, selected_probs = (
+                        type(self)._greedy_sample_with_selected_probs(logits)
+                    )
+                    # Keep this flat here. Ascend may pad sample_hidden_states for
+                    # lmhead TP; the runner slices and reshapes using real batch size.
+                    self._last_selected_probs = selected_probs.float().contiguous()
+
+                    draft_map = getattr(self.model, "draft_id_to_target_id", None)
+                    if draft_map is None:
+                        return next_token
+                    bias = torch.index_select(
+                        draft_map, dim=0, index=next_token.view(-1)
+                    ).view(next_token.shape)
+                    return next_token + bias
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning(
+                        "D-Cut: gather selected probs in compute_draft_token_ids "
+                        "failed: %s",
+                        e,
+                    )
+                    self._last_selected_probs = None
+                    return orig(self, hidden_states)
+
+            return compute_draft_token_ids
+
+        owner.compute_draft_token_ids = _make_compute_wrapper(_orig_compute)
+        owner._dcut_compute_patched = True
+        logger.info(
+            "D-Cut: patched compute_draft_token_ids on %s.", owner.__name__
+        )
+
+    # Find the distinct owner classes of _sample_draft_tokens across our
+    # concrete proposers (usually a single class) and wrap each once.
+    owners = []
+    for pc in proposer_classes:
+        for klass in pc.__mro__:
+            if "_sample_draft_tokens" in klass.__dict__:
+                if klass not in owners:
+                    owners.append(klass)
+                break
+
+    for owner in owners:
+        if getattr(owner, "_dcut_patched", False):
+            continue
+        _orig_sample = owner._sample_draft_tokens
+
+        def _make_wrapper(orig):
+            def _sample_draft_tokens(self, hidden_states, sampling_metadata):
+                self._last_selected_probs = None
+                out = orig(self, hidden_states, sampling_metadata)
+                # D-Cut only targets parallel drafting (DFlash / PARD), where the
+                # whole block is sampled in this single call -> selected_probs is
+                # [B*T] which reshapes to [B, T].
+                if type(self)._should_collect_draft_probs(self):
+                    if isinstance(out, tuple):
+                        token_ids = out[0]
+                        full_probs = out[1] if len(out) > 1 else None
+                    else:
+                        token_ids = out
+                        full_probs = None
+                    try:
+                        logits = (
+                            None
+                            if full_probs is not None
+                            else self.model.compute_logits(hidden_states)
+                        )
+                        sel = type(self)._gather_selected_probs(
+                            logits, token_ids, full_probs
+                        )
+                        self._last_selected_probs = sel.view(
+                            -1, self.num_speculative_tokens
+                        ).contiguous()
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.warning(
+                            "D-Cut: gather selected probs failed: %s", e
+                        )
+                        self._last_selected_probs = None
+                return out
+            return _sample_draft_tokens
+
+        owner._sample_draft_tokens = _make_wrapper(_orig_sample)
+        owner._dcut_patched = True
+        logger.info(
+            "D-Cut: patched _sample_draft_tokens on %s.", owner.__name__
+        )
+
+
+def _patch_runner() -> None:
+    import vllm_ascend.worker.model_runner_v1 as m
+
+    # Class-level removal: modify CompilationConfig.splitting_ops at import
+    # time so the config parser uses the modified list. The __init__ patch
+    # alone is too late if the compiler reads splitting_ops before __init__.
+    if ENABLE_GDN_MAIN_PIECEWISE_GRAPH:
+        try:
+            from vllm.config import CompilationConfig as _CC
+            _gdn_op = "vllm::qwen_gdn_attention_core"
+            if _CC.splitting_ops and _gdn_op in _CC.splitting_ops:
+                _CC.splitting_ops = [op for op in _CC.splitting_ops if op != _gdn_op]
+                logger.warning("D-Cut: removed %s from CompilationConfig.splitting_ops (class-level)", _gdn_op)
+            if hasattr(_CC, '_attention_ops') and _gdn_op in _CC._attention_ops:
+                _CC._attention_ops = [op for op in _CC._attention_ops if op != _gdn_op]
+                logger.warning("D-Cut: removed %s from CompilationConfig._attention_ops (class-level)", _gdn_op)
+        except Exception as e:
+            logger.warning("D-Cut: class-level removal failed: %s", e)
+
+    R = m.NPUModelRunner
+    if getattr(R, "_dcut_patched", False):
+        return
+
+    _orig_init = R.__init__
+
+    def __init__(self, *a, **k):
+        # Re-enabled: Remove GDN from splitting_ops so attention core is
+        # captured in the PIECEWISE graph. The attention core's metadata
+        # (actual_seq_lengths, ssm_state_indices, num_accepted_tokens) is
+        # updated at replay time via graph_task_update (see
+        # update_gdn_attn_graph_params in gdn.py).
+        if ENABLE_GDN_MAIN_PIECEWISE_GRAPH:
+            try:
+                _vc = k.get("vllm_config") or (a[0] if a else None)
+                if _vc is not None:
+                    _cc = _vc.compilation_config
+                    _gdn_op = "vllm::qwen_gdn_attention_core"
+                    if _cc.splitting_ops and _gdn_op in _cc.splitting_ops:
+                        _cc.splitting_ops.remove(_gdn_op)
+                        logger.warning("D-Cut: REMOVED %s from instance splitting_ops, remaining=%d ops", _gdn_op, len(_cc.splitting_ops))
+                    else:
+                        logger.warning("D-Cut: %s NOT in splitting_ops (len=%d, type=%s)", _gdn_op, len(_cc.splitting_ops) if _cc.splitting_ops else -1, type(_cc.splitting_ops))
+                    _cls = type(_cc)
+                    if hasattr(_cls, '_attention_ops') and _gdn_op in _cls._attention_ops:
+                        _cls._attention_ops = [op for op in _cls._attention_ops if op != _gdn_op]
+                        logger.warning("D-Cut: REMOVED %s from class _attention_ops", _gdn_op)
+                    logger.warning("D-Cut: GDN removed from splitting_ops and _attention_ops (Phase 2: true入图)")
+            except Exception as e:
+                logger.warning("D-Cut: failed to remove GDN in __init__: %s", e)
+        _orig_init(self, *a, **k)
+        try:
+            _dcut_init_controller(self)
+        except Exception as e:
+            logger.error("D-Cut init failed; running vanilla: %s", e)
+            self._verify_adaptive_controller = None
+
+    _orig_exec = R.execute_model
+
+    def execute_model(self, scheduler_output, intermediate_tensors=None):
+        # DEBUG: print to stdout to confirm wrapper is called
+        _ctrl = getattr(self, "_verify_adaptive_controller", None)
+        _has_spec = bool(getattr(scheduler_output, "scheduled_spec_decode_tokens", None))
+        if _ctrl is not None:
+            _dcut_enable_drafter_probs(self)
+            import os as _os_dcut
+            if not _os_dcut.environ.get("VLLM_DCUT_DISABLE"):
+                scheduler_output = _dcut_truncate(self, scheduler_output)
+        # DEBUG: log every N calls to avoid flooding
+        if not hasattr(self, "_dcut_exec_count"):
+            self._dcut_exec_count = 0
+        self._dcut_exec_count += 1
+        if self._dcut_exec_count % 50 == 1:
+            logger.info("DCUT_EXEC[%d]: ctrl=%s, has_spec=%s",
+                        self._dcut_exec_count,
+                        "None" if _ctrl is None else "set",
+                        _has_spec)
+        return _orig_exec(self, scheduler_output, intermediate_tensors)
+
+    _orig_sample_tokens = R.sample_tokens
+
+    def sample_tokens(self, *a, **k):
+        out = _orig_sample_tokens(self, *a, **k)
+        if getattr(self, "_adaptive_probs_pending", False):
+            try:
+                _maybe_process_adaptive_probs(self)
+            except Exception as e:
+                logger.warning("D-Cut: process probs failed: %s", e)
+                self._adaptive_probs_pending = False
+        return out
+
+    _orig_copy = R._copy_draft_token_ids_to_cpu
+
+    def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
+        _orig_copy(self, scheduler_output, zeros_only)
+        if getattr(self, "_verify_adaptive_controller", None) is not None:
+            try:
+                _dcut_queue_probs(self, zeros_only)
+            except Exception as e:
+                logger.warning("D-Cut: queue probs failed: %s", e)
+
+    _orig_update = R._update_states
+
+    def _update_states(self, scheduler_output):
+        ret = _orig_update(self, scheduler_output)
+        ctrl = getattr(self, "_verify_adaptive_controller", None)
+        if ctrl is not None:
+            for rid in scheduler_output.finished_req_ids:
+                ctrl.invalidate(rid)
+        return ret
+
+    R.__init__ = __init__
+    R.execute_model = execute_model
+    R.sample_tokens = sample_tokens
+    R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
+    R._update_states = _update_states
+    R._adaptive_profile_run = _adaptive_profile_run
+    R.profile_adaptive_cost = profile_adaptive_cost
+    R._maybe_process_adaptive_probs = _maybe_process_adaptive_probs
+    R._dcut_enable_drafter_probs = _dcut_enable_drafter_probs
+    R._dcut_patched = True
+
+    # --- Force attn_metadata build during PIECEWISE graph capture ---
+    # By default, _dummy_run only builds attn_metadata when
+    # force_attention=True or cudagraph_runtime_mode==FULL.  In PIECEWISE
+    # mode, force_attention defaults to False, so attn_metadata is None.
+    # GDN's _forward_core returns early when attn_metadata is None, making
+    # GDN a no-op in the captured graph -> garbled output.  Force
+    # force_attention=True for PIECEWISE so attn_metadata is built during
+    # capture, allowing GDN's recurrent attention capturing branch to run.
+    _orig_dummy_run = R._dummy_run
+
+    def _dummy_run(self, num_tokens, cudagraph_runtime_mode=None,
+                   force_attention=False, **kwargs):
+        # Force attention metadata build for PIECEWISE mode (both warmup AND capture).
+        # During warmup, cudagraph_runtime_mode=NONE but we still need attn_metadata
+        # so the GDN recurrent path is reached and v8b instance buffers are
+        # pre-allocated in the regular memory pool (not the graph private pool).
+        if ENABLE_GDN_MAIN_PIECEWISE_GRAPH and (
+                cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                or (cudagraph_runtime_mode == CUDAGraphMode.NONE
+                    and self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE)):
+            # Only force attention during REAL warmup (not profile_cudagraph_memory,
+            # which uses a minimal KV cache and hits GDN's build_for_cudagraph_capture
+            # assertion when num_tokens > decode_cudagraph_max_bs).
+            if getattr(self, '_dcut_in_real_warmup', False):
+                force_attention = True
+        self._dcut_in_dummy_run = True
+        try:
+            return _orig_dummy_run(
+                self, num_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                force_attention=force_attention, **kwargs)
+        finally:
+            self._dcut_in_dummy_run = False
+
+    R._dummy_run = _dummy_run
+    logger.warning(
+        "D-Cut: patched _dummy_run to force force_attention=True "
+        "for PIECEWISE mode (GDN needs attn_metadata during capture)."
+    )
+
+    # --- Force use_spec_decode=True during _dummy_run for GDN recurrent path ---
+    # During _dummy_run (warmup + capture), use_spec_decode defaults to False.
+    # During capture, build_for_cudagraph_capture derives num_accepted_tokens
+    # from query_start_loc, so spec_sequence_masks IS set and the recurrent
+    # path is reached.  But during WARMUP, for_cudagraph_capture=False and
+    # use_spec_decode=False, so extra_attn_metadata_args is empty,
+    # num_accepted_tokens=None, spec_sequence_masks=None, and the recurrent
+    # path is SKIPPED.  This means v8b instance buffers are never
+    # pre-allocated during warmup -> during capture they fall back to the
+    # graph's private pool -> overwritten during replay -> garbled output.
+    #
+    # Fix: when _dcut_in_dummy_run is True and speculative_config is set,
+    # force use_spec_decode=True and set up num_decode_draft_tokens /
+    # num_accepted_tokens so the GDN builder creates spec_sequence_masks
+    # during warmup.  Buffers allocated during warmup (eager, not capturing)
+    # go to the REGULAR memory pool, surviving into capture.
+#     _orig_build_attn = R._build_attention_metadata
+# 
+#     def _build_attention_metadata(self, *args, **kwargs):
+#         if (getattr(self, '_dcut_in_real_warmup', False)
+#                 and self.speculative_config is not None
+#                 and not kwargs.get('use_spec_decode', False)):
+#             _nst_np = kwargs.get('num_scheduled_tokens_np')
+#             _nr = kwargs.get('num_reqs')
+#             if _nst_np is not None and _nr is not None and _nr > 0:
+#                 num_spec = self.num_spec_tokens
+#                 _nrp = kwargs.get('num_reqs_padded') or _nr
+#                 # Set up num_decode_draft_tokens (>= 0 marks spec-decode reqs)
+#                 if hasattr(self, 'num_decode_draft_tokens'):
+#                     for i in range(_nr):
+#                         self.num_decode_draft_tokens.np[i] = min(
+#                             int(_nst_np[i]) - 1, num_spec
+#                         )
+#                     self.num_decode_draft_tokens.np[_nr:_nrp].fill(-1)
+#                     self.num_decode_draft_tokens.copy_to_gpu()
+#                 # Set up num_accepted_tokens
+#                 if hasattr(self, 'num_accepted_tokens'):
+#                     for i in range(_nr):
+#                         self.num_accepted_tokens.gpu[i] = min(
+#                             int(_nst_np[i]), num_spec + 1
+#                         )
+#                     self.num_accepted_tokens.gpu[_nr:_nrp].fill_(1)
+#                 kwargs['use_spec_decode'] = True
+#         return _orig_build_attn(self, *args, **kwargs)
+# 
+#     R._build_attention_metadata = _build_attention_metadata
+#     logger.warning(
+#         "D-Cut: patched _build_attention_metadata to force use_spec_decode=True "
+#         "during _dummy_run (GDN recurrent path needs spec_sequence_masks)."
+#     )
+
+    # --- PIECEWISE conv1d subtask update ---
+    # update_full_graph_params (which calls update_conv1d_graph_params) is
+    # only invoked for FULL mode in the upstream model_runner.  Now that GDN
+    # is inside the PIECEWISE graph, conv1d subtask host args must be updated
+    # before each PIECEWISE replay too.  Without this, the events created
+    # during capture are never re-recorded, and the graph replay hangs
+    # waiting for them.
+    # NOTE: Only apply when ENABLE_GDN_MAIN_PIECEWISE_GRAPH=True. When False,
+    # GDN is a splitting op (eager), so conv1d is also eager and does not
+    # need graph param updates. Calling update_conv1d_graph_params in that
+    # case causes silent EngineCore crashes under high concurrency.
+    _orig_update_full = R._update_full_graph_params_if_needed
+
+    def _update_full_graph_params_if_needed(
+        self, forward_context, num_tokens_padded, positions
+    ):
+        # When GDN is a splitting op (flag=False), conv1d is eager and does
+        # not need graph param updates. Calling update_conv1d_graph_params
+        # in that case causes silent EngineCore crashes under high concurrency.
+        if not ENABLE_GDN_MAIN_PIECEWISE_GRAPH:
+            _orig_update_full(self, forward_context, num_tokens_padded, positions)
+            return
+        # For prefill steps, force eager mode. The GDN graph only captured
+        # the spec (decode) branch, which can't handle prefill (needs
+        # chunk_gated_delta_rule).
+        _am = getattr(forward_context, 'attn_metadata', None)
+        # Detect spec decode: check if any metadata in the dict has
+        # spec_sequence_masks is not None. If none do, this is a
+        # prefill or regular decode step — force eager to avoid
+        # graph replay hang (events never re-recorded when
+        # spec_sequence_masks is None).
+        # Also check for mixed batches (prefill + spec decode): the conv1d
+        # host arg padding can't handle mixed batches (EZ9999 tiling failure).
+        # Force eager for any batch with prefills.
+        _has_spec = False
+        _has_prefill = False
+        if isinstance(_am, dict):
+            for _v in _am.values():
+                if getattr(_v, 'spec_sequence_masks', None) is not None:
+                    _has_spec = True
+                if getattr(_v, 'num_prefills', 0) > 0:
+                    _has_prefill = True
+        else:
+            if getattr(_am, 'spec_sequence_masks', None) is not None:
+                _has_spec = True
+            if getattr(_am, 'num_prefills', 0) > 0:
+                _has_prefill = True
+        if not _has_spec or _has_prefill:
+            if (forward_context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                    and not getattr(self, '_dcut_in_dummy_run', False)):
+                forward_context.cudagraph_runtime_mode = CUDAGraphMode.NONE
+        _orig_update_full(self, forward_context, num_tokens_padded, positions)
+        if (
+            forward_context.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+            and not forward_context.capturing
+            and not self.use_sparse
+            and not self.use_compress
+        ):
+            if not hasattr(self, 'update_stream'):
+                import torch_npu as _tn
+                self.update_stream = _tn.npu.Stream()
+            from vllm_ascend.ops.gdn import update_conv1d_graph_params
+            from vllm_ascend.compilation.acl_graph import _EXTRA_CTX as _ec
+            update_conv1d_graph_params(
+                self.update_stream,
+                forward_context,
+                num_tokens_padded,
+                self.vllm_config,
+                _ec.is_draft_model,
+                None,
+            )
+
+    R._update_full_graph_params_if_needed = _update_full_graph_params_if_needed
+    logger.warning(
+        'D-Cut: patched _update_full_graph_params_if_needed for PIECEWISE conv1d update.'
+    )
+
+    # Patch _model_forward to call correct_conv1d_state() after graph replay.
+    # With ENPU enabled, the flow is:
+    #   _update_full_graph_params_if_needed() -> saves correction data (state before replay)
+    #   run_model() -> graph replay (corrupts last segment state via padding)
+    #   correct_conv1d_state() -> recomputes last segment state from saved state + real data
+    _orig_model_forward = R._model_forward
+
+    def _model_forward(self, *args, **kwargs):
+        # Fill GDN static buffers before graph replay (outside captured graph).
+        # At capture time: fills buffers so _forward_core's capture path can
+        # pass them to the GDN op (stable data_ptr baked into graph).
+        # At replay time: fills buffers with runtime values so the GDN op
+        # inside the replayed graph reads updated ASL/SSI/NAT.
+        if ENABLE_GDN_MAIN_PIECEWISE_GRAPH:
+            try:
+                from vllm.forward_context import get_forward_context
+                from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+                fc = get_forward_context()
+                if fc is not None and fc.attn_metadata is not None:
+                    # num_tokens is NOT passed to _model_forward as an arg.
+                    # It's stored in fc.batch_descriptor.num_tokens by
+                    # set_forward_context(num_tokens=num_tokens_padded).
+                    _nt = fc.batch_descriptor.num_tokens if fc.batch_descriptor else None
+                    if _nt is not None:
+                        _dcut_update_gdn_static(fc, _nt, GDNAttentionMetadata)
+                        logger.warning("D-Cut: _model_forward filled GDN static bufs, num_tokens=%d", _nt)
+            except Exception as _e:
+                logger.debug("D-Cut: GDN static buf update skipped: %s", _e)
+        result = _orig_model_forward(self, *args, **kwargs)
+        # DISABLED: state correction causes accuracy regression
+        # if getattr(self, 'enable_enpu', False):
+        #     from vllm_ascend.ops.gdn import correct_conv1d_state
+        #     correct_conv1d_state()
+        return result
+
+    R._model_forward = _model_forward
+    logger.warning(
+        'D-Cut: patched _model_forward for post-replay conv1d state correction.'
+    )
+
+
+    logger.warning("D-Cut: patched NPUModelRunner.")
+
+
+def _patch_worker() -> None:
+    import vllm_ascend.worker.worker as m
+
+    W = m.NPUWorker
+    if getattr(W, "_dcut_patched", False):
+        return
+
+    _orig = W.compile_or_warm_up_model
+
+    def compile_or_warm_up_model(self, *a, **k):
+        runner = getattr(self, "model_runner", None)
+        if runner is not None and hasattr(runner, "_dcut_enable_drafter_probs"):
+            try:
+                runner._dcut_enable_drafter_probs()
+            except Exception as e:
+                logger.warning("D-Cut: enabling draft probs before warmup failed: %s", e)
+        # Mark that we're in the REAL warmup (not profile_cudagraph_memory).
+        # _build_attention_metadata patch checks this to force use_spec_decode=True
+        # only during real warmup, not during profile_cudagraph_memory (which uses
+        # a minimal KV cache that can't support spec-decode conv1d).
+        if runner is not None:
+            runner._dcut_in_real_warmup = True
+        try:
+            ret = _orig(self, *a, **k)
+            if runner is not None and hasattr(runner, "profile_adaptive_cost"):
+                try:
+                    runner.profile_adaptive_cost()
+                except Exception as e:
+                    # Empty cost table => controller no-ops => graceful fall back to
+                    # vanilla DFlash (full-length verify).
+                    import traceback
+                    logger.error("D-Cut: cost profiling failed; falling back: %s", e)
+                    logger.error("D-Cut: full traceback: %s", traceback.format_exc())
+                    ctrl = getattr(runner, "_verify_adaptive_controller", None)
+                    if ctrl is not None:
+                        ctrl._cost_table.clear()
+                        ctrl._sorted_bs.clear()
+                        ctrl._sorted_sql_per_bs.clear()
+        finally:
+            if runner is not None:
+                runner._dcut_in_real_warmup = False
+        return ret
+
+    W.compile_or_warm_up_model = compile_or_warm_up_model
+    W._dcut_patched = True
+    logger.info("D-Cut: patched NPUWorker.")
+
+
+def _patch_attention() -> None:
+    """Patch full-attention (FIA) to skip the capturing branch in PIECEWISE mode.
+
+    In PIECEWISE mode, full-attention ops are splitting ops — they run eagerly
+    between graph pieces.  But ``_EXTRA_CTX.capturing`` is True during the
+    entire capture process, so ``forward_fused_infer_attention`` enters its
+    capturing branch and calls ``full_graph_fia`` → ``graph_task_group_begin``,
+    which fails because the stream is not in capture status.
+
+    Fix: temporarily set ``capturing=False`` for the duration of the full-
+    attention forward pass when in PIECEWISE mode, so it uses the eager code
+    path (correct for splitting ops).
+    """
+    try:
+        from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+        from vllm_ascend.ascend_forward_context import (
+            _EXTRA_CTX,
+            get_forward_context,
+        )
+    except Exception as e:
+        logger.warning("D-Cut: cannot import AscendAttentionBackendImpl: %s", e)
+        return
+
+    if getattr(AscendAttentionBackendImpl, "_dcut_patched", False):
+        return
+
+    _orig_ffia = AscendAttentionBackendImpl.forward_fused_infer_attention
+
+    def _forward_fused_infer_attention(
+        self, query, key, value, attn_metadata, output, kv_cache=None
+    ):
+        if _EXTRA_CTX.capturing or torch.compiler.is_compiling():
+            ctx = get_forward_context()
+            mode = getattr(ctx, "cudagraph_runtime_mode", None)
+            if mode == CUDAGraphMode.PIECEWISE:
+                # Full attention is a splitting op in PIECEWISE mode.
+                # Temporarily disable capturing so the original method
+                # uses the eager code path instead of full_graph_fia.
+                orig_capturing = ctx.capturing
+                ctx.capturing = False
+                try:
+                    return _orig_ffia(
+                        self, query, key, value, attn_metadata, output, kv_cache
+                    )
+                finally:
+                    ctx.capturing = orig_capturing
+        return _orig_ffia(
+            self, query, key, value, attn_metadata, output, kv_cache
+        )
+
+    AscendAttentionBackendImpl.forward_fused_infer_attention = (
+        _forward_fused_infer_attention
+    )
+    AscendAttentionBackendImpl._dcut_patched = True
+    logger.warning(
+        "D-Cut: patched forward_fused_infer_attention to skip capturing "
+        "branch in PIECEWISE mode (full attention is a splitting op)."
+    )
+
+
+def _apply_patches_once() -> None:
+    """Apply the real monkey patches.  Runs once per process, deferred to the
+    first worker construction (see ``install``) so that importing the NPU
+    worker/runner/proposer modules is safe."""
+    global _PATCHED
+    if _PATCHED:
+        return
+    # Mark done up-front so a failure (e.g. non-Ascend platform) is not retried
+    # on every subsequent worker construction and does not spam the log.
+    _PATCHED = True
+    try:
+        import sys as _dbg
+        _patch_proposer()
+        _patch_runner()
+        _patch_worker()
+        _patch_attention()
+        _patch_gdn_dcut()
+        logger.info(
+            "D-Cut adaptive-verify patches applied for NPU "
+            "(active only if VLLM_DCUT_CONFIG is set + method is dflash/PARD)."
+        )
+    except Exception as e:  # pragma: no cover - never break vLLM startup
+        logger.error("D-Cut patching failed (vLLM continues normally): %s", e)
+
+
+def install(*args, **kwargs) -> None:
+    """vLLM general-plugin entrypoint.  Idempotent; safe to call per process.
+
+    IMPORTANT — deferred by design.  ``install`` runs during *general-plugin
+    load*, which happens BEFORE vllm-ascend has finished importing its own
+    ``ops/fused_moe`` / ``device`` graph.  Eagerly importing the NPU
+    worker/runner/proposer modules here re-enters that partially-initialised
+    graph and raises a circular ``ImportError`` that poisons ``sys.modules`` —
+    which then breaks vllm-ascend's *own* later imports (e.g.
+    ``pre_register_and_update`` -> ``select_experts``), taking down even vanilla
+    serving.  So here we only *arm* a deferred trigger on the vLLM-core
+    ``WorkerBase`` (safe to import at this point) and apply the real patches on
+    the first worker construction, by which time vllm-ascend is fully imported.
+    """
+    global _INSTALLED
+    if _INSTALLED:
+        return
+    _INSTALLED = True
+    try:
+        # GDN removal from _attention_ops — putting GDN inside the PIECEWISE
+        # graph so its compute cost is captured in the cost table.
+        # This runs in install() which is BEFORE set_splitting_ops_for_v1()
+        # copies _attention_ops into splitting_ops. Without this,
+        # set_splitting_ops_for_v1() re-adds GDN to splitting_ops even
+        # after the __init__ patch removes it.
+        if ENABLE_GDN_MAIN_PIECEWISE_GRAPH:
+            try:
+                from vllm.config import CompilationConfig
+                ops = CompilationConfig._attention_ops
+                if isinstance(ops, list) and "vllm::qwen_gdn_attention_core" in ops:
+                    CompilationConfig._attention_ops = [
+                        op for op in ops if op != "vllm::qwen_gdn_attention_core"
+                    ]
+                    logger.warning(
+                        "D-Cut: removed qwen_gdn_attention_core from _attention_ops "
+                        "(class-level, in install())"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "D-Cut: failed to remove GDN from _attention_ops in install(): %s", e
+                )
+
+        # Patch GDNAttentionMetadataBuilder.build_for_cudagraph_capture to
+        # skip the decode-only assertion.  The assertion checks
+        # num_actual_tokens <= decode_cudagraph_max_bs (256), which is only
+        # valid for FULL cudagraph mode (decode-only).  In PIECEWISE mode,
+        # GDN is inside the graph and needs attn_metadata built during
+        # capture with larger token counts (up to max capture size).
+        # The method body after the assertion is just self.build(...), so
+        # skipping the assertion is safe.
+        try:
+            from vllm.v1.attention.backends.gdn_attn import (
+                GDNAttentionMetadataBuilder,
+            )
+
+            _orig_build_cg = GDNAttentionMetadataBuilder.build_for_cudagraph_capture
+
+            def _build_for_cudagraph_capture(self, common_attn_metadata):
+                m = common_attn_metadata
+                num_accepted_tokens = torch.diff(m.query_start_loc)
+                num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
+                return self.build(
+                    0, m, num_accepted_tokens, num_decode_draft_tokens_cpu
+                )
+
+            GDNAttentionMetadataBuilder.build_for_cudagraph_capture = (
+                _build_for_cudagraph_capture
+            )
+            logger.warning(
+                "D-Cut: patched GDNAttentionMetadataBuilder."
+                "build_for_cudagraph_capture to skip decode-only assertion "
+                "(needed for PIECEWISE mode with GDN in graph)."
+            )
+        except Exception as e:
+            logger.warning(
+                "D-Cut: failed to patch GDN build_for_cudagraph_capture: %s", e
+            )
+
+        from vllm.v1.worker.worker_base import WorkerBase
+
+        if getattr(WorkerBase, "_dcut_defer_armed", False):
+            return
+        _orig_wb_init = WorkerBase.__init__
+
+        def __init__(self, *a, **k):
+            # NPUWorker.__init__ calls super().__init__() (this) early, before it
+            # builds the model runner — so patching here lands before any
+            # NPUModelRunner / proposer instance exists.
+            _apply_patches_once()
+            return _orig_wb_init(self, *a, **k)
+
+        WorkerBase.__init__ = __init__
+        WorkerBase._dcut_defer_armed = True
+        logger.info(
+            "D-Cut deferred installer armed on WorkerBase "
+            "(patches apply on first worker init to avoid a vllm-ascend "
+            "circular import)."
+        )
+    except Exception as e:  # pragma: no cover - never break vLLM startup
+        logger.error("D-Cut install (arm) failed (vLLM continues normally): %s", e)
+# === GDN D-Cut monkeypatch additions ===
+# Appended to monkeypatch.py. These changes were previously applied directly
+# to /vllm-workspace/vllm-ascend/vllm_ascend/ops/gdn.py in vllm_dcut.
+# Moved here so vllm-ascend stays at vllm_src baseline.
+#
+# Changes:
+# 1. _conv1d_spec_varlen_eager — per-request F.conv1d fallback for variable
+#    query_len (D-Cut truncation on hybrid Mamba/GDN)
+# 2. _patch_gdn_dcut — patches AscendGatedDeltaNetAttention._forward_core to:
+#    a. Use _conv1d_spec_varlen_eager in the spec Conv1D eager path
+#    b. Align ssm_state_indices with actual token positions (boolean mask)
+#    c. Clamp num_accepted_tokens to actual seq lengths
+
+from torch.nn import functional as _F
+
+
+def _conv1d_spec_varlen_eager(
+    output_spec,
+    mixed_qkv_spec,
+    conv_weights,
+    conv_state,
+    bias,
+    activation,
+    num_spec,
+    spec_query_start_loc,
+    spec_state_indices_tensor,
+    num_accepted_tokens,
+    num_spec_decodes,
+):
+    """Per-request conv1d for variable query_len spec-decode (D-Cut).
+
+    When D-Cut truncates draft tokens, spec-decode requests have variable
+    query_len.  The CANN operator npu_causal_conv1d_custom with run_mode=1
+    requires uniform q_per_seq = num_spec + 1 and crashes on variable-length
+    input.  This fallback processes each request independently using F.conv1d
+    and updates the conv_state following the kernel's spec-decode state-update
+    semantics (shift=1, offset from num_accepted_tokens).
+
+    conv_state layout is SD: (num_cache_lines, state_len, dim).
+    """
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+    width = conv_weights.size(1)  # conv_kernel_size
+    state_len = width - 1 + num_spec  # conv_kernel_size - 1 + num_spec
+    dim = conv_weights.size(0)
+    # Depthwise conv weight: (dim, 1, width)
+    dw_weight = conv_weights.unsqueeze(1)
+
+    spec_total = mixed_qkv_spec.size(0)
+    out_total = output_spec.size(0)
+    for b in range(num_spec_decodes):
+        qs = int(spec_query_start_loc[b])
+        qe = int(spec_query_start_loc[b + 1])
+        # Clamp to actual tensor size — D-Cut RANDOM_CUT may trim tokens,
+        # making spec_query_start_loc offsets exceed the tensor length.
+        qe = min(qe, spec_total, out_total)
+        ql = qe - qs
+        ci = int(spec_state_indices_tensor[b, 0])
+        nat_b = min(int(num_accepted_tokens[b]), ql)
+
+        if ci == PAD_SLOT_ID or ql <= 0:
+            continue
+
+        offset = nat_b - 1  # conv_state_token_offset in kernel
+
+        # --- Conv1d computation ---
+        initial_state = conv_state[ci, offset:offset + width - 1, :].t()
+        x_b = mixed_qkv_spec[qs:qe].t()
+        x_concat = torch.cat([initial_state, x_b], dim=1)
+        out = _F.conv1d(
+            x_concat.unsqueeze(0),
+            dw_weight,
+            bias,
+            padding=0,
+            groups=dim,
+        )
+
+        if activation:
+            out = _F.silu(out)
+
+        output_spec[qs:qe] = out.squeeze(0).t()
+
+        # --- Conv-state update (kernel spec-decode semantics) ---
+        state_len_run = width - 2 + ql
+        keep = state_len_run - ql  # = width - 2
+        old_state = conv_state[ci, offset:offset + state_len_run, :].clone()
+        if keep > 0:
+            conv_state[ci, 0:keep, :] = old_state[1:1 + keep, :]
+        conv_state[ci, keep:keep + ql, :] = x_b.t()
+
+
+def _patch_gdn_dcut() -> None:
+    """Patch AscendGatedDeltaNetAttention._forward_core for D-Cut.
+
+    Two changes:
+    1. Spec Conv1D eager path: use _conv1d_spec_varlen_eager fallback instead
+       of CANN op (which crashes on variable query_len from D-Cut truncation).
+    2. Recurrent GDN spec kernel call: align ssm_state_indices with actual
+       token positions (boolean mask) and clamp num_accepted_tokens to actual
+       seq lengths.
+    """
+    try:
+        import torch
+        import torch_npu
+        from einops import rearrange
+        from vllm.distributed import get_pcp_group
+        from vllm.forward_context import get_forward_context
+        from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+        from vllm.v1.attention.backend import AttentionMetadata
+        from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+        from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+        from vllm_ascend.compilation.acl_graph import (
+            get_draft_graph_params,
+            get_graph_params,
+        )
+        from vllm_ascend.device.device_op import DeviceOperator
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+        from vllm_ascend.ops.gdn import (
+            AscendGatedDeltaNetAttention,
+            to_int64_tuple,
+            get_non_spec_causal_conv1d_host_args,
+            get_causal_conv1d_update_host_args,
+            get_spec_causal_conv1d_update_host_args,
+            get_non_spec_chunked_prefill_meta,
+        )
+        from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+        from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+        from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
+        from vllm_ascend.utils import weak_ref_tensors
+    except Exception as e:
+        import sys as _dbg2
+        logger.warning("D-Cut: cannot import GDN ops for patching: %s", e)
+        return
+
+
+    if getattr(QwenGatedDeltaNetAttention, "_dcut_gdn_patched", False):
+        return
+
+    # Monkeypatch _pad_conv1d_host_args_to_capture to handle pad_tokens < q_per_seq.
+    # When D-Cut truncation reduces spec tokens, the padding falls short.
+    from vllm_ascend.ops.gdn import _pad_conv1d_host_args_to_capture as _orig_pad
+    if not getattr(_orig_pad, '_dcut_patched', False):
+        def _dcut_pad_conv1d_host_args(qsl_host, cidx_host, num_accepted_host,
+                                        cap_x_dim0, q_per_seq, with_num_accepted):
+            result = _orig_pad(qsl_host, cidx_host, num_accepted_host,
+                               cap_x_dim0, q_per_seq, with_num_accepted)
+            qsl, cidx, nat = result
+            # If still short (pad_tokens < q_per_seq case), add one final dummy
+            if qsl and int(qsl[-1]) != cap_x_dim0:
+                qsl = tuple(qsl) + (int(cap_x_dim0),)
+                cidx = tuple(cidx) + (PAD_SLOT_ID,)
+                if with_num_accepted:
+                    nat = tuple(nat) + (1,)
+            # Clamp num_accepted_tokens to not exceed segment lengths.
+            # D-Cut truncation can make nat[i] > (qsl[i+1] - qsl[i]),
+            # causing EZ9999: "numAcceptedTokens[i]=X exceeds varlen segment length=Y".
+            if with_num_accepted and nat:
+                clamped = []
+                for i in range(len(nat)):
+                    if i + 1 < len(qsl):
+                        seg_len = int(qsl[i + 1]) - int(qsl[i])
+                        clamped.append(min(int(nat[i]), seg_len))
+                    else:
+                        clamped.append(int(nat[i]))
+                nat = tuple(clamped)
+            return qsl, cidx, nat
+        _dcut_pad_conv1d_host_args._dcut_patched = True
+        # Patch in the gdn module so update_conv1d_graph_params uses the fixed version
+        import vllm_ascend.ops.gdn as _gdn_mod
+        _gdn_mod._pad_conv1d_host_args_to_capture = _dcut_pad_conv1d_host_args
+        logger.warning("D-Cut: patched _pad_conv1d_host_args_to_capture for sub-q_per_seq padding")
+
+
+    def _forward_core(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ):
+        """Core attention computation (called by custom op). D-Cut patched."""
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
+        if attn_metadata is None:
+            return
+
+        assert isinstance(attn_metadata, dict)
+        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        has_initial_state = attn_metadata.has_initial_state
+        spec_query_start_loc = attn_metadata.spec_query_start_loc
+        non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+        spec_sequence_masks = attn_metadata.spec_sequence_masks
+        spec_token_indx = attn_metadata.spec_token_indx
+        non_spec_token_indx = attn_metadata.non_spec_token_indx
+        spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
+        non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        self_kv_cache = self.kv_cache
+        ssm_state = self_kv_cache[1]
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+
+        # 1. Convolution sequence transformation
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+        if spec_sequence_masks is not None:
+            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                mixed_qkv_spec = mixed_qkv
+                mixed_qkv_non_spec = None
+            else:
+                mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
+                mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
+        else:
+            mixed_qkv_spec = None
+            mixed_qkv_non_spec = mixed_qkv
+
+        # 1.1: Process the multi-query part
+        if spec_sequence_masks is not None:
+            conv_weights_T = conv_weights.transpose(0, 1)
+            activation_num = 1 if self.activation else 0
+            (spec_qsl_host, spec_ci_host, spec_nat_host) = get_spec_causal_conv1d_update_host_args(attn_metadata)
+            if _EXTRA_CTX.capturing or torch.compiler.is_compiling():
+                stream = torch_npu.npu.current_stream()
+                event = torch.npu.ExternalEvent()
+                event.wait(stream)
+                event.reset(stream)
+                graph_params = get_graph_params() if not _EXTRA_CTX.is_draft_model else get_draft_graph_params()
+                graph_params.conv1d_events[num_actual_tokens].append(event)
+
+                output_spec = torch.empty_like(mixed_qkv_spec)
+                spec_q_per_seq = int(attn_metadata.spec_state_indices_tensor.size(-1))
+                graph_params.conv1d_params[num_actual_tokens].append(
+                    (
+                        weak_ref_tensors(output_spec),
+                        weak_ref_tensors(mixed_qkv_spec),
+                        weak_ref_tensors(conv_weights_T),
+                        weak_ref_tensors(self_kv_cache[0]),
+                        self.conv1d.bias,
+                        activation_num,
+                        PAD_SLOT_ID,
+                        1,
+                        "spec",
+                        self.prefix,
+                        spec_qsl_host,
+                        spec_ci_host,
+                        spec_nat_host,
+                        spec_q_per_seq,
+                    )
+                )
+
+                torch.npu.graph_task_group_begin(stream)
+                torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    output_spec,
+                    mixed_qkv_spec,
+                    conv_weights_T,
+                    conv_state=self_kv_cache[0],
+                    bias_opt=self.conv1d.bias,
+                    query_start_loc_opt=spec_qsl_host,
+                    cache_indices_opt=spec_ci_host,
+                    initial_state_mode_opt=(),
+                    num_accepted_tokens_opt=spec_nat_host,
+                    activation_mode=activation_num,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
+                handle = torch.npu.graph_task_group_end(stream)
+                graph_params.conv1d_handles[num_actual_tokens].append(handle)
+                mixed_qkv_spec = output_spec
+            else:
+                # D-Cut: per-request F.conv1d fallback for variable query_len.
+                num_spec_decodes = attn_metadata.num_spec_decodes
+                use_cann = False  # CANN op crashes in eager mode; always use fallback
+
+                if use_cann:
+                    output_spec = torch.empty_like(mixed_qkv_spec)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        output_spec,
+                        mixed_qkv_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=spec_qsl_host,
+                        cache_indices_opt=spec_ci_host,
+                        initial_state_mode_opt=(),
+                        num_accepted_tokens_opt=spec_nat_host,
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=1,
+                    )
+                    mixed_qkv_spec = output_spec
+                else:
+                    output_spec = torch.empty_like(mixed_qkv_spec)
+                    _conv1d_spec_varlen_eager(
+                        output_spec,
+                        mixed_qkv_spec,
+                        conv_weights,
+                        self_kv_cache[0],
+                        self.conv1d.bias,
+                        self.activation,
+                        self.num_spec,
+                        spec_query_start_loc,
+                        spec_state_indices_tensor,
+                        num_accepted_tokens,
+                        num_spec_decodes,
+                    )
+                    mixed_qkv_spec = output_spec
+
+        
