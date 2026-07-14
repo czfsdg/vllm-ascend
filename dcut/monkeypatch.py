@@ -2109,3 +2109,21 @@ def _patch_gdn_dcut() -> None:
             beta_spec = None
             g_non_spec = g
             beta_non_spec = beta
+        # 2.1: Process the multi-query part
+        if spec_sequence_masks is not None:
+            query_spec = l2norm_fwd(query_spec)
+            key_spec = l2norm_fwd(key_spec)
+            if _EXTRA_CTX.capturing or torch.compiler.is_compiling():
+                # Graph capture OR Dynamo tracing: use pre-allocated static
+                # buffers (stable data_ptr).  _model_forward fills them
+                # graph-externally before each replay via _dcut_fill_gdn_spec_bufs.
+                # This replaces the old torch.cat/flatten/.to() which created
+                # new tensors each call → stale data_ptr at replay → 0% accuracy.
+                # NOTE: Must check torch.compiler.is_compiling() too because
+                # _EXTRA_CTX.capturing is False during Dynamo tracing.
+                _gdn_bufs = _dcut_alloc_gdn_spec_bufs(
+                    self.prefix, num_actual_tokens,
+                    spec_state_indices_tensor, spec_query_start_loc.device)
+                actual_seq_lengths = _gdn_bufs["asl"]
+                aligned_ssm_indices = _gdn_bufs["ssi"]
+                clamped_nat = _gdn_bufs["nat"]
