@@ -287,21 +287,6 @@ class VerifyAdaptiveController:
         if not self.config.enabled or not active_draft_req_ids:
             return
 
-        # DEBUG: HARDCODED random cut — assign random draft_len in [2, max_draft_len]
-        import random as _random
-        max_draft_len = self.max_query_len_per_req - 1  # e.g. 7
-        min_cut = 2
-        draft_lens = []
-        for req_id in sorted(active_draft_req_ids):
-            dl = _random.randint(min_cut, max_draft_len)
-            self._adaptive_draft_lens[req_id] = dl
-            draft_lens.append(dl)
-        logger.info(
-            "RANDOM_CUT: active=%d, draft_lens=%s",
-            len(active_draft_req_ids), draft_lens,
-        )
-        return
-
         if not self._sorted_bs:
             return
 
