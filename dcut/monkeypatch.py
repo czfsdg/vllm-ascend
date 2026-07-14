@@ -2088,3 +2088,24 @@ def _patch_gdn_dcut() -> None:
                 mixed_qkv_non_spec = output_non_spec
         else:
             mixed_qkv_non_spec = None
+        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+
+        # 2. Recurrent attention
+        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        if spec_sequence_masks is not None:
+            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                g_spec = g
+                beta_spec = beta
+                g_non_spec = None
+                beta_non_spec = None
+            else:
+                g_spec = g.index_select(1, spec_token_indx)
+                beta_spec = beta.index_select(1, spec_token_indx)
+                g_non_spec = g.index_select(1, non_spec_token_indx)
+                beta_non_spec = beta.index_select(1, non_spec_token_indx)
+        else:
+            g_spec = None
+            beta_spec = None
+            g_non_spec = g
+            beta_non_spec = beta
