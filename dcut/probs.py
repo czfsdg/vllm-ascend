@@ -89,8 +89,12 @@ def _maybe_process_adaptive_probs(self) -> None:
     if not self._adaptive_probs_pending:
         return
     assert self._adaptive_probs_event is not None
+    # Do not force a host-side wait here.  D-Cut can reuse the previous cached
+    # decision for one more scheduler tick, while synchronizing every tick adds
+    # a CPU/NPU barrier on the serving hot path and can make adaptive verify
+    # slower than vanilla speculative decoding.
     if not self._adaptive_probs_event.query():
-        self._adaptive_probs_event.synchronize()
+        return
     self._adaptive_probs_pending = False
 
     num_reqs = self._adaptive_num_reqs

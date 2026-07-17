@@ -31,14 +31,12 @@ def _dcut_truncate(self, scheduler_output):
     new_spec = orig_spec.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     tokens_delta = 0
-    _cut_log = []
     for req_id, draft_toks in list(new_spec.items()):
         max_dl = len(draft_toks)
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
         if adaptive_len is None:
             adaptive_len = max_dl  # no cached decision -> full spec
         adaptive_len = min(adaptive_len, max_dl)  # clamp to available
-        _cut_log.append((req_id[:8], max_dl, adaptive_len))
         if adaptive_len < max_dl:
             diff = max_dl - adaptive_len
             tokens_delta += diff
