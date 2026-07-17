@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Patch QwenGatedDeltaNetAttention._forward_core for D-Cut."""
-
 from __future__ import annotations
+import os
 
-from .gdn_buffers import _dcut_alloc_gdn_nonspec_bufs, _dcut_alloc_gdn_spec_bufs
-from .globals import logger
-
+from .globals import logger, ENABLE_GDN_MAIN_PIECEWISE_GRAPH, ENV_CONFIG
+from .gdn_buffers import _dcut_alloc_gdn_spec_bufs, _dcut_alloc_gdn_nonspec_bufs
+from .gdn_eager import _conv1d_spec_varlen_eager
 
 def _patch_gdn_dcut() -> None:
     """Patch AscendGatedDeltaNetAttention._forward_core for D-Cut.
 
     Two changes:
-    1. Spec Conv1D eager path: pad variable-length D-Cut batches and keep
-       using the CANN custom op instead of falling back to torch F.conv1d.
+    1. Spec Conv1D eager path: use _conv1d_spec_varlen_eager fallback instead
+       of CANN op (which crashes on variable query_len from D-Cut truncation).
     2. Recurrent GDN spec kernel call: align ssm_state_indices with actual
        token positions (boolean mask) and clamp num_accepted_tokens to actual
        seq lengths.
@@ -20,34 +20,39 @@ def _patch_gdn_dcut() -> None:
     try:
         import torch
         import torch_npu
+        from einops import rearrange
         from vllm.distributed import get_pcp_group
         from vllm.forward_context import get_forward_context
         from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
         from vllm.v1.attention.backend import AttentionMetadata
         from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
         from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
         from vllm_ascend.compilation.acl_graph import (
             get_draft_graph_params,
             get_graph_params,
         )
         from vllm_ascend.device.device_op import DeviceOperator
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
         from vllm_ascend.ops.gdn import (
-            get_causal_conv1d_update_host_args,
-            get_non_spec_causal_conv1d_host_args,
-            get_non_spec_chunked_prefill_meta,
-            get_spec_causal_conv1d_update_host_args,
+            AscendGatedDeltaNetAttention,
             to_int64_tuple,
+            get_non_spec_causal_conv1d_host_args,
+            get_causal_conv1d_update_host_args,
+            get_spec_causal_conv1d_update_host_args,
+            get_non_spec_chunked_prefill_meta,
         )
         from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
         from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
         from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
         from vllm_ascend.utils import weak_ref_tensors
     except Exception as e:
+        import sys as _dbg2
         logger.warning("D-Cut: cannot import GDN ops for patching: %s", e)
         return
+
 
     if getattr(QwenGatedDeltaNetAttention, "_dcut_gdn_patched", False):
         return
@@ -55,13 +60,11 @@ def _patch_gdn_dcut() -> None:
     # Monkeypatch _pad_conv1d_host_args_to_capture to handle pad_tokens < q_per_seq.
     # When D-Cut truncation reduces spec tokens, the padding falls short.
     from vllm_ascend.ops.gdn import _pad_conv1d_host_args_to_capture as _orig_pad
-
-    if not getattr(_orig_pad, "_dcut_patched", False):
-
-        def _dcut_pad_conv1d_host_args(
-            qsl_host, cidx_host, num_accepted_host, cap_x_dim0, q_per_seq, with_num_accepted
-        ):
-            result = _orig_pad(qsl_host, cidx_host, num_accepted_host, cap_x_dim0, q_per_seq, with_num_accepted)
+    if not getattr(_orig_pad, '_dcut_patched', False):
+        def _dcut_pad_conv1d_host_args(qsl_host, cidx_host, num_accepted_host,
+                                        cap_x_dim0, q_per_seq, with_num_accepted):
+            result = _orig_pad(qsl_host, cidx_host, num_accepted_host,
+                               cap_x_dim0, q_per_seq, with_num_accepted)
             qsl, cidx, nat = result
             # If still short (pad_tokens < q_per_seq case), add one final dummy
             if qsl and int(qsl[-1]) != cap_x_dim0:
@@ -82,13 +85,12 @@ def _patch_gdn_dcut() -> None:
                         clamped.append(int(nat[i]))
                 nat = tuple(clamped)
             return qsl, cidx, nat
-
         _dcut_pad_conv1d_host_args._dcut_patched = True
         # Patch in the gdn module so update_conv1d_graph_params uses the fixed version
         import vllm_ascend.ops.gdn as _gdn_mod
-
         _gdn_mod._pad_conv1d_host_args_to_capture = _dcut_pad_conv1d_host_args
         logger.warning("D-Cut: patched _pad_conv1d_host_args_to_capture for sub-q_per_seq padding")
+
 
     def _forward_core(
         self,
@@ -190,80 +192,54 @@ def _patch_gdn_dcut() -> None:
                 graph_params.conv1d_handles[num_actual_tokens].append(handle)
                 mixed_qkv_spec = output_spec
             else:
-                # D-Cut: never route GDN Conv1D to the torch F.conv1d
-                # fallback. For truncated variable-length batches, pad each
-                # request back to the static spec stride expected by the Ascend
-                # CANN custom op, then scatter only real token outputs back.
+                # D-Cut: per-request F.conv1d fallback for variable query_len.
                 num_spec_decodes = attn_metadata.num_spec_decodes
-                expected_q_per_seq = int(spec_state_indices_tensor.size(-1))
-                spec_query_lengths = tuple(
-                    int(spec_qsl_host[i + 1]) - int(spec_qsl_host[i]) for i in range(num_spec_decodes)
-                )
-                use_direct_cann = (
-                    len(spec_query_lengths) == num_spec_decodes
-                    and all(q_len == expected_q_per_seq for q_len in spec_query_lengths)
-                    and (not spec_qsl_host or int(spec_qsl_host[-1]) == int(mixed_qkv_spec.size(0)))
-                )
+                use_cann = True  # Use CANN op (fast); padding fix handles variable query_len
 
-                output_spec = torch.empty_like(mixed_qkv_spec)
-                if use_direct_cann:
-                    cann_input = mixed_qkv_spec
-                    cann_output = output_spec
-                    cann_qsl_host = spec_qsl_host
-                    cann_ci_host = spec_ci_host
-                    cann_nat_host = spec_nat_host
-                else:
-                    padded_tokens = num_spec_decodes * expected_q_per_seq
-                    cann_input = mixed_qkv_spec.new_zeros((padded_tokens, mixed_qkv_spec.size(-1)))
-                    cann_output = torch.empty_like(cann_input)
-                    cann_qsl_host = tuple(i * expected_q_per_seq for i in range(num_spec_decodes + 1))
-                    cann_ci_host = tuple(
-                        int(spec_ci_host[i]) if i < len(spec_ci_host) else PAD_SLOT_ID for i in range(num_spec_decodes)
+                if use_cann:
+                    output_spec = torch.empty_like(mixed_qkv_spec)
+                    # D-Cut: clamp num_accepted_tokens to segment lengths.
+                    # D-Cut truncation can make nat[i] > (qsl[i+1] - qsl[i]),
+                    # causing EZ9999: numAcceptedTokens[i]=X exceeds varlen segment length=Y
+                    if spec_nat_host:
+                        _clamped = []
+                        for _i in range(len(spec_nat_host)):
+                            if _i + 1 < len(spec_qsl_host):
+                                _seg = int(spec_qsl_host[_i + 1]) - int(spec_qsl_host[_i])
+                                _clamped.append(min(int(spec_nat_host[_i]), _seg))
+                            else:
+                                _clamped.append(int(spec_nat_host[_i]))
+                        spec_nat_host = tuple(_clamped)
+                    torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        output_spec,
+                        mixed_qkv_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=spec_qsl_host,
+                        cache_indices_opt=spec_ci_host,
+                        initial_state_mode_opt=(),
+                        num_accepted_tokens_opt=spec_nat_host,
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=1,
                     )
-                    cann_nat_host = tuple(
-                        min(
-                            int(spec_nat_host[i]) if i < len(spec_nat_host) else 1,
-                            max(0, min(int(spec_query_lengths[i]), expected_q_per_seq)),
-                        )
-                        for i in range(num_spec_decodes)
-                    )
-                    spec_total = int(mixed_qkv_spec.size(0))
-                    for i, query_length in enumerate(spec_query_lengths):
-                        src_start = int(spec_qsl_host[i])
-                        src_end = min(src_start + max(0, int(query_length)), spec_total)
-                        valid_tokens = max(0, src_end - src_start)
-                        if valid_tokens == 0:
-                            continue
-                        dst_start = i * expected_q_per_seq
-                        cann_input[dst_start : dst_start + valid_tokens] = mixed_qkv_spec[src_start:src_end]
-
-                torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    cann_output,
-                    cann_input,
-                    conv_weights_T,
-                    conv_state=self_kv_cache[0],
-                    bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=cann_qsl_host,
-                    cache_indices_opt=cann_ci_host,
-                    initial_state_mode_opt=(),
-                    num_accepted_tokens_opt=cann_nat_host,
-                    activation_mode=activation_num,
-                    pad_slot_id=PAD_SLOT_ID,
-                    run_mode=1,
-                )
-
-                if use_direct_cann:
                     mixed_qkv_spec = output_spec
                 else:
-                    spec_total = int(mixed_qkv_spec.size(0))
-                    for i, query_length in enumerate(spec_query_lengths):
-                        src_start = int(spec_qsl_host[i])
-                        src_end = min(src_start + max(0, int(query_length)), spec_total)
-                        valid_tokens = max(0, src_end - src_start)
-                        if valid_tokens == 0:
-                            continue
-                        dst_start = i * expected_q_per_seq
-                        output_spec[src_start:src_end] = cann_output[dst_start : dst_start + valid_tokens]
+                    output_spec = torch.empty_like(mixed_qkv_spec)
+                    _conv1d_spec_varlen_eager(
+                        output_spec,
+                        mixed_qkv_spec,
+                        conv_weights,
+                        self_kv_cache[0],
+                        self.conv1d.bias,
+                        self.activation,
+                        self.num_spec,
+                        spec_query_start_loc,
+                        spec_state_indices_tensor,
+                        num_accepted_tokens,
+                        num_spec_decodes,
+                    )
                     mixed_qkv_spec = output_spec
 
         # 1.2: Process the remaining part
@@ -415,8 +391,8 @@ def _patch_gdn_dcut() -> None:
                 # NOTE: Must check torch.compiler.is_compiling() too because
                 # _EXTRA_CTX.capturing is False during Dynamo tracing.
                 _gdn_bufs = _dcut_alloc_gdn_spec_bufs(
-                    self.prefix, num_actual_tokens, spec_state_indices_tensor, spec_query_start_loc.device
-                )
+                    self.prefix, num_actual_tokens,
+                    spec_state_indices_tensor, spec_query_start_loc.device)
                 actual_seq_lengths = _gdn_bufs["asl"]
                 aligned_ssm_indices = _gdn_bufs["ssi"]
                 clamped_nat = _gdn_bufs["nat"]
@@ -429,8 +405,11 @@ def _patch_gdn_dcut() -> None:
                 max_tokens = spec_state_indices_tensor.size(1)
                 col_idx = torch.arange(max_tokens, device=spec_state_indices_tensor.device)
                 mask = col_idx.unsqueeze(0) < per_seq_lens.unsqueeze(1)
-                aligned_ssm_indices = spec_state_indices_tensor[mask]
-                clamped_nat = torch.minimum(num_accepted_tokens.to(torch.int32), per_seq_lens.to(torch.int32))
+                aligned_ssm_indices = spec_state_indices_tensor[mask].clone()
+                clamped_nat = torch.minimum(
+                    num_accepted_tokens.to(torch.int32),
+                    per_seq_lens.to(torch.int32)
+                )
             core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
@@ -473,8 +452,9 @@ def _patch_gdn_dcut() -> None:
                 # Graph capture: use pre-allocated static buffers (stable
                 # data_ptr).  _model_forward fills them before each replay.
                 _gdn_ns_bufs = _dcut_alloc_gdn_nonspec_bufs(
-                    self.prefix, num_actual_tokens, non_spec_state_indices_tensor, non_spec_query_start_loc.device
-                )
+                    self.prefix, num_actual_tokens,
+                    non_spec_state_indices_tensor,
+                    non_spec_query_start_loc.device)
                 actual_seq_lengths = _gdn_ns_bufs["asl"]
                 _ns_ssi = _gdn_ns_bufs["ssi"]
             else:
@@ -512,7 +492,7 @@ def _patch_gdn_dcut() -> None:
 
     QwenGatedDeltaNetAttention._forward_core = _forward_core
     QwenGatedDeltaNetAttention._dcut_gdn_patched = True
-    _check_fn = getattr(QwenGatedDeltaNetAttention, "_forward_core", None)
+    _check_fn = getattr(QwenGatedDeltaNetAttention, '_forward_core', None)
     logger.warning(
         "D-Cut: patched AscendGatedDeltaNetAttention._forward_core "
         "(D-Cut conv1d varlen eager + ssm_state_indices alignment + NAT clamping)."
