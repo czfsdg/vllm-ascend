@@ -1,22 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """NPU adaptive cost-table profiling run."""
+
 from __future__ import annotations
 
 import os
 
 import numpy as np
 import torch
-
 from vllm.config import CUDAGraphMode
-from vllm.distributed import get_pp_group, get_tp_group
+from vllm.distributed import get_pp_group
 
-from .globals import logger, ENV_PROFILE_FORCE_EAGER
+from .globals import ENV_PROFILE_FORCE_EAGER
 from .utils import _npu_event
+
 
 @torch.inference_mode()
 def _adaptive_profile_run(
     self,
-    scheduled_tokens: "list[int]",
+    scheduled_tokens: list[int],
     seq_lens: int = 1024,
     n_warmup: int = 3,
     n_measure: int = 5,
@@ -43,34 +44,26 @@ def _adaptive_profile_run(
     max_query_len = int(num_scheduled_tokens.max())
 
     assert num_tokens_unpadded <= self.max_num_tokens, (
-        f"adaptive profile: num_tokens={num_tokens_unpadded} > "
-        f"max_num_tokens={self.max_num_tokens}"
+        f"adaptive profile: num_tokens={num_tokens_unpadded} > max_num_tokens={self.max_num_tokens}"
     )
 
-    profile_force_eager = (
-        os.environ.get(ENV_PROFILE_FORCE_EAGER, "1").lower()
-        not in ("0", "false", "no")
-    )
+    profile_force_eager = os.environ.get(ENV_PROFILE_FORCE_EAGER, "1").lower() not in ("0", "false", "no")
     # Same dispatcher entrypoint as _dummy_run.  By default the profile run is
     # eager because manual graph replay on NPU is more fragile; the env override
     # is useful when comparing eager vs graph cost curves.
-    _cudagraph_mode, batch_desc, _should_ubatch, num_tokens_across_dp, _ = (
-        self._determine_batch_execution_and_padding(
-            num_tokens=num_tokens_unpadded,
-            num_reqs=num_reqs,
-            num_scheduled_tokens_np=num_scheduled_tokens,
-            max_num_scheduled_tokens=max_query_len,
-            use_cascade_attn=False,
-            allow_microbatching=False,
-            force_eager=profile_force_eager,
-            force_uniform_decode=True,
-        )
+    _cudagraph_mode, batch_desc, _should_ubatch, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
+        num_tokens=num_tokens_unpadded,
+        num_reqs=num_reqs,
+        num_scheduled_tokens_np=num_scheduled_tokens,
+        max_num_scheduled_tokens=max_query_len,
+        use_cascade_attn=False,
+        allow_microbatching=False,
+        force_eager=profile_force_eager,
+        force_uniform_decode=True,
     )
 
     num_tokens_padded = batch_desc.num_tokens
-    num_reqs_padded = (
-        batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
-    )
+    num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
     # allow_microbatching=False -> no ubatching for the profile run.
     ubatch_slices = None
 
@@ -82,13 +75,9 @@ def _adaptive_profile_run(
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
         self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
-        cum_num_tokens = self._get_cumsum_and_arange(
-            num_scheduled_tokens, self.query_pos.np
-        )
+        cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
         self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
-        self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
-            cum_num_tokens[-1]
-        )
+        self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(cum_num_tokens[-1])
         # PIECEWISE graph replay requires query_start_loc[-1] == num_tokens_padded
         # (the cuSeqlen the graph was captured with).  Without this, conv1d
         # validation fails: "queryStartLoc[last] must equal cuSeqlen".
@@ -102,9 +91,7 @@ def _adaptive_profile_run(
         if self._has_gdn:
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
-            self.gdn_query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
-                cum_num_tokens[-1]
-            )
+            self.gdn_query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(cum_num_tokens[-1])
             # Same fix as query_start_loc: last entry must == num_tokens_padded
             self.gdn_query_start_loc.np[num_reqs_padded] = num_tokens_padded
             self.gdn_query_start_loc.copy_to_gpu()
@@ -126,9 +113,7 @@ def _adaptive_profile_run(
             num_spec = self.num_spec_tokens
             if hasattr(self, "num_decode_draft_tokens"):
                 for i in range(num_reqs):
-                    self.num_decode_draft_tokens.np[i] = min(
-                        int(num_scheduled_tokens[i]) - 1, num_spec
-                    )
+                    self.num_decode_draft_tokens.np[i] = min(int(num_scheduled_tokens[i]) - 1, num_spec)
                 self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
                 self.num_decode_draft_tokens.copy_to_gpu()
             if hasattr(self, "num_accepted_tokens"):
@@ -136,9 +121,7 @@ def _adaptive_profile_run(
                 # spec_state_indices_tensor) to prevent OOB state access in
                 # the Mamba/GDN conv1d sliding-window update.
                 for i in range(num_reqs):
-                    self.num_accepted_tokens.gpu[i] = min(
-                        int(num_scheduled_tokens[i]), num_spec + 1
-                    )
+                    self.num_accepted_tokens.gpu[i] = min(int(num_scheduled_tokens[i]), num_spec + 1)
                 self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
 
         # NPU _build_attention_metadata: no `slot_mappings` kwarg; takes
@@ -160,9 +143,7 @@ def _adaptive_profile_run(
     # steps are text-only, so we skip the vision encoder: mm-wrapped models route
     # through inputs_embeds, so we still supply a dummy embeds buffer for them —
     # just without the mm kwargs that would trigger the encoder.
-    use_embeds = self.enable_prompt_embeds or (
-        self.supports_mm_inputs and not self.model_config.is_encoder_decoder
-    )
+    use_embeds = self.enable_prompt_embeds or (self.supports_mm_inputs and not self.model_config.is_encoder_decoder)
     if use_embeds:
         input_ids = None
         inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
@@ -180,6 +161,7 @@ def _adaptive_profile_run(
     intermediate_tensors = None
     if not get_pp_group().is_first_rank:
         from vllm.v1.outputs import IntermediateTensors  # lazy: PP>1 only
+
         if self.intermediate_tensors is None:
             self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                 batch_size=self.max_num_tokens,
@@ -235,5 +217,3 @@ def _adaptive_profile_run(
 
     mode_str = _mode_names.get(_cudagraph_mode, str(_cudagraph_mode))
     return mode_str, avg_ms, int(num_tokens_padded)
-
-

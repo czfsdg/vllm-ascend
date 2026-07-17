@@ -13,7 +13,7 @@ from .gdn_buffers import _dcut_update_gdn_static
 from .controller import _dcut_init_controller, _dcut_enable_drafter_probs
 from .truncate import _dcut_truncate
 from .probs import _dcut_queue_probs, _maybe_process_adaptive_probs, profile_adaptive_cost
-from .profile import _adaptive_profile_run
+from .adaptive_profile import _adaptive_profile_run
 
 def _patch_runner() -> None:
     import vllm_ascend.worker.model_runner_v1 as m
