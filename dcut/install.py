@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """D-Cut patch application + vLLM general-plugin entrypoint."""
 from __future__ import annotations
+import os
 
 import torch
 
-from .globals import logger, ENABLE_GDN_MAIN_PIECEWISE_GRAPH
+from .globals import logger, ENABLE_GDN_MAIN_PIECEWISE_GRAPH, ENV_CONFIG
 from .patch_proposer import _patch_proposer
 from .patch_runner import _patch_runner
 from .patch_worker import _patch_worker
@@ -27,7 +28,18 @@ def _apply_patches_once() -> None:
         _patch_runner()
         _patch_worker()
         _patch_attention()
-        _patch_gdn_dcut()
+        # Always inject _conv1d_spec_varlen_eager into vllm_ascend.ops.gdn
+        # so it's available as a module-level function (needed by other code
+        # that imports from vllm_ascend.ops.gdn).
+        try:
+            from .gdn_eager import _conv1d_spec_varlen_eager
+            import vllm_ascend.ops.gdn as _gdn_mod
+            _gdn_mod._conv1d_spec_varlen_eager = _conv1d_spec_varlen_eager
+            logger.info('D-Cut: injected _conv1d_spec_varlen_eager into vllm_ascend.ops.gdn')
+        except Exception as e:
+            logger.warning('D-Cut: failed to inject _conv1d_spec_varlen_eager: %s', e)
+        if os.environ.get(ENV_CONFIG):
+            _patch_gdn_dcut()
         logger.info(
             "D-Cut adaptive-verify patches applied for NPU "
             "(active only if VLLM_DCUT_CONFIG is set + method is dflash/PARD)."
@@ -78,42 +90,45 @@ def install(*args, **kwargs) -> None:
                     "D-Cut: failed to remove GDN from _attention_ops in install(): %s", e
                 )
 
-        # Patch GDNAttentionMetadataBuilder.build_for_cudagraph_capture to
-        # skip the decode-only assertion.  The assertion checks
-        # num_actual_tokens <= decode_cudagraph_max_bs (256), which is only
-        # valid for FULL cudagraph mode (decode-only).  In PIECEWISE mode,
-        # GDN is inside the graph and needs attn_metadata built during
-        # capture with larger token counts (up to max capture size).
-        # The method body after the assertion is just self.build(...), so
-        # skipping the assertion is safe.
-        try:
-            from vllm.v1.attention.backends.gdn_attn import (
-                GDNAttentionMetadataBuilder,
-            )
-
-            _orig_build_cg = GDNAttentionMetadataBuilder.build_for_cudagraph_capture
-
-            def _build_for_cudagraph_capture(self, common_attn_metadata):
-                m = common_attn_metadata
-                num_accepted_tokens = torch.diff(m.query_start_loc)
-                num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
-                return self.build(
-                    0, m, num_accepted_tokens, num_decode_draft_tokens_cpu
+        if ENABLE_GDN_MAIN_PIECEWISE_GRAPH:
+            # Patch GDNAttentionMetadataBuilder.build_for_cudagraph_capture to
+            # skip the decode-only assertion.  The assertion checks
+            # num_actual_tokens <= decode_cudagraph_max_bs (256), which is only
+            # valid for FULL cudagraph mode (decode-only).  In PIECEWISE mode,
+            # GDN is inside the graph and needs attn_metadata built during
+            # capture with larger token counts (up to max capture size).
+            # The method body after the assertion is just self.build(...), so
+            # skipping the assertion is safe.
+            try:
+                from vllm.v1.attention.backends.gdn_attn import (
+                    GDNAttentionMetadataBuilder,
                 )
 
-            GDNAttentionMetadataBuilder.build_for_cudagraph_capture = (
-                _build_for_cudagraph_capture
-            )
-            logger.warning(
-                "D-Cut: patched GDNAttentionMetadataBuilder."
-                "build_for_cudagraph_capture to skip decode-only assertion "
-                "(needed for PIECEWISE mode with GDN in graph)."
-            )
-        except Exception as e:
-            logger.warning(
-                "D-Cut: failed to patch GDN build_for_cudagraph_capture: %s", e
-            )
+                _orig_build_cg = GDNAttentionMetadataBuilder.build_for_cudagraph_capture
 
+                def _build_for_cudagraph_capture(self, common_attn_metadata):
+                    m = common_attn_metadata
+                    num_accepted_tokens = torch.diff(m.query_start_loc)
+                    num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
+                    return self.build(
+                        0, m, num_accepted_tokens, num_decode_draft_tokens_cpu
+                    )
+
+                GDNAttentionMetadataBuilder.build_for_cudagraph_capture = (
+                    _build_for_cudagraph_capture
+                )
+                logger.warning(
+                    "D-Cut: patched GDNAttentionMetadataBuilder."
+                    "build_for_cudagraph_capture to skip decode-only assertion "
+                    "(needed for PIECEWISE mode with GDN in graph)."
+                )
+            except Exception as e:
+                logger.warning(
+                    "D-Cut: failed to patch GDN build_for_cudagraph_capture: %s", e
+                )
+
+        else:
+            logger.info("D-Cut: skipped GDN build_for_cudagraph_capture patch (ENABLE_GDN_MAIN_PIECEWISE_GRAPH=False).")
         from vllm.v1.worker.worker_base import WorkerBase
 
         if getattr(WorkerBase, "_dcut_defer_armed", False):
