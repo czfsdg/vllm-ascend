@@ -25,7 +25,7 @@ def _dcut_alloc_gdn_spec_bufs(prefix, num_tokens, spec_state_indices_tensor, dev
             "nsp1": nsp1,
             "t_cap": t_cap,
         }
-        logger.warning(
+        logger.debug(
             "D-Cut: alloc GDN spec static bufs prefix=%s num_tokens=%d "
             "b_cap=%d t_cap=%d", prefix, num_tokens, b_cap, t_cap)
     return _dcut_gdn_static[key]
@@ -36,9 +36,14 @@ def _dcut_fill_gdn_spec_bufs(prefix, num_tokens, spec_query_start_loc,
                               num_spec_decodes, device):
     """Fill ASL/SSI/NAT buffers in-place with runtime values + b_cap padding.
     Called from _model_forward (outside captured graph) before each replay."""
+    _key = (prefix, num_tokens, "spec")
+    _was_cached = _key in _dcut_gdn_static
     bufs = _dcut_alloc_gdn_spec_bufs(
         prefix, num_tokens, spec_state_indices_tensor, device)
     asl, ssi, nat = bufs["asl"], bufs["ssi"], bufs["nat"]
+    import os
+    if False:  # DBG disabled
+        print(f"DBG_KEY prefix={prefix} nt={num_tokens} cached={_was_cached} b_cap={bufs["b_cap"]} nsd={num_spec_decodes}", flush=True)
 
     # Zero/fill all buffers unconditionally (graph expects clean state when nsd=0)
     asl.zero_()
@@ -66,6 +71,14 @@ def _dcut_fill_gdn_spec_bufs(prefix, num_tokens, spec_query_start_loc,
         )
         nat[:num_spec_decodes].copy_(clamped)
 
+    import os
+    if False:  # DBG disabled
+        # Sample SSI at request boundaries to detect if all requests use same slot
+        _psl = int(per_seq_lens[0].item()) if num_spec_decodes > 0 and len(per_seq_lens) > 0 else 0
+        _ssi_sample = [int(ssi[i * _psl].item()) for i in range(min(num_spec_decodes, 8))] if _psl > 0 and num_spec_decodes > 0 else []
+        _nat_sample = nat[:min(num_spec_decodes, 8)].tolist() if num_spec_decodes > 0 else []
+        _ssi_unique = ssi[:num_spec_decodes * _psl].unique().tolist() if num_spec_decodes > 0 and _psl > 0 else []
+        print(f"DBG_DETAIL prefix={prefix} nt={num_tokens} nsd={num_spec_decodes} psl={_psl} nat={_nat_sample} ssi_per_req={_ssi_sample} ssi_unique_count={len(_ssi_unique)} ssi_unique_sample={_ssi_unique[:10]}", flush=True)
     return bufs
 
 
@@ -80,7 +93,7 @@ def _dcut_alloc_gdn_nonspec_bufs(prefix, num_tokens,
             "ssi": torch.full((b_cap,), PAD_SLOT_ID, dtype=torch.int32, device=device),
             "b_cap": b_cap,
         }
-        logger.warning(
+        logger.debug(
             "D-Cut: alloc GDN nonspec static bufs prefix=%s num_tokens=%d "
             "b_cap=%d", prefix, num_tokens, b_cap)
     return _dcut_gdn_static[key]
@@ -103,6 +116,7 @@ def _dcut_fill_gdn_nonspec_bufs(prefix, num_tokens, non_spec_query_start_loc,
     if num_decodes > 0:
         ssi[:num_decodes].copy_(non_spec_state_indices_tensor[:num_decodes])
 
+    import os; False and print(f"DBG_FILL prefix={prefix} nt={num_tokens} nsd={num_spec_decodes} asl[:5]={asl[:5].tolist()} ssi[:5]={ssi[:5].tolist()} nat[:5]={nat[:5].tolist()}")
     return bufs
 
 
