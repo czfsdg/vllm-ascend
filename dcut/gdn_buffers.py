@@ -2,11 +2,83 @@
 """GDN static buffer alloc/fill/update for PIECEWISE graph replay."""
 from __future__ import annotations
 
+import os
+
 import torch
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from .globals import logger, _dcut_gdn_static
+from .globals import logger, _dcut_gdn_static, ENV_GDN_SHARED_STATIC
+
+
+def _dcut_use_shared_gdn_static() -> bool:
+    return os.environ.get(ENV_GDN_SHARED_STATIC, "1").lower() not in (
+        "0", "false", "no"
+    )
+
+
+def _dcut_gdn_static_key(prefix, num_tokens, kind):
+    # Only ASL/NAT are batch-level values shared by all Qwen3.5 GDN layers.
+    # SSI comes from the per-layer metadata's state-index tuple and must stay
+    # prefix-local, matching the original full-decode path.
+    if kind in ("spec_asl_nat", "nonspec_asl") and _dcut_use_shared_gdn_static():
+        owner = "__shared__"
+    else:
+        owner = prefix
+    return (owner, num_tokens, kind)
+
+
+def _to_int_tuple(value) -> tuple[int, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return tuple(int(v) for v in value)
+    if isinstance(value, list):
+        return tuple(int(v) for v in value)
+    if hasattr(value, "tolist"):
+        return tuple(int(v) for v in value.tolist())
+    return (int(value),)
+
+
+def _spec_host_args(meta) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    fallback_meta = getattr(meta, "spec_decode_fallback_meta", None)
+    if fallback_meta is not None:
+        conv_meta = fallback_meta.spec_causal_conv1d
+        return (
+            _to_int_tuple(conv_meta.query_start_loc_cpu),
+            _to_int_tuple(conv_meta.cache_indices_cpu),
+            _to_int_tuple(conv_meta.num_accepted_tokens_cpu),
+        )
+    # Fallback for non-standard metadata; should not be used on the replay hot
+    # path because .tolist() on device tensors would synchronize.
+    return (
+        _to_int_tuple(meta.spec_query_start_loc),
+        _to_int_tuple(meta.spec_state_indices_tensor.reshape(-1)),
+        _to_int_tuple(meta.num_accepted_tokens),
+    )
+
+
+def _nonspec_host_args(meta) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    fallback_meta = getattr(meta, "non_spec_decode_fallback_meta", None)
+    if fallback_meta is not None:
+        conv_meta = fallback_meta.causal_conv1d
+        return (
+            _to_int_tuple(conv_meta.query_start_loc_cpu),
+            _to_int_tuple(conv_meta.cache_indices_cpu),
+        )
+    return (
+        _to_int_tuple(meta.non_spec_query_start_loc),
+        _to_int_tuple(meta.non_spec_state_indices_tensor),
+    )
+
+
+def _copy_cpu_to_gpu(gpu_tensor, cpu_tensor, length: int | None = None) -> None:
+    if length is None:
+        gpu_tensor.copy_(cpu_tensor, non_blocking=True)
+    elif length > 0:
+        gpu_tensor[:length].copy_(cpu_tensor[:length], non_blocking=True)
+
+
 
 
 def _dcut_alloc_gdn_spec_bufs(prefix, num_tokens, spec_state_indices_tensor, device):
@@ -20,15 +92,25 @@ def _dcut_alloc_gdn_spec_bufs(prefix, num_tokens, spec_state_indices_tensor, dev
     key = (prefix, num_tokens, "spec")
     if key not in _dcut_gdn_static:
         b_cap = spec_state_indices_tensor.size(0)
+        _dcut_gdn_static[shared_key] = {
+            "asl": torch.zeros(b_cap + 1, dtype=torch.int32, device=device),
+            "nat": torch.zeros(b_cap, dtype=torch.int32, device=device),
+            "asl_cpu": torch.zeros(b_cap + 1, dtype=torch.int32, device="cpu"),
+            "nat_cpu": torch.zeros(b_cap, dtype=torch.int32, device="cpu"),
+            "b_cap": b_cap,
+        }
+        logger.debug(
+            "D-Cut: alloc GDN shared spec ASL/NAT prefix=%s num_tokens=%d "
+            "b_cap=%d", prefix, num_tokens, b_cap)
+
+    ssi_key = _dcut_gdn_static_key(prefix, num_tokens, "spec_ssi")
+    if ssi_key not in _dcut_gdn_static:
+        b_cap = spec_state_indices_tensor.size(0)
         nsp1 = spec_state_indices_tensor.size(1)  # num_spec + 1
         t_cap = b_cap * nsp1
-        _dcut_gdn_static[key] = {
-            "asl": torch.zeros(b_cap + 1, dtype=torch.int32, device=device),
+        _dcut_gdn_static[ssi_key] = {
             "ssi": torch.full((t_cap,), PAD_SLOT_ID, dtype=torch.int32, device=device),
-            "nat": torch.zeros(b_cap, dtype=torch.int32, device=device),
-            "col_idx": torch.arange(nsp1, device=device),
-            "b_cap": b_cap,
-            "nsp1": nsp1,
+            "ssi_cpu": torch.full((t_cap,), PAD_SLOT_ID, dtype=torch.int32, device="cpu"),
             "t_cap": t_cap,
         }
         logger.debug(
@@ -78,16 +160,25 @@ def _dcut_alloc_gdn_nonspec_bufs(prefix, num_tokens,
     key = (prefix, num_tokens, "nonspec")
     if key not in _dcut_gdn_static:
         b_cap = non_spec_state_indices_tensor.size(0)
-        _dcut_gdn_static[key] = {
+        _dcut_gdn_static[shared_key] = {
             "asl": torch.zeros(b_cap + 1, dtype=torch.int32, device=device),
-            "ssi": torch.full((b_cap,), PAD_SLOT_ID, dtype=torch.int32, device=device),
+            "asl_cpu": torch.zeros(b_cap + 1, dtype=torch.int32, device="cpu"),
             "b_cap": b_cap,
         }
         logger.debug(
-            "D-Cut: alloc GDN nonspec static bufs prefix=%s num_tokens=%d "
+            "D-Cut: alloc GDN shared nonspec ASL prefix=%s num_tokens=%d "
             "b_cap=%d", prefix, num_tokens, b_cap)
-    return _dcut_gdn_static[key]
 
+    ssi_key = _dcut_gdn_static_key(prefix, num_tokens, "nonspec_ssi")
+    if ssi_key not in _dcut_gdn_static:
+        b_cap = non_spec_state_indices_tensor.size(0)
+        _dcut_gdn_static[ssi_key] = {
+            "ssi": torch.full((b_cap,), PAD_SLOT_ID, dtype=torch.int32, device=device),
+            "ssi_cpu": torch.full((b_cap,), PAD_SLOT_ID, dtype=torch.int32, device="cpu"),
+        }
+        logger.debug(
+            "D-Cut: alloc GDN per-layer nonspec SSI prefix=%s num_tokens=%d "
+            "b_cap=%d", prefix, num_tokens, b_cap)
 
 def _dcut_fill_gdn_nonspec_bufs(prefix, num_tokens, non_spec_query_start_loc,
                                   non_spec_state_indices_tensor, num_decodes,
@@ -119,23 +210,29 @@ def _dcut_update_gdn_static(forward_context, num_tokens, GDNAttentionMetadata):
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None or not isinstance(attn_metadata, dict):
         return
+    filled_shared_keys = set()
     for prefix, meta in attn_metadata.items():
         if not isinstance(meta, GDNAttentionMetadata):
             continue
         if meta.spec_sequence_masks is not None and meta.num_spec_decodes > 0:
+            shared_key = _dcut_gdn_static_key(prefix, num_tokens, "spec_asl_nat")
+            fill_shared = shared_key not in filled_shared_keys
+            filled_shared_keys.add(shared_key)
             _dcut_fill_gdn_spec_bufs(
-                prefix, num_tokens,
-                meta.spec_query_start_loc,
-                meta.spec_state_indices_tensor,
-                meta.num_accepted_tokens,
-                meta.num_spec_decodes,
+                prefix,
+                num_tokens,
+                meta,
                 meta.spec_query_start_loc.device,
+                fill_shared_asl_nat=fill_shared,
             )
         elif meta.num_decodes > 0:
+            shared_key = _dcut_gdn_static_key(prefix, num_tokens, "nonspec_asl")
+            fill_shared = shared_key not in filled_shared_keys
+            filled_shared_keys.add(shared_key)
             _dcut_fill_gdn_nonspec_bufs(
-                prefix, num_tokens,
-                meta.non_spec_query_start_loc,
-                meta.non_spec_state_indices_tensor,
-                meta.num_decodes,
+                prefix,
+                num_tokens,
+                meta,
                 meta.non_spec_query_start_loc.device,
+                fill_shared_asl=fill_shared,
             )
