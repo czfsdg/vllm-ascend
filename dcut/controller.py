@@ -6,7 +6,7 @@ import os
 
 import torch
 
-from .globals import logger, ENV_CONFIG, ENV_TRIM_STATS_OUT
+from .globals import logger, ENV_CONFIG, ENV_TRIM_STATS_OUT, ENV_FULL_DECODE_ONLY
 from .utils import _npu_event, _supports_adaptive_verify
 from .drafter import _dcut_patch_drafter_instance
 from .verify_adaptive_config import VerifyAdaptiveConfig
@@ -42,6 +42,14 @@ def _dcut_init_controller(self) -> None:
 
     cfg_path = os.environ.get(ENV_CONFIG) or None
     if not cfg_path:
+        return
+
+    if os.environ.get(ENV_FULL_DECODE_ONLY):
+        logger.info(
+            "D-Cut adaptive verify disabled by %s; running full decode-only "
+            "baseline with the D-Cut plugin loaded.",
+            ENV_FULL_DECODE_ONLY,
+        )
         return
 
     spec_cfg = getattr(self, "speculative_config", None)

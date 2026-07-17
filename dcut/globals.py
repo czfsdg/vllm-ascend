@@ -76,20 +76,21 @@ _PATCHED = False  # real monkey patches applied (per process)
 ENV_CONFIG = "VLLM_DCUT_CONFIG"
 ENV_TRIM_STATS_OUT = "VLLM_DCUT_TRIM_STATS_OUT"
 ENV_PROFILE_FORCE_EAGER = "VLLM_DCUT_PROFILE_FORCE_EAGER"
+ENV_FULL_DECODE_ONLY = "VLLM_DCUT_FULL_DECODE_ONLY"
 
 # Phase 2A master switch: when True, the recurrent GDN attention core
 # is captured directly in the main PIECEWISE graph (no splitting op,
 # no graph_task_update for recurrent metadata). Static ASL/NAT/SSI
 # buffers are filled graph-externally by the builder each step; the
-# kernel inside the graph reads them. Conv1D still uses
-# graph_task_update (host tuple args).
+# kernel inside the graph reads them. Conv1D still uses graph_task_update
+# (host tuple args).
 ENABLE_GDN_MAIN_PIECEWISE_GRAPH = True
 
 # ── Static GDN buffers for PIECEWISE graph replay ──────────────────
 # Pre-allocated ASL/SSI/NAT buffers with stable data_ptr.
 # Filled graph-externally by _dcut_update_gdn_static() in _model_forward
-# before each replay.  The GDN op inside the captured graph reads these
-# buffers at replay time (proven by harness test_varlen_gdn_graph_replay.py).
+# before each replay. The GDN op inside the captured graph reads these buffers
+# at replay time.
 #
 # Key: (prefix, num_tokens, "spec"|"nonspec")
 _dcut_gdn_static = {}
