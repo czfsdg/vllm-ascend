@@ -79,10 +79,17 @@ def _copy_cpu_to_gpu(gpu_tensor, cpu_tensor, length: int | None = None) -> None:
         gpu_tensor[:length].copy_(cpu_tensor[:length], non_blocking=True)
 
 
+
 def _dcut_alloc_gdn_spec_bufs(prefix, num_tokens, spec_state_indices_tensor, device):
-    """Allocate GPU tensors plus CPU staging buffers for spec decode."""
-    shared_key = _dcut_gdn_static_key(prefix, num_tokens, "spec_asl_nat")
-    if shared_key not in _dcut_gdn_static:
+    """Allocate per-layer ASL/SSI/NAT buffers for the spec decode path.
+
+    Do not build SSI from conv1d host tuples: conv1d cache_indices are not the
+    recurrent GDN per-token SSM state indices.  The correct SSI source is the
+    per-layer ``spec_state_indices_tensor`` in GDN metadata, matching the
+    original full-decode path.
+    """
+    key = (prefix, num_tokens, "spec")
+    if key not in _dcut_gdn_static:
         b_cap = spec_state_indices_tensor.size(0)
         _dcut_gdn_static[shared_key] = {
             "asl": torch.zeros(b_cap + 1, dtype=torch.int32, device=device),
@@ -106,64 +113,51 @@ def _dcut_alloc_gdn_spec_bufs(prefix, num_tokens, spec_state_indices_tensor, dev
             "t_cap": t_cap,
         }
         logger.debug(
-            "D-Cut: alloc GDN per-layer spec SSI prefix=%s num_tokens=%d "
-            "t_cap=%d", prefix, num_tokens, t_cap)
-
-    shared = _dcut_gdn_static[shared_key]
-    local = _dcut_gdn_static[ssi_key]
-    return {
-        "asl": shared["asl"],
-        "nat": shared["nat"],
-        "asl_cpu": shared["asl_cpu"],
-        "nat_cpu": shared["nat_cpu"],
-        "ssi": local["ssi"],
-        "ssi_cpu": local["ssi_cpu"],
-        "t_cap": local["t_cap"],
-    }
+            "D-Cut: alloc GDN spec static bufs prefix=%s num_tokens=%d "
+            "b_cap=%d t_cap=%d", prefix, num_tokens, b_cap, t_cap)
+    return _dcut_gdn_static[key]
 
 
-def _dcut_fill_gdn_spec_bufs(prefix, num_tokens, meta, device,
-                              fill_shared_asl_nat=True):
-    """Build ASL/SSI/NAT on CPU and copy tensors to NPU.
-
-    Recurrent GDN currently takes tensor inputs, unlike conv1d's host tuple
-    options, so we cannot use graph_task_update without adding a new host-arg
-    operator/update hook.  This mirrors conv1d's CPU metadata path as closely
-    as possible and avoids zero_/fill_/masked_select NPU kernels.
-    """
+def _dcut_fill_gdn_spec_bufs(prefix, num_tokens, spec_query_start_loc,
+                              spec_state_indices_tensor, num_accepted_tokens,
+                              num_spec_decodes, device):
+    """Fill ASL/SSI/NAT buffers with runtime values before graph replay."""
     bufs = _dcut_alloc_gdn_spec_bufs(
-        prefix, num_tokens, meta.spec_state_indices_tensor, device)
-    qsl_host, ssi_host, nat_host = _spec_host_args(meta)
-    num_seqs = max(len(qsl_host) - 1, 0)
+        prefix, num_tokens, spec_state_indices_tensor, device)
+    asl, ssi, nat = bufs["asl"], bufs["ssi"], bufs["nat"]
 
-    ssi_cpu = bufs["ssi_cpu"]
-    ssi_cpu.fill_(PAD_SLOT_ID)
+    # Keep the conservative, correctness-first path: all three tensors are
+    # prefix-local and rebuilt from GDN metadata.  This costs NPU fill kernels,
+    # but avoids the invalid-state-index crash caused by treating conv1d host
+    # cache indices as recurrent SSI.
+    asl.zero_()
+    ssi.fill_(PAD_SLOT_ID)
+    nat.zero_()
 
-    if fill_shared_asl_nat:
-        asl_cpu = bufs["asl_cpu"]
-        nat_cpu = bufs["nat_cpu"]
-        asl_cpu.zero_()
-        nat_cpu.zero_()
-        for i in range(num_seqs):
-            seg_len = int(qsl_host[i + 1]) - int(qsl_host[i])
-            asl_cpu[i + 1] = seg_len
-            nat_val = int(nat_host[i]) if i < len(nat_host) else 1
-            nat_cpu[i] = min(nat_val, seg_len)
-        _copy_cpu_to_gpu(bufs["asl"], asl_cpu)
-        _copy_cpu_to_gpu(bufs["nat"], nat_cpu)
+    if num_spec_decodes > 0:
+        cu = spec_query_start_loc[:num_spec_decodes + 1]
+        per_seq_lens = cu[1:] - cu[:-1]
 
-    ssi_len = min(len(ssi_host), int(bufs["t_cap"]))
-    if ssi_len > 0:
-        ssi_cpu[:ssi_len] = torch.tensor(ssi_host[:ssi_len], dtype=torch.int32)
-    _copy_cpu_to_gpu(bufs["ssi"], ssi_cpu)
+        asl[1:num_spec_decodes + 1].copy_(per_seq_lens)
+
+        col_idx = bufs["col_idx"]
+        mask = col_idx.unsqueeze(0) < per_seq_lens.unsqueeze(1)
+        real = spec_state_indices_tensor[:num_spec_decodes][mask]
+        ssi[:real.size(0)].copy_(real)
+
+        clamped = torch.minimum(
+            num_accepted_tokens[:num_spec_decodes].to(torch.int32),
+            per_seq_lens.to(torch.int32)
+        )
+        nat[:num_spec_decodes].copy_(clamped)
     return bufs
 
 
 def _dcut_alloc_gdn_nonspec_bufs(prefix, num_tokens,
                                   non_spec_state_indices_tensor, device):
-    """Allocate GPU tensors plus CPU staging buffers for non-spec decode."""
-    shared_key = _dcut_gdn_static_key(prefix, num_tokens, "nonspec_asl")
-    if shared_key not in _dcut_gdn_static:
+    """Allocate per-layer ASL/SSI buffers for the non-spec decode path."""
+    key = (prefix, num_tokens, "nonspec")
+    if key not in _dcut_gdn_static:
         b_cap = non_spec_state_indices_tensor.size(0)
         _dcut_gdn_static[shared_key] = {
             "asl": torch.zeros(b_cap + 1, dtype=torch.int32, device=device),
@@ -185,44 +179,33 @@ def _dcut_alloc_gdn_nonspec_bufs(prefix, num_tokens,
             "D-Cut: alloc GDN per-layer nonspec SSI prefix=%s num_tokens=%d "
             "b_cap=%d", prefix, num_tokens, b_cap)
 
-    shared = _dcut_gdn_static[shared_key]
-    local = _dcut_gdn_static[ssi_key]
-    return {
-        "asl": shared["asl"],
-        "asl_cpu": shared["asl_cpu"],
-        "ssi": local["ssi"],
-        "ssi_cpu": local["ssi_cpu"],
-    }
-
-
-def _dcut_fill_gdn_nonspec_bufs(prefix, num_tokens, meta, device,
-                                  fill_shared_asl=True):
-    """Build non-spec ASL/SSI on CPU and copy tensors to NPU."""
+def _dcut_fill_gdn_nonspec_bufs(prefix, num_tokens, non_spec_query_start_loc,
+                                  non_spec_state_indices_tensor, num_decodes,
+                                  device):
+    """Fill ASL/SSI buffers for non-spec decode before graph replay."""
     bufs = _dcut_alloc_gdn_nonspec_bufs(
-        prefix, num_tokens, meta.non_spec_state_indices_tensor, device)
-    qsl_host, ssi_host = _nonspec_host_args(meta)
-    num_seqs = max(len(qsl_host) - 1, 0)
+        prefix, num_tokens, non_spec_state_indices_tensor, device)
+    asl, ssi = bufs["asl"], bufs["ssi"]
 
-    if fill_shared_asl:
-        asl_cpu = bufs["asl_cpu"]
-        asl_cpu.zero_()
-        for i in range(num_seqs):
-            asl_cpu[i + 1] = int(qsl_host[i + 1]) - int(qsl_host[i])
-        _copy_cpu_to_gpu(bufs["asl"], asl_cpu)
+    asl.zero_()
+    if num_decodes > 0:
+        cu = non_spec_query_start_loc[:num_decodes + 1]
+        asl[1:num_decodes + 1].copy_(cu[1:] - cu[:-1])
 
-    ssi_cpu = bufs["ssi_cpu"]
-    ssi_cpu.fill_(PAD_SLOT_ID)
-    ssi_len = min(len(ssi_host), int(ssi_cpu.numel()))
-    if ssi_len > 0:
-        ssi_cpu[:ssi_len] = torch.tensor(ssi_host[:ssi_len], dtype=torch.int32)
-    _copy_cpu_to_gpu(bufs["ssi"], ssi_cpu)
+    ssi.fill_(PAD_SLOT_ID)
+    if num_decodes > 0:
+        ssi[:num_decodes].copy_(non_spec_state_indices_tensor[:num_decodes])
     return bufs
 
 
 def _dcut_update_gdn_static(forward_context, num_tokens, GDNAttentionMetadata):
     """Update GDN static buffers from forward context's attn_metadata.
-    Called from patched _model_forward before _orig_model_forward (i.e. before
-    graph replay).  Runs outside the captured graph piece."""
+
+    Called from patched _model_forward before _orig_model_forward, i.e. before
+    graph replay.  The recurrent GDN operator currently takes tensor metadata,
+    not host tuple optional args like conv1d, so correctness requires preserving
+    per-layer tensors here.
+    """
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None or not isinstance(attn_metadata, dict):
         return
