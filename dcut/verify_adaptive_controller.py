@@ -183,13 +183,10 @@ class VerifyAdaptiveController:
         if not self.config.enabled:
             return
 
-# [D-CUT-FIX]  (commented out to enable real profiling)
-        # DEBUG: HARDCODED random cut — skip profiling entirely
-        # [D-CUT-FIX] logger.info("VerifyAdaptiveController: HARDCODED RANDOM_CUT mode, skipping profiling")
-        # [D-CUT-FIX] self._sorted_bs = [1]
-        # [D-CUT-FIX] self._sorted_sql_per_bs = {1: [1]}
-        # [D-CUT-FIX] self._cost_table = {(1, 1): 1.0}
-        # [D-CUT-FIX] return
+        # Random cut mode: skip profiling
+        if os.getenv("VLLM_DCUT_RANDOM_CUT"):
+            logger.info("VerifyAdaptiveController: random cut mode enabled, skipping profiling")
+            return
 
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
             logger.info(
@@ -287,7 +284,18 @@ class VerifyAdaptiveController:
         if not self.config.enabled or not active_draft_req_ids:
             return
 
-        if not self._sorted_bs:
+        # Random cut mode: assign random draft_lens (must be BEFORE _sorted_bs
+        # check because random cut skips profiling -> _sorted_bs is empty)
+        if os.getenv("VLLM_DCUT_RANDOM_CUT"):
+            max_draft_len = self.max_query_len_per_req - 1
+            n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
+            active_req_ids = [req_ids[i] for i in range(n_rows) if req_ids[i] in active_draft_req_ids]
+            for req_id in active_req_ids:
+                self._adaptive_draft_lens[req_id] = np.random.randint(2, max_draft_len + 1)
+            logger.debug(
+                "random_cut: assigned random draft_lens to %d active requests (max_draft_len=%d)",
+                len(active_req_ids), max_draft_len
+            )
             return
 
         n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
