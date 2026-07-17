@@ -8,12 +8,14 @@ import torch
 
 from vllm.config import CUDAGraphMode
 
-from .globals import logger, ENABLE_GDN_MAIN_PIECEWISE_GRAPH
+from .globals import logger, ENABLE_GDN_MAIN_PIECEWISE_GRAPH, ENV_FULL_DECODE_ONLY
 from .gdn_buffers import _dcut_update_gdn_static
 from .controller import _dcut_init_controller, _dcut_enable_drafter_probs
 from .truncate import _dcut_truncate
 from .probs import _dcut_queue_probs, _maybe_process_adaptive_probs, profile_adaptive_cost
 from .dcut_profile import _adaptive_profile_run
+
+ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
 
 def _patch_runner() -> None:
     import vllm_ascend.worker.model_runner_v1 as m
@@ -74,31 +76,39 @@ def _patch_runner() -> None:
     _orig_exec = R.execute_model
 
     def execute_model(self, scheduler_output, intermediate_tensors=None):
+        if os.environ.get(ENV_FULL_DECODE_ONLY):
+            return _orig_exec(self, scheduler_output, intermediate_tensors)
+
         _ctrl = getattr(self, "_verify_adaptive_controller", None)
         _has_spec = bool(getattr(scheduler_output, "scheduled_spec_decode_tokens", None))
-        # Capture trim info before truncation
+        debug_stats = bool(os.environ.get(ENV_DEBUG_STATS))
+        # Capture trim info before truncation only when optional debug timing is
+        # enabled.  The regular D-Cut trim logger already records verify-token
+        # reduction inside _dcut_truncate; keeping a second unconditional stats
+        # path here adds Python work to every decode iteration.
         _full_draft = 0
-        _n_spec_reqs = 0
-        if _ctrl is not None and _has_spec:
+        if debug_stats and _ctrl is not None and _has_spec:
             _orig_spec = getattr(scheduler_output, "scheduled_spec_decode_tokens", {})
             _full_draft = sum(len(t) for t in _orig_spec.values())
-            _n_spec_reqs = len(_orig_spec)
+        dcut_enabled = _ctrl is not None and not os.environ.get("VLLM_DCUT_DISABLE")
         if _ctrl is not None:
             _dcut_enable_drafter_probs(self)
-            import os as _os_dcut
-            if not _os_dcut.environ.get("VLLM_DCUT_DISABLE"):
+            if dcut_enabled:
                 scheduler_output = _dcut_truncate(self, scheduler_output)
-        # Capture trim info after truncation
+
+        if not debug_stats:
+            return _orig_exec(self, scheduler_output, intermediate_tensors)
+
+        # Optional slow-path debug timing.  Keep it behind an env gate because
+        # perf_counter plus per-step Python aggregation is visible at high ITL.
         _kept_draft = _full_draft
-        if _ctrl is not None and _has_spec and not _os_dcut.environ.get("VLLM_DCUT_DISABLE"):
+        if dcut_enabled and _has_spec:
             _new_spec = getattr(scheduler_output, "scheduled_spec_decode_tokens", {})
             _kept_draft = sum(len(t) for t in _new_spec.values())
-        # Timing
         import time as _time
         _t0 = _time.perf_counter()
         result = _orig_exec(self, scheduler_output, intermediate_tensors)
         _fwd_ms = (_time.perf_counter() - _t0) * 1000
-        # Accumulate stats
         if not hasattr(self, "_dcut_fwd_accum"):
             self._dcut_fwd_accum = {"full": 0, "kept": 0, "cut": 0, "fwd_ms": 0.0, "steps": 0, "spec_steps": 0}
         acc = self._dcut_fwd_accum
@@ -109,7 +119,6 @@ def _patch_runner() -> None:
             acc["full"] += _full_draft
             acc["kept"] += _kept_draft
             acc["cut"] += (_full_draft - _kept_draft)
-        # Log every 50 steps
         if acc["steps"] % 50 == 0:
             _avg_fwd = acc["fwd_ms"] / acc["steps"]
             if acc["full"] > 0:
@@ -126,6 +135,8 @@ def _patch_runner() -> None:
 
     def sample_tokens(self, *a, **k):
         out = _orig_sample_tokens(self, *a, **k)
+        if os.environ.get(ENV_FULL_DECODE_ONLY):
+            return out
         if getattr(self, "_adaptive_probs_pending", False):
             try:
                 _maybe_process_adaptive_probs(self)
@@ -138,6 +149,8 @@ def _patch_runner() -> None:
 
     def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
         _orig_copy(self, scheduler_output, zeros_only)
+        if os.environ.get(ENV_FULL_DECODE_ONLY):
+            return
         if getattr(self, "_verify_adaptive_controller", None) is not None:
             try:
                 _dcut_queue_probs(self, zeros_only)
