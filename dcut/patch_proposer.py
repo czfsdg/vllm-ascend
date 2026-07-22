@@ -11,15 +11,13 @@ from .utils import _dcut_greedy_sample_with_selected_probs
 # Patch installers (idempotent, per class).  Targets are the *NPU* classes.
 # ---------------------------------------------------------------------------
 
+
 def _patch_proposer() -> None:
     """Patch the Ascend spec-decode proposer to expose selected draft probs.
 
-    The Ascend dflash/PARD proposers inherit ``_sample_draft_tokens`` through a
-    multi-level MRO (AscendDflashProposer -> AscendEagleProposer ->
-    EagleProposer / AscendSpecDecodeBaseProposer -> SpecDecodeBaseProposer).
-    We resolve, per proposer, the class in the MRO that actually *defines*
-    ``_sample_draft_tokens`` and patch that class, so the wrapper is not
-    shadowed by a subclass override.
+    vLLM 0.23 Ascend proposers sample through compute_draft_token_ids.
+    Patch the concrete method owner so DFlash and parallel draft-model
+    proposers expose the selected-token probabilities used by D-Cut.
     """
     from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
@@ -125,60 +123,4 @@ def _patch_proposer() -> None:
         logger.info(
             "D-Cut: patched compute_draft_token_ids on %s.", owner.__name__
         )
-
-    # Find the distinct owner classes of _sample_draft_tokens across our
-    # concrete proposers (usually a single class) and wrap each once.
-    owners = []
-    for pc in proposer_classes:
-        for klass in pc.__mro__:
-            if "_sample_draft_tokens" in klass.__dict__:
-                if klass not in owners:
-                    owners.append(klass)
-                break
-
-    for owner in owners:
-        if getattr(owner, "_dcut_patched", False):
-            continue
-        _orig_sample = owner._sample_draft_tokens
-
-        def _make_wrapper(orig):
-            def _sample_draft_tokens(self, hidden_states, sampling_metadata):
-                self._last_selected_probs = None
-                out = orig(self, hidden_states, sampling_metadata)
-                # D-Cut only targets parallel drafting (DFlash / PARD), where the
-                # whole block is sampled in this single call -> selected_probs is
-                # [B*T] which reshapes to [B, T].
-                if type(self)._should_collect_draft_probs(self):
-                    if isinstance(out, tuple):
-                        token_ids = out[0]
-                        full_probs = out[1] if len(out) > 1 else None
-                    else:
-                        token_ids = out
-                        full_probs = None
-                    try:
-                        logits = (
-                            None
-                            if full_probs is not None
-                            else self.model.compute_logits(hidden_states)
-                        )
-                        sel = type(self)._gather_selected_probs(
-                            logits, token_ids, full_probs
-                        )
-                        self._last_selected_probs = sel.view(
-                            -1, self.num_speculative_tokens
-                        ).contiguous()
-                    except Exception as e:  # pragma: no cover - defensive
-                        logger.warning(
-                            "D-Cut: gather selected probs failed: %s", e
-                        )
-                        self._last_selected_probs = None
-                return out
-            return _sample_draft_tokens
-
-        owner._sample_draft_tokens = _make_wrapper(_orig_sample)
-        owner._dcut_patched = True
-        logger.info(
-            "D-Cut: patched _sample_draft_tokens on %s.", owner.__name__
-        )
-
 

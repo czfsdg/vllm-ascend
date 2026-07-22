@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dcut-adaptive-verify"
-version = "0.1.0"
-description = "D-Cut adaptive verifier step-length for DFlash/PARD speculative decoding on Ascend NPU (vllm-ascend monkey-patch plugin, ported from the CUDA plugin / vllm PR #44885)."
+version = "0.2.0"
+description = "D-Cut adaptive verifier step-length for DFlash/PARD speculative decoding on Ascend NPU with vLLM 0.23.0."
 requires-python = ">=3.9"
 dependencies = ["numpy"]
 

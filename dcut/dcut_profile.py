@@ -36,8 +36,11 @@ def _adaptive_profile_run(
     """
     # Import here so a stand-alone `import dcut` never hard-requires vllm-ascend.
     from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
     num_scheduled_tokens = np.array(scheduled_tokens, dtype=np.int32)
+    self.query_lens = torch.from_numpy(num_scheduled_tokens)
+    self.attn_state = AscendAttentionState.ChunkedPrefill
     num_reqs = len(scheduled_tokens)
     num_tokens_unpadded = int(num_scheduled_tokens.sum())
     max_query_len = int(num_scheduled_tokens.max())
@@ -136,15 +139,16 @@ def _adaptive_profile_run(
                 # spec_state_indices_tensor) to prevent OOB state access in
                 # the Mamba/GDN conv1d sliding-window update.
                 for i in range(num_reqs):
-                    self.num_accepted_tokens.gpu[i] = min(
+                    self.num_accepted_tokens.np[i] = min(
                         int(num_scheduled_tokens[i]), num_spec + 1
                     )
-                self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+                self.num_accepted_tokens.np[num_reqs:].fill(1)
+                self.num_accepted_tokens.copy_to_gpu()
 
         # NPU _build_attention_metadata: no `slot_mappings` kwarg; takes
         # `num_scheduled_tokens_np` and `num_reqs_padded` instead.
         attn_metadata, _ = self._build_attention_metadata(
-            num_tokens=num_tokens_padded,
+            num_tokens=num_tokens_unpadded,
             num_reqs=num_reqs,
             max_query_len=max_query_len,
             num_tokens_padded=num_tokens_padded,

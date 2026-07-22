@@ -3,7 +3,7 @@
 
 Ported from the CUDA plugin in ``Bensong0506/vllm`` branch
 ``feat/dcut-adaptive-verify`` (itself a port of the closed, unmerged vLLM
-PR #44885) to run on Huawei Ascend NPU via vllm-ascend (vLLM v0.22.1 base).
+PR #44885) to run on Huawei Ascend NPU via vllm-ascend (vLLM v0.23.0 base).
 Self-contained vLLM *general plugin* — **no vLLM / vllm-ascend source files are
 edited**.
 
@@ -79,13 +79,10 @@ ENV_PROFILE_FORCE_EAGER = "VLLM_DCUT_PROFILE_FORCE_EAGER"
 ENV_FULL_DECODE_ONLY = "VLLM_DCUT_FULL_DECODE_ONLY"
 ENV_GDN_SHARED_STATIC = "VLLM_DCUT_GDN_SHARED_STATIC"
 
-# Phase 2A master switch: when True, the recurrent GDN attention core
-# is captured directly in the main PIECEWISE graph (no splitting op,
-# no graph_task_update for recurrent metadata). Static ASL/NAT/SSI
-# buffers are filled graph-externally by the builder each step; the
-# kernel inside the graph reads them. Conv1D still uses graph_task_update
-# (host tuple args).
-ENABLE_GDN_MAIN_PIECEWISE_GRAPH = True
+# vLLM 0.23 owns GDN graph inputs through GDNSpecDecodeMetadata and keeps the
+# attention core as a splitting op in PIECEWISE mode. The removed 0.22
+# graph-task host-argument APIs must not be patched.
+ENABLE_GDN_MAIN_PIECEWISE_GRAPH = False
 
 # ── Static GDN buffers for PIECEWISE graph replay ──────────────────
 # Pre-allocated ASL/SSI/NAT buffers with stable data_ptr.
