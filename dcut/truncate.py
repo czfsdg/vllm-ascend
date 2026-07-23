@@ -65,10 +65,8 @@ def _dcut_truncate(self, scheduler_output):
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     gdn_min_draft_lens = _get_gdn_min_draft_lens(self, orig_spec)
     target_draft_lens = {}
-    max_draft_lens = {}
     for req_id, draft_toks in orig_spec.items():
         max_dl = len(draft_toks)
-        max_draft_lens[req_id] = max_dl
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
         if adaptive_len is None:
             adaptive_len = max_dl  # no cached decision -> full spec
@@ -80,22 +78,6 @@ def _dcut_truncate(self, scheduler_output):
             adaptive_len,
             min(gdn_min_draft_lens.get(req_id, 0), max_dl),
         )
-
-    spec_cfg = getattr(self, "speculative_config", None)
-    if getattr(spec_cfg, "method", None) == "dflash" and len(orig_spec) > 1:
-        if len(set(max_draft_lens.values())) == 1:
-            # A stale/missing cache entry or a per-request GDN acceptance floor
-            # must not make a DFlash batch heterogeneous again. Raising every
-            # row to the largest safe length keeps the batch synchronized.
-            uniform_draft_len = max(target_draft_lens.values())
-            target_draft_lens = {
-                req_id: uniform_draft_len for req_id in target_draft_lens
-            }
-        else:
-            # DFlash cannot safely express a uniform cut when the scheduler
-            # supplied different maximum draft lengths. Fall back to the
-            # uncut batch for correctness.
-            target_draft_lens = max_draft_lens.copy()
 
     tokens_delta = 0
     for req_id, draft_toks in list(new_spec.items()):
