@@ -14,9 +14,9 @@ def test_compact_spec_state_indices_for_variable_query_lengths():
         dtype=torch.int32,
     )
     query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
-    num_accepted_tokens = torch.tensor([4, 2], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([2, 2], dtype=torch.int32)
 
-    compact, clamped = _compact_spec_state_indices(
+    compact, accepted = _compact_spec_state_indices(
         state_indices,
         query_start_loc,
         num_accepted_tokens,
@@ -24,7 +24,7 @@ def test_compact_spec_state_indices_for_variable_query_lengths():
     )
 
     assert compact.tolist() == [10, 11, 20, 21, 22]
-    assert clamped.tolist() == [2, 2]
+    assert accepted.tolist() == [2, 2]
 
 
 def test_compact_spec_state_indices_ignores_padded_requests():
@@ -37,9 +37,9 @@ def test_compact_spec_state_indices_ignores_padded_requests():
         dtype=torch.int32,
     )
     query_start_loc = torch.tensor([0, 4, 5, 5], dtype=torch.int32)
-    num_accepted_tokens = torch.tensor([4, 3, 1], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([4, 1, 1], dtype=torch.int32)
 
-    compact, clamped = _compact_spec_state_indices(
+    compact, accepted = _compact_spec_state_indices(
         state_indices,
         query_start_loc,
         num_accepted_tokens,
@@ -47,4 +47,20 @@ def test_compact_spec_state_indices_ignores_padded_requests():
     )
 
     assert compact.tolist() == [10, 11, 12, 13, 20]
-    assert clamped.tolist() == [4, 1]
+    assert accepted.tolist() == [4, 1]
+
+
+def test_compact_spec_state_indices_preserves_accepted_state_selector():
+    state_indices = torch.tensor([[10, 11, 12, 13]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([4], dtype=torch.int32)
+
+    _, accepted = _compact_spec_state_indices(
+        state_indices,
+        query_start_loc,
+        num_accepted_tokens,
+        num_spec_decodes=1,
+    )
+
+    # Layout adaptation must never change the previous step's state selector.
+    assert accepted.tolist() == [4]

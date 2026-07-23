@@ -19,7 +19,9 @@ def _compact_spec_state_indices(
     request. D-Cut can schedule fewer tokens for an individual request, so
     flattening those rows would pass stale trailing state indices to the
     recurrent GDN operator. Build the flattened indices from the live query
-    lengths and clamp the accepted-token count to the same lengths.
+    lengths. The accepted-token count must be preserved: it selects the state
+    produced by the previous speculative step. ``_dcut_truncate`` guarantees
+    that the current query remains long enough to contain that state slot.
 
     This helper intentionally stays on device; using item() here would add a
     CPU/NPU synchronization to every speculative decode step.
@@ -40,11 +42,10 @@ def _compact_spec_state_indices(
         valid_tokens = token_offsets.unsqueeze(0) < query_lens.unsqueeze(1)
         compact_state_indices = active_state_indices[valid_tokens].contiguous()
 
-    clamped_num_accepted_tokens = torch.minimum(
-        num_accepted_tokens[:num_spec_decodes].to(torch.int32),
-        query_lens.to(torch.int32),
+    active_num_accepted_tokens = num_accepted_tokens[:num_spec_decodes].to(
+        torch.int32
     )
-    return compact_state_indices, clamped_num_accepted_tokens
+    return compact_state_indices, active_num_accepted_tokens
 
 
 def _patch_gdn_dcut() -> None:
