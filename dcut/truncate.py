@@ -64,25 +64,53 @@ def _dcut_truncate(self, scheduler_output):
     new_spec = orig_spec.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
     gdn_min_draft_lens = _get_gdn_min_draft_lens(self, orig_spec)
-    tokens_delta = 0
-    for req_id, draft_toks in list(new_spec.items()):
+    target_draft_lens = {}
+    max_draft_lens = {}
+    for req_id, draft_toks in orig_spec.items():
         max_dl = len(draft_toks)
+        max_draft_lens[req_id] = max_dl
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
         if adaptive_len is None:
             adaptive_len = max_dl  # no cached decision -> full spec
-        adaptive_len = min(adaptive_len, max_dl)  # clamp to available
+        adaptive_len = min(max(adaptive_len, 0), max_dl)
         # Preserve the state slot selected by the previous speculative step.
         # The extra query token means a previous accepted count of N requires
         # at least N - 1 draft tokens in this step.
-        adaptive_len = max(
+        target_draft_lens[req_id] = max(
             adaptive_len,
             min(gdn_min_draft_lens.get(req_id, 0), max_dl),
         )
+
+    spec_cfg = getattr(self, "speculative_config", None)
+    if getattr(spec_cfg, "method", None) == "dflash" and len(orig_spec) > 1:
+        if len(set(max_draft_lens.values())) == 1:
+            # A stale/missing cache entry or a per-request GDN acceptance floor
+            # must not make a DFlash batch heterogeneous again. Raising every
+            # row to the largest safe length keeps the batch synchronized.
+            uniform_draft_len = max(target_draft_lens.values())
+            target_draft_lens = {
+                req_id: uniform_draft_len for req_id in target_draft_lens
+            }
+        else:
+            # DFlash cannot safely express a uniform cut when the scheduler
+            # supplied different maximum draft lengths. Fall back to the
+            # uncut batch for correctness.
+            target_draft_lens = max_draft_lens.copy()
+
+    tokens_delta = 0
+    for req_id, draft_toks in list(new_spec.items()):
+        max_dl = len(draft_toks)
+        adaptive_len = target_draft_lens[req_id]
         if adaptive_len < max_dl:
             diff = max_dl - adaptive_len
             tokens_delta += diff
             new_num_sched[req_id] -= diff
-            new_spec[req_id] = draft_toks[:adaptive_len]
+            if adaptive_len:
+                new_spec[req_id] = draft_toks[:adaptive_len]
+            else:
+                # An empty entry still makes model_runner treat the step as
+                # speculative. Remove it so a full cut becomes normal decode.
+                new_spec.pop(req_id)
 
     _dcut_record_trim(self, full_draft, tokens_delta, n_spec_reqs)
 

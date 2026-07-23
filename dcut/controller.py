@@ -72,6 +72,7 @@ def _dcut_init_controller(self) -> None:
         num_spec_tokens=num_spec,
         max_batch_size=self.scheduler_config.max_num_seqs,
         device=self.device,
+        uniform_draft_lens=getattr(spec_cfg, "method", None) == "dflash",
     )
     # NPU: torch.npu.Event instead of torch.cuda.Event.
     self._adaptive_probs_event = _npu_event()

@@ -113,6 +113,7 @@ class VerifyAdaptiveController:
         num_spec_tokens: int,
         max_batch_size: int,
         device: torch.device,
+        uniform_draft_lens: bool = False,
     ) -> None:
         config.validate(num_spec_tokens)
 
@@ -120,6 +121,7 @@ class VerifyAdaptiveController:
         self.num_spec_tokens = num_spec_tokens
         self.max_batch_size = max_batch_size
         self.device = device
+        self.uniform_draft_lens = uniform_draft_lens
         self.max_query_len_per_req: int = (
             config.max_query_len_per_req
             if config.max_query_len_per_req is not None
@@ -290,8 +292,15 @@ class VerifyAdaptiveController:
             max_draft_len = self.max_query_len_per_req - 1
             n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
             active_req_ids = [req_ids[i] for i in range(n_rows) if req_ids[i] in active_draft_req_ids]
-            for req_id in active_req_ids:
-                self._adaptive_draft_lens[req_id] = np.random.randint(2, max_draft_len + 1)
+            if self.uniform_draft_lens and batch_size > 1:
+                draft_len = int(np.random.randint(2, max_draft_len + 1))
+                for req_id in active_req_ids:
+                    self._adaptive_draft_lens[req_id] = draft_len
+            else:
+                for req_id in active_req_ids:
+                    self._adaptive_draft_lens[req_id] = int(
+                        np.random.randint(2, max_draft_len + 1)
+                    )
             logger.debug(
                 "random_cut: assigned random draft_lens to %d active requests (max_draft_len=%d)",
                 len(active_req_ids), max_draft_len
@@ -324,7 +333,18 @@ class VerifyAdaptiveController:
             collect_records=bool(decision_dump_path),
         )
 
-        draft_lens = result["draft_lens"]
+        draft_lens = [int(draft_len) for draft_len in result["draft_lens"]]
+        if self.uniform_draft_lens and batch_size > 1:
+            # DFlash precomputes context KV for the whole drafter input. A
+            # per-request verifier length can desynchronize that context from
+            # the request metadata after D-Cut. Preserve the selected total
+            # verifier budget while applying one length to the full batch.
+            uniform_query_len = max(1, int(result["best_Q"]) // batch_size)
+            uniform_draft_len = min(
+                self.max_query_len_per_req - 1,
+                max(0, uniform_query_len - 1),
+            )
+            draft_lens = [uniform_draft_len] * len(active_req_ids)
         for req_id, draft_len in zip(active_req_ids, draft_lens):
             self._adaptive_draft_lens[req_id] = draft_len
 
