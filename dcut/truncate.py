@@ -9,39 +9,7 @@ from dataclasses import replace
 
 from vllm.distributed import get_pp_group, get_tp_group
 
-from .globals import ENV_TRIM_STATS_OUT, logger
-
-
-def _get_gdn_min_draft_lens(self, req_ids) -> dict[str, int]:
-    """Return the draft-length floor required by live GDN state.
-
-    ``num_accepted_tokens`` identifies the state slot produced by the previous
-    speculative step. The recurrent GDN kernel selects that slot from the
-    current request row, so shortening the current query below the accepted
-    count would either make the kernel reject the row or, if the count were
-    clamped, resume from an older state. Wait for the same D2H event that the
-    runner consumes later and keep enough draft positions to retain the real
-    accepted-state slot.
-    """
-    if not getattr(self, "_has_gdn", False):
-        return {}
-
-    accepted_event = getattr(self, "num_accepted_tokens_event", None)
-    if accepted_event is not None:
-        accepted_event.synchronize()
-
-    input_batch = getattr(self, "input_batch", None)
-    req_id_to_index = getattr(input_batch, "req_id_to_index", None)
-    accepted_tokens = getattr(input_batch, "num_accepted_tokens_cpu", None)
-    if not req_id_to_index or accepted_tokens is None:
-        return {}
-
-    min_draft_lens = {}
-    for req_id in req_ids:
-        req_index = req_id_to_index.get(req_id)
-        if req_index is not None:
-            min_draft_lens[req_id] = max(int(accepted_tokens[req_index]) - 1, 0)
-    return min_draft_lens
+from .globals import logger
 
 
 def _dcut_truncate(self, scheduler_output):
@@ -63,7 +31,6 @@ def _dcut_truncate(self, scheduler_output):
 
     new_spec = orig_spec.copy()
     new_num_sched = scheduler_output.num_scheduled_tokens.copy()
-    gdn_min_draft_lens = _get_gdn_min_draft_lens(self, orig_spec)
     target_draft_lens = {}
     for req_id, draft_toks in orig_spec.items():
         max_dl = len(draft_toks)
@@ -71,13 +38,7 @@ def _dcut_truncate(self, scheduler_output):
         if adaptive_len is None:
             adaptive_len = max_dl  # no cached decision -> full spec
         adaptive_len = min(max(adaptive_len, 0), max_dl)
-        # Preserve the state slot selected by the previous speculative step.
-        # The extra query token means a previous accepted count of N requires
-        # at least N - 1 draft tokens in this step.
-        target_draft_lens[req_id] = max(
-            adaptive_len,
-            min(gdn_min_draft_lens.get(req_id, 0), max_dl),
-        )
+        target_draft_lens[req_id] = adaptive_len
 
     tokens_delta = 0
     for req_id, draft_toks in list(new_spec.items()):

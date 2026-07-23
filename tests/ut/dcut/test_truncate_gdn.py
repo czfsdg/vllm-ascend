@@ -60,7 +60,7 @@ def _runner(
     return runner, event
 
 
-def test_gdn_truncation_keeps_previous_accepted_state_slot():
+def test_gdn_truncation_does_not_floor_cut_to_previous_acceptance():
     runner, event = _runner(has_gdn=True, accepted_tokens=[4])
     output = _SchedulerOutput(
         scheduled_spec_decode_tokens={"request-0": [11, 12, 13, 14]},
@@ -70,10 +70,10 @@ def test_gdn_truncation_keeps_previous_accepted_state_slot():
 
     truncated = _dcut_truncate(runner, output)
 
-    assert truncated.scheduled_spec_decode_tokens["request-0"] == [11, 12, 13]
-    assert truncated.num_scheduled_tokens["request-0"] == 4
-    assert truncated.total_num_scheduled_tokens == 4
-    assert event.synchronize_calls == 1
+    assert truncated.scheduled_spec_decode_tokens["request-0"] == [11]
+    assert truncated.num_scheduled_tokens["request-0"] == 2
+    assert truncated.total_num_scheduled_tokens == 2
+    assert event.synchronize_calls == 0
 
 
 def test_non_gdn_truncation_does_not_apply_state_floor():
@@ -171,7 +171,7 @@ def test_zero_length_cut_removes_spec_decode_entry():
     assert truncated.total_num_scheduled_tokens == 1
 
 
-def test_dflash_gdn_state_floors_remain_per_request():
+def test_dflash_gdn_cuts_remain_per_request_without_state_floors():
     runner, event = _runner(
         has_gdn=True,
         accepted_tokens=[4, 2],
@@ -191,12 +191,12 @@ def test_dflash_gdn_state_floors_remain_per_request():
     truncated = _dcut_truncate(runner, output)
 
     assert truncated.scheduled_spec_decode_tokens == {
-        "request-0": [11, 12, 13],
+        "request-0": [11],
         "request-1": [21],
     }
     assert truncated.num_scheduled_tokens == {
-        "request-0": 4,
+        "request-0": 2,
         "request-1": 2,
     }
-    assert truncated.total_num_scheduled_tokens == 6
-    assert event.synchronize_calls == 1
+    assert truncated.total_num_scheduled_tokens == 4
+    assert event.synchronize_calls == 0

@@ -36,6 +36,38 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
+def _run_spec_causal_conv1d(
+    output: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    bias: torch.Tensor | None,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    activation_mode: int,
+) -> None:
+    """Run the speculative causal-conv kernel.
+
+    Kept as a small module-level seam so extensions that change speculative
+    batch layout can adapt the inputs without replacing the full GDN forward.
+    """
+    torch.ops._C_ascend.npu_causal_conv1d_custom(
+        output,
+        x,
+        weight,
+        conv_state=conv_state,
+        bias_opt=bias,
+        query_start_loc_opt=query_start_loc,
+        cache_indices_opt=cache_indices,
+        initial_state_mode_opt=None,
+        num_accepted_tokens_opt=num_accepted_tokens,
+        activation_mode=activation_mode,
+        pad_slot_id=PAD_SLOT_ID,
+        run_mode=1,
+    )
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
@@ -197,19 +229,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
             output_spec = torch.empty_like(mixed_qkv_spec)
-            torch.ops._C_ascend.npu_causal_conv1d_custom(
+            _run_spec_causal_conv1d(
                 output_spec,
                 mixed_qkv_spec,
                 conv_weights_T,
-                conv_state=self_kv_cache[0],
-                bias_opt=self.conv1d.bias,
-                query_start_loc_opt=spec_query_start_loc_device,
-                cache_indices_opt=spec_causal_conv1d_meta.cache_indices,
-                initial_state_mode_opt=None,
-                num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
-                activation_mode=activation_num,
-                pad_slot_id=PAD_SLOT_ID,
-                run_mode=1,
+                self_kv_cache[0],
+                self.conv1d.bias,
+                spec_query_start_loc_device,
+                spec_causal_conv1d_meta.cache_indices,
+                spec_causal_conv1d_meta.num_accepted_tokens,
+                activation_num,
             )
             mixed_qkv_spec = output_spec
 
