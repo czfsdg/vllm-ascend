@@ -292,6 +292,27 @@ class VerifyAdaptiveController:
             active_req_ids = [req_ids[i] for i in range(n_rows) if req_ids[i] in active_draft_req_ids]
             for req_id in active_req_ids:
                 self._adaptive_draft_lens[req_id] = np.random.randint(2, max_draft_len + 1)
+            _dbg = getattr(self, "_dcut_rand_dbg_cnt", 0)
+            if _dbg < 20:
+                self._dcut_rand_dbg_cnt = _dbg + 1
+                for rid in active_req_ids:
+                    pass  # DCUT_DBG disabled
+            # Periodic distribution statistics: track how many times each
+            # draft_len value is assigned, print every 200 steps.
+            _dist = getattr(self, "_dcut_rand_dist", None)
+            if _dist is None:
+                _dist = {}
+                self._dcut_rand_dist = _dist
+            for rid in active_req_ids:
+                _dl = int(self._adaptive_draft_lens[rid])
+                _dist[_dl] = _dist.get(_dl, 0) + 1
+            _step = getattr(self, "_dcut_rand_step_cnt", 0) + 1
+            self._dcut_rand_step_cnt = _step
+            if _step % 200 == 0:
+                _items = sorted(_dist.items())
+                _total = sum(_dist.values())
+                _parts = " ".join(f"{k}:{v}" for k, v in _items)
+                print(f"[DCUT_RAND_DIST] step={_step} total={_total} dist({_parts})", flush=True)
             logger.debug(
                 "random_cut: assigned random draft_lens to %d active requests (max_draft_len=%d)",
                 len(active_req_ids), max_draft_len
