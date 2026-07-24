@@ -1,0 +1,7 @@
+#define DCUT_RECURRENT_FIXED_STATE_ROWS 1
+#define RecurrentGatedDeltaRule DcutRecurrentGatedDeltaRule
+#define RecurrentGatedDeltaRuleCompileInfo DcutRecurrentGatedDeltaRuleCompileInfo
+#define RecurrentGatedDeltaRuleInfo DcutRecurrentGatedDeltaRuleInfo
+#define RecurrentGatedDeltaRuleTiling DcutRecurrentGatedDeltaRuleTiling
+#define RecurrentGatedDeltaRuleTilingData DcutRecurrentGatedDeltaRuleTilingData
+#include "../vendor/op_host/recurrent_gated_delta_rule_tiling.cpp"

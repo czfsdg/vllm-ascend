@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """D-Cut patch application + vLLM general-plugin entrypoint."""
+
 from __future__ import annotations
 
 import os
@@ -23,11 +24,13 @@ def _apply_patches_once() -> None:
     # on every subsequent worker construction and does not spam the log.
     _g._PATCHED = True
     try:
+        if os.environ.get(ENV_CONFIG) and not _patch_gdn_dcut():
+            raise RuntimeError(
+                "D-Cut GDN state operators are unavailable; run `bash dcut/kernel/build.sh` first"
+            )
         _patch_proposer()
         _patch_runner()
         _patch_worker()
-        if os.environ.get(ENV_CONFIG):
-            _patch_gdn_dcut()
         logger.info(
             "D-Cut adaptive-verify patches applied for NPU "
             "(active only if VLLM_DCUT_CONFIG is set + method is dflash/PARD)."
@@ -51,6 +54,7 @@ def install(*args, **kwargs) -> None:
     the first worker construction, by which time vllm-ascend is fully imported.
     """
     from . import globals as _g
+
     if _g._INSTALLED:
         return
     _g._INSTALLED = True

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: F401, SIM105
 """Monkey-patch installer for D-Cut adaptive verifier step-length on **vLLM-Ascend / NPU**.
 
 Ported from the CUDA plugin in ``Bensong0506/vllm`` branch
 ``feat/dcut-adaptive-verify`` (itself a port of the closed, unmerged vLLM
 PR #44885) to run on Huawei Ascend NPU via vllm-ascend (vLLM v0.23.0 base).
-Self-contained vLLM *general plugin* — **no vLLM / vllm-ascend source files are
-edited**.
+The adaptive controller remains a vLLM *general plugin*. This fork also adds
+a self-contained 0.23 GDN core plus two D-Cut AscendC state operators.
 
 Algorithm is unchanged (see AngelSlim D-Cut,
 https://angelslim.readthedocs.io/zh-cn/latest/dcut.html): the drafter still
@@ -17,9 +18,9 @@ Only active for parallel speculative methods: ``method=dflash``, or
 ``method=draft_model`` with ``parallel_drafting=true`` (PARD).
 
 ------------------------------------------------------------------------------
-GPU -> NPU deltas (there are **no operator / kernel changes** — this is a pure
-spec-decode control-loop plugin; the delta is entirely *where* we patch and
-*which device API* we call):
+GPU -> NPU deltas include two D-Cut state-aware custom operators for GDN
+spec-decode. The Python control loop still patches only the NPU runner and
+the ``_forward_core`` invoked inside the native PIECEWISE GDN splitting op:
 
   1. Patch targets: ``NPUModelRunner`` (vllm_ascend.worker.model_runner_v1) /
      ``NPUWorker`` (vllm_ascend.worker.worker) / the Ascend spec-decode
@@ -44,6 +45,7 @@ spec-decode control-loop plugin; the delta is entirely *where* we patch and
 Enable: ``pip install -e .`` (this dir) + set ``VLLM_DCUT_CONFIG=/path/to.json``
 + ``VLLM_PLUGINS=dcut_adaptive_verify``.  See RUN.md.
 """
+
 from __future__ import annotations
 
 import json
@@ -92,5 +94,3 @@ ENABLE_GDN_MAIN_PIECEWISE_GRAPH = False
 #
 # Key: (prefix, num_tokens, "spec"|"nonspec")
 _dcut_gdn_static = {}
-
-

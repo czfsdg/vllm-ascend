@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """D-Cut draft truncation + verify-reduction stats."""
+
 from __future__ import annotations
 
 import json
@@ -9,130 +10,72 @@ from dataclasses import replace
 
 from vllm.distributed import get_pp_group, get_tp_group
 
-from .globals import ENV_TRIM_STATS_OUT, logger
-
-
-def _get_gdn_min_draft_lens(self, req_ids) -> dict[str, int]:
-    """Return the draft-length floor required by live GDN state.
-
-    ``num_accepted_tokens`` identifies the state slot produced by the previous
-    speculative step. The recurrent GDN kernel selects that slot from the
-    current request row, so shortening the current query below the accepted
-    count would either make the kernel reject the row or, if the count were
-    clamped, resume from an older state. Wait for the same D2H event that the
-    runner consumes later and keep enough draft positions to retain the real
-    accepted-state slot.
-    """
-    if not getattr(self, "_has_gdn", False):
-        return {}
-
-    accepted_event = getattr(self, "num_accepted_tokens_event", None)
-    if accepted_event is not None:
-        accepted_event.synchronize()
-
-    input_batch = getattr(self, "input_batch", None)
-    req_id_to_index = getattr(input_batch, "req_id_to_index", None)
-    accepted_tokens = getattr(input_batch, "num_accepted_tokens_cpu", None)
-    if not req_id_to_index or accepted_tokens is None:
-        return {}
-
-    min_draft_lens = {}
-    for req_id in req_ids:
-        req_index = req_id_to_index.get(req_id)
-        if req_index is not None:
-            min_draft_lens[req_id] = max(int(accepted_tokens[req_index]) - 1, 0)
-    return min_draft_lens
+from .globals import logger
 
 
 def _dcut_truncate(self, scheduler_output):
-    """Apply per-request draft_len caps cached by the previous step.
+    """Apply cached per-request draft caps without a GDN state floor.
 
-    Device-agnostic (pure scheduler-output bookkeeping); identical to CUDA.
+    The D-Cut recurrent and conv1d kernels read the previous accepted state
+    through independent device-side indices, so the current verifier length no
+    longer needs to preserve the previous accepted position.
     """
     ctrl = self._verify_adaptive_controller
-    _spec = getattr(scheduler_output, "scheduled_spec_decode_tokens", None)
-
-    if ctrl is None or not _spec:
+    scheduled_spec = getattr(
+        scheduler_output,
+        "scheduled_spec_decode_tokens",
+        None,
+    )
+    if ctrl is None or not scheduled_spec:
         return scheduler_output
 
-    orig_spec = scheduler_output.scheduled_spec_decode_tokens
-    # Draft positions that WOULD be verified this step without D-Cut, and the
-    # number of spec-decode requests — captured before we mutate anything.
-    full_draft = sum(len(t) for t in orig_spec.values())
-    n_spec_reqs = len(orig_spec)
+    original_spec = scheduler_output.scheduled_spec_decode_tokens
+    full_draft = sum(len(tokens) for tokens in original_spec.values())
+    num_spec_requests = len(original_spec)
+    new_spec = original_spec.copy()
+    new_num_scheduled = scheduler_output.num_scheduled_tokens.copy()
 
-    new_spec = orig_spec.copy()
-    new_num_sched = scheduler_output.num_scheduled_tokens.copy()
-    gdn_min_draft_lens = _get_gdn_min_draft_lens(self, orig_spec)
     target_draft_lens = {}
-    for req_id, draft_toks in orig_spec.items():
-        max_dl = len(draft_toks)
+    for req_id, draft_tokens in original_spec.items():
+        max_draft_len = len(draft_tokens)
         adaptive_len = ctrl.get_adaptive_draft_len(req_id)
         if adaptive_len is None:
-            adaptive_len = max_dl  # no cached decision -> full spec
-        adaptive_len = min(max(adaptive_len, 0), max_dl)
-        # Preserve the state slot selected by the previous speculative step.
-        # The extra query token means a previous accepted count of N requires
-        # at least N - 1 draft tokens in this step.
-        target_draft_lens[req_id] = max(
-            adaptive_len,
-            min(gdn_min_draft_lens.get(req_id, 0), max_dl),
+            adaptive_len = max_draft_len
+        target_draft_lens[req_id] = min(
+            max(adaptive_len, 0),
+            max_draft_len,
         )
-    _dbg = getattr(self, "_dcut_dbg_cnt", 0)
-    if _dbg < 20:
-        self._dcut_dbg_cnt = _dbg + 1
-        for rid, tdl in target_draft_lens.items():
-            al = ctrl.get_adaptive_draft_len(rid)
-            gm = gdn_min_draft_lens.get(rid, -1)
-#             # print(f"[DCUT_DBG] truncate: req={rid} adaptive={al} gdn_min={gm} target={tdl} max_dl={len(orig_spec[rid])}", flush=True)
 
-    _dbg2 = getattr(self, "_dcut_periodic_cnt", 0) + 1
-    self._dcut_periodic_cnt = _dbg2
-    if _dbg2 % 200 == 0:
-        n_none = sum(1 for rid in target_draft_lens if ctrl.get_adaptive_draft_len(rid) is None)
-        n_cached = len(target_draft_lens) - n_none
-        avg_target = sum(target_draft_lens.values()) / max(len(target_draft_lens), 1)
-        avg_gdn = sum(gdn_min_draft_lens.values()) / max(len(gdn_min_draft_lens), 1) if gdn_min_draft_lens else 0
-        print(f"[DCUT_PERIODIC] step={_dbg2} n_reqs={len(target_draft_lens)} n_adaptive_none={n_none} n_cached={n_cached} avg_target={avg_target:.2f} avg_gdn_min={avg_gdn:.2f} full_draft={full_draft}", flush=True)
+    trimmed_tokens = 0
+    for req_id, draft_tokens in list(new_spec.items()):
+        max_draft_len = len(draft_tokens)
+        target_len = target_draft_lens[req_id]
+        if target_len >= max_draft_len:
+            continue
 
-    tokens_delta = 0
-    for req_id, draft_toks in list(new_spec.items()):
-        max_dl = len(draft_toks)
-        adaptive_len = target_draft_lens[req_id]
-        if adaptive_len < max_dl:
-            diff = max_dl - adaptive_len
-            tokens_delta += diff
-            new_num_sched[req_id] -= diff
-            if adaptive_len:
-                new_spec[req_id] = draft_toks[:adaptive_len]
-            else:
-                # An empty entry still makes model_runner treat the step as
-                # speculative. Remove it so a full cut becomes normal decode.
-                new_spec.pop(req_id)
+        trimmed_tokens += max_draft_len - target_len
+        new_num_scheduled[req_id] -= max_draft_len - target_len
+        if target_len:
+            new_spec[req_id] = draft_tokens[:target_len]
+        else:
+            # An empty entry still makes model_runner treat this as a spec step.
+            new_spec.pop(req_id)
 
-    # Periodic debug: log every 200 steps to see what adaptive_len values are being used
-    _step_cnt = getattr(self, "_dcut_stat_steps", 0) + 1
-    if _step_cnt % 200 == 0:
-        avg_target = sum(target_draft_lens.values()) / max(len(target_draft_lens), 1) if target_draft_lens else 0
-        n_none = sum(1 for rid in target_draft_lens if ctrl.get_adaptive_draft_len(rid) is None)
-        n_zero = sum(1 for v in target_draft_lens.values() if v == 0)
-        n_small = sum(1 for v in target_draft_lens.values() if 0 < v <= 2)
-        n_medium = sum(1 for v in target_draft_lens.values() if 2 < v <= 8)
-        n_large = sum(1 for v in target_draft_lens.values() if v > 8)
-        print(f"[DCUT_PERIODIC] step={_step_cnt} n_reqs={len(target_draft_lens)} n_adaptive_none={n_none} n_target_zero={n_zero} n_small(1-2)={n_small} n_medium(3-8)={n_medium} n_large(9+)={n_large} avg_target={avg_target:.2f} full_draft={full_draft} tokens_delta={tokens_delta}", flush=True)
-    
-    _dcut_record_trim(self, full_draft, tokens_delta, n_spec_reqs)
+    _dcut_record_trim(
+        self,
+        full_draft,
+        trimmed_tokens,
+        num_spec_requests,
+    )
+    if trimmed_tokens == 0:
+        return scheduler_output
 
-    if tokens_delta > 0:
-        scheduler_output = replace(
-            scheduler_output,
-            scheduled_spec_decode_tokens=new_spec,
-            num_scheduled_tokens=new_num_sched,
-            total_num_scheduled_tokens=(
-                scheduler_output.total_num_scheduled_tokens - tokens_delta
-            ),
-        )
-    return scheduler_output
+    return replace(
+        scheduler_output,
+        scheduled_spec_decode_tokens=new_spec,
+        num_scheduled_tokens=new_num_scheduled,
+        total_num_scheduled_tokens=(scheduler_output.total_num_scheduled_tokens - trimmed_tokens),
+    )
 
 
 def _dcut_record_trim(self, full_draft: int, trimmed: int, n_spec_reqs: int) -> None:
@@ -171,8 +114,12 @@ def _dcut_record_trim(self, full_draft: int, trimmed: int, n_spec_reqs: int) -> 
     logger.info(
         "D-Cut verify trim: cut %d/%d draft positions (%.1f%% fewer verifies) "
         "over %d steps; avg %.2f->%.2f verified tok/spec-req",
-        trimmed_tot, full, pct, self._dcut_stat_steps,
-        full / reqs, kept / reqs,
+        trimmed_tot,
+        full,
+        pct,
+        self._dcut_stat_steps,
+        full / reqs,
+        kept / reqs,
     )
 
 
