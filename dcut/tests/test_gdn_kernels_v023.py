@@ -4,6 +4,7 @@ from pathlib import Path
 
 DCUT_ROOT = Path(__file__).resolve().parents[1]
 KERNEL_ROOT = DCUT_ROOT / "kernel"
+REPO_ROOT = DCUT_ROOT.parent
 
 
 def _read(relative_path: str) -> str:
@@ -52,12 +53,25 @@ def test_conv_kernel_accepts_zero_based_state_offsets() -> None:
 
 def test_torch_registration_has_graph_metadata() -> None:
     binding = _read("kernel/torch_extension/dcut_torch_binding.cpp")
+    conv_wrapper = _read(
+        "kernel/dcut_causal_conv1d/dcut_causal_conv1d_torch_adpt.h"
+    )
 
     assert "TORCH_LIBRARY_FRAGMENT(_C_ascend, ops)" in binding
     assert "TORCH_LIBRARY_IMPL(_C_ascend, PrivateUse1, ops)" in binding
     assert "TORCH_LIBRARY_IMPL(_C_ascend, Meta, ops)" in binding
     assert "Tensor(a!) state" in binding
     assert "Tensor(b!) conv_state" in binding
+    assert "DCUT_CAUSAL_CONV_RUN_MODE = 1" in conv_wrapper
+    assert "pad_slot_id, 1, output" not in conv_wrapper
+
+
+def test_acl_workspace_size_is_valid_tensor_shape() -> None:
+    adapter = (
+        REPO_ROOT / "csrc" / "aclnn_torch_adapter" / "op_api_common.h"
+    ).read_text(encoding="utf-8")
+
+    assert "at::empty({static_cast<int64_t>(workspace_size)}" in adapter
 
 
 def test_truncation_has_no_previous_acceptance_floor() -> None:

@@ -3,6 +3,8 @@
 
 namespace vllm_ascend {
 
+inline constexpr int64_t DCUT_CAUSAL_CONV_RUN_MODE = 1;
+
 at::Tensor npu_dcut_causal_conv1d(const at::Tensor& output, const at::Tensor& x, const at::Tensor& weight,
                                   const at::Tensor& conv_state, const c10::optional<at::Tensor>& bias,
                                   const c10::optional<at::Tensor>& query_start_loc,
@@ -14,7 +16,7 @@ at::Tensor npu_dcut_causal_conv1d(const at::Tensor& output, const at::Tensor& x,
   TORCH_CHECK(state_offsets.has_value(), "state_offsets cannot be empty.");
 
   EXEC_NPU_CMD(aclnnDcutCausalConv1d, x, weight, bias, conv_state, query_start_loc, cache_indices, c10::nullopt,
-               state_offsets, activation_mode, pad_slot_id, 1, output);
+               state_offsets, activation_mode, pad_slot_id, DCUT_CAUSAL_CONV_RUN_MODE, output);
   return output;
 }
 
