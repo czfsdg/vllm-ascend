@@ -22,6 +22,9 @@
 # 两个 AscendC 算子和 Torch 注册库一起构建
 bash dcut/kernel/build.sh --soc=ascend910b
 
+# A3 / runtime SOC ascend910_93
+bash dcut/kernel/build.sh --soc=ascend910_93
+
 # 也可以只构建一个 AscendC 算子
 bash dcut/kernel/build.sh \
   --ops=dcut_recurrent_gated_delta_rule \
@@ -31,7 +34,12 @@ bash dcut/kernel/build.sh \
   --soc=ascend910b
 ```
 
-A3 使用 `--soc=ascend910_93`，Ascend 950 使用 `--soc=ascend950`；310P 暂未接入。脚本通过临时符号链接复用 vllm-ascend 的原生 custom-op 工具链，并使用独立的 `dcut` vendor，退出时会删除链接，不会修改或覆盖 `csrc/` 源码和已有的 `custom_transformer` 包。AscendC 安装包输出到 `csrc/output/*.run`。
+A3 使用 `--soc=ascend910_93`，Ascend 950 使用 `--soc=ascend950`；310P 暂未接入。`--soc` 必须与运行时识别的 SOC 一致，不能复制改名其他 SOC 的 config/kernel 目录代替重新编译。脚本通过临时符号链接复用 vllm-ascend 的原生 custom-op 工具链，并使用独立的 `dcut` vendor，退出时会删除链接，不会修改或覆盖 `csrc/` 源码和已有的 `custom_transformer` 包。自定义 vendor 的 AscendC 安装包输出到 `csrc/build/cann-ops-transformer-dcut_linux-*.run`。
+
+> The build SOC must exactly match the runtime SOC. In particular, build A3
+> with `--soc=ascend910_93`; do not copy or rename 910B config/kernel folders.
+> Custom-vendor packages are emitted as
+> `csrc/build/cann-ops-transformer-dcut_linux-*.run`.
 
 `--ops` 适合分别编译和排查单个算子；实际运行 D-Cut 前，建议使用默认命令把两个算子构建到同一个 `dcut_transformer` 安装包。
 
@@ -41,7 +49,7 @@ The default build produces one package containing both D-Cut operators. Install
 that package into the same CANN OPP tree used by the service:
 
 ```bash
-DCUT_RUN="$(ls -t csrc/output/*.run | head -n 1)"
+DCUT_RUN="$(ls -t csrc/build/cann-ops-transformer-dcut_linux-*.run | head -n 1)"
 test -n "${DCUT_RUN}"
 "${DCUT_RUN}" \
   --install-path=/usr/local/Ascend/cann-9.0.1/opp

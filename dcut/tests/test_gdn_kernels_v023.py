@@ -51,6 +51,22 @@ def test_conv_kernel_accepts_zero_based_state_offsets() -> None:
     assert "stateTokenOffset = ReadNumAcceptedTokensValue(seq);" in kernel
 
 
+def test_conv_host_registers_explicit_dcut_name() -> None:
+    tiling = _read(
+        "kernel/dcut_causal_conv1d/op_host/dcut_causal_conv1d_tiling.cpp"
+    )
+    infershape = _read(
+        "kernel/dcut_causal_conv1d/op_host/dcut_causal_conv1d_infershape.cpp"
+    )
+
+    assert "IMPL_OP_OPTILING(DcutCausalConv1d)" in tiling
+    assert "IMPL_OP_INFERSHAPE(DcutCausalConv1d)" in infershape
+    for source in (tiling, infershape):
+        assert "#define CausalConv1d" not in source
+        assert "causal_conv1d_tiling.cpp\"" not in source
+        assert "causal_conv1d_infershape.cpp\"" not in source
+
+
 def test_torch_registration_has_graph_metadata() -> None:
     binding = _read("kernel/torch_extension/dcut_torch_binding.cpp")
     conv_wrapper = _read(
