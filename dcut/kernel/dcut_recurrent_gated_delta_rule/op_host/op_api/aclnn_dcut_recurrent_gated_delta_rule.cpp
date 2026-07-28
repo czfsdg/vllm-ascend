@@ -6,6 +6,7 @@
 #include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
 #include "opdev/common_types.h"
+#include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_executor.h"
 #include "opdev/op_log.h"
@@ -116,7 +117,7 @@ aclnnStatus aclnnDcutRecurrentGatedDeltaRuleGetWorkspaceSize(
     const aclTensor* actual_seq_lengths, const aclTensor* ssm_state_indices,
     const aclTensor* g, const aclTensor* gk,
     const aclTensor* num_accepted_tokens, float scale_value, aclTensor* out,
-    uint64_t* workspace_size, aclOpExecutor** executor) {
+    uint64_t* workspaceSize, aclOpExecutor** executor) {
   L2_DFX_PHASE_1(
       aclnnDcutRecurrentGatedDeltaRule,
       DFX_IN(query, key, value, beta, state_ref, actual_seq_lengths,
@@ -168,16 +169,16 @@ aclnnStatus aclnnDcutRecurrentGatedDeltaRuleGetWorkspaceSize(
     return ACLNN_ERR_INNER_NULLPTR;
   }
 
-  *workspace_size = unique_executor->GetWorkspaceSize();
+  *workspaceSize = unique_executor->GetWorkspaceSize();
   unique_executor.ReleaseTo(executor);
   return ACLNN_SUCCESS;
 }
 
 aclnnStatus aclnnDcutRecurrentGatedDeltaRule(
-    void* workspace, uint64_t workspace_size, aclOpExecutor* executor,
+    void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
     aclrtStream stream) {
   L2_DFX_PHASE_2(aclnnDcutRecurrentGatedDeltaRule);
-  return CommonOpExecutorRun(workspace, workspace_size, executor, stream);
+  return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }
 
 }  // extern "C"

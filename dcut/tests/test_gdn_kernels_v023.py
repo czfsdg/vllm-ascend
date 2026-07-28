@@ -97,8 +97,16 @@ def test_recurrent_opapi_uses_explicit_dcut_dfx_names() -> None:
     assert "L0_DFX(DcutRecurrentGatedDeltaRule" in l0_source
     assert "L2_DFX_PHASE_1(" in aclnn_source
     assert "aclnnDcutRecurrentGatedDeltaRule," in aclnn_source
+    assert '#include "opdev/make_op_executor.h"' in aclnn_source
+    assert "uint64_t* workspaceSize" in aclnn_source
+    assert "*workspaceSize = unique_executor->GetWorkspaceSize()" in aclnn_source
     assert (
         "L2_DFX_PHASE_2(aclnnDcutRecurrentGatedDeltaRule)" in aclnn_source
+    )
+    assert "uint64_t workspaceSize" in aclnn_source
+    assert (
+        "CommonOpExecutorRun(workspace, workspaceSize, executor, stream)"
+        in aclnn_source
     )
     assert "l0op::DcutRecurrentGatedDeltaRule(" in aclnn_source
     assert "aclnnDcutRecurrentGatedDeltaRuleGetWorkspaceSize(" in aclnn_header

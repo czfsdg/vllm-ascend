@@ -16,10 +16,10 @@ aclnnDcutRecurrentGatedDeltaRuleGetWorkspaceSize(
     const aclTensor* actual_seq_lengths, const aclTensor* ssm_state_indices,
     const aclTensor* g, const aclTensor* gk,
     const aclTensor* num_accepted_tokens, float scale_value, aclTensor* out,
-    uint64_t* workspace_size, aclOpExecutor** executor);
+    uint64_t* workspaceSize, aclOpExecutor** executor);
 
 __attribute__((visibility("default"))) aclnnStatus
-aclnnDcutRecurrentGatedDeltaRule(void* workspace, uint64_t workspace_size,
+aclnnDcutRecurrentGatedDeltaRule(void* workspace, uint64_t workspaceSize,
                                  aclOpExecutor* executor, aclrtStream stream);
 
 #ifdef __cplusplus
