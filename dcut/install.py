@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 
 from .globals import ENV_CONFIG, logger
-from .patch_gdn_v023 import _patch_gdn_dcut
+from .patch_gdn_v023 import _enable_gdn_piecewise_graph, _patch_gdn_dcut
 from .patch_proposer import _patch_proposer
 from .patch_runner import _patch_runner
 from .patch_worker import _patch_worker
@@ -59,6 +59,11 @@ def install(*args, **kwargs) -> None:
         return
     _g._INSTALLED = True
     try:
+        if os.environ.get(ENV_CONFIG) and not _enable_gdn_piecewise_graph():
+            raise RuntimeError(
+                "D-Cut could not configure GDN capture for PIECEWISE ACLGraph"
+            )
+
         from vllm.v1.worker.worker_base import WorkerBase
 
         if getattr(WorkerBase, "_dcut_defer_armed", False):

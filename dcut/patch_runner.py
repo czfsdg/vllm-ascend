@@ -6,7 +6,8 @@ import os
 
 from .controller import _dcut_init_controller, _dcut_enable_drafter_probs
 from .dcut_profile import _adaptive_profile_run
-from .globals import ENV_FULL_DECODE_ONLY, logger
+from .globals import ENV_CONFIG, ENV_FULL_DECODE_ONLY, logger
+from .patch_gdn_v023 import _enable_gdn_piecewise_graph
 from .probs import (
     _dcut_queue_probs,
     _maybe_process_adaptive_probs,
@@ -27,6 +28,14 @@ def _patch_runner() -> None:
     _orig_init = R.__init__
 
     def __init__(self, *a, **k):
+        if os.environ.get(ENV_CONFIG):
+            vllm_config = k.get("vllm_config")
+            if vllm_config is None and a:
+                vllm_config = a[0]
+            if not _enable_gdn_piecewise_graph(vllm_config):
+                raise RuntimeError(
+                    "D-Cut could not enable GDN capture in PIECEWISE ACLGraph"
+                )
         _orig_init(self, *a, **k)
         try:
             _dcut_init_controller(self)
@@ -140,5 +149,5 @@ def _patch_runner() -> None:
     R._dcut_patched = True
 
     logger.info(
-        "D-Cut: using the native vLLM 0.23 PIECEWISE GDN splitting path."
+        "D-Cut: using graph-captured GDN in the vLLM 0.23 PIECEWISE path."
     )

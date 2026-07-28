@@ -55,6 +55,16 @@ export VLLM_DCUT_TORCH_OP_LIBRARY=/absolute/path/dcut_torch_ops.so
 
 ## PIECEWISE 入图边界
 
-vLLM Ascend 0.23 的 `forward` 和 `torch.ops.vllm.qwen_gdn_attention_core` 保持不变，后者继续作为 PIECEWISE splitting op。D-Cut 只替换 splitting op 调用的 `_forward_core`，并只在 speculative 分支调用这两个新算子；prefill、non-spec 分支和 GDN metadata 生命周期不变。
+vLLM Ascend 0.23 的 `forward` 和 `torch.ops.vllm.qwen_gdn_attention_core` 保持不变。D-Cut 在插件加载早期仅从 PIECEWISE `splitting_ops` 中移除 `vllm::qwen_gdn_attention_core`，因此该 custom op 及其调用的两个新算子会随所在 FX 分片一起被 ACL Graph 捕获；其余 attention splitting 边界不变。D-Cut 只替换 custom op 调用的 `_forward_core`，并只在 speculative 分支调用这两个新算子；prefill、non-spec 分支和 vLLM 0.23 `GDNSpecDecodeMetadata` 生命周期不变。
+
+启动日志应包含：
+
+```text
+D-Cut: GDN core is graph-capturable in PIECEWISE mode
+```
+
+同时打印出的 `compilation_config.splitting_ops` 中不应再包含
+`vllm::qwen_gdn_attention_core`。这两个条件用于确认 GDN 不再作为
+PIECEWISE 图间 eager 边界执行。
 
 两个新 schema 都提供 Meta 实现，描述输出 shape 和 state alias，供 `torch.compile`/ACL Graph 做 shape 与副作用分析。最终仍需要在目标 NPU 上跑 PIECEWISE ACL Graph 的精度和 replay 验证。

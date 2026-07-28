@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Install D-Cut GDN operators without modifying vllm-ascend sources."""
+"""Install graph-capturable D-Cut GDN operators for vLLM 0.23."""
 
 from __future__ import annotations
 
@@ -15,6 +15,69 @@ _REQUIRED_OPS = (
     "npu_dcut_causal_conv1d",
     "npu_dcut_recurrent_gated_delta_rule",
 )
+GDN_PIECEWISE_SPLITTING_OP = "vllm::qwen_gdn_attention_core"
+
+
+def _without_gdn_piecewise_split(ops: list[str]) -> list[str]:
+    """Keep all PIECEWISE boundaries except the graph-safe GDN core."""
+    return [op for op in ops if op != GDN_PIECEWISE_SPLITTING_OP]
+
+
+def _enable_gdn_piecewise_graph(vllm_config=None) -> bool:
+    """Make the GDN core part of its surrounding PIECEWISE ACLGraph.
+
+    vLLM adds ``qwen_gdn_attention_core`` to the default attention splitting
+    ops. A splitting op is deliberately executed between graph pieces, so
+    patching only its Python implementation can never put GDN in the graph.
+
+    Update both the class default (before ``VllmConfig`` finalization) and an
+    optional live config (worker-side fallback). The D-Cut kernels have Meta
+    implementations and explicit mutation aliases, and vLLM 0.23 owns the
+    stable graph inputs through ``GDNSpecDecodeMetadata``.
+    """
+    try:
+        from vllm.config.compilation import CompilationConfig
+    except Exception as exc:  # pragma: no cover - depends on runtime imports
+        logger.warning("D-Cut: cannot configure PIECEWISE GDN capture: %s", exc)
+        return False
+
+    default_ops = getattr(CompilationConfig, "_attention_ops", None)
+    if default_ops is not None:
+        CompilationConfig._attention_ops = _without_gdn_piecewise_split(
+            list(default_ops)
+        )
+
+    if vllm_config is None:
+        return True
+
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if compilation_config is None:
+        logger.warning(
+            "D-Cut: VllmConfig has no compilation_config; "
+            "PIECEWISE GDN capture was not enabled."
+        )
+        return False
+
+    splitting_ops = getattr(compilation_config, "splitting_ops", None)
+    if splitting_ops is not None:
+        compilation_config.splitting_ops = _without_gdn_piecewise_split(
+            list(splitting_ops)
+        )
+
+    configured_ops = getattr(compilation_config, "splitting_ops", None)
+    if configured_ops is not None and GDN_PIECEWISE_SPLITTING_OP in configured_ops:
+        logger.error(
+            "D-Cut: failed to remove %s from PIECEWISE splitting_ops.",
+            GDN_PIECEWISE_SPLITTING_OP,
+        )
+        return False
+
+    logger.info(
+        "D-Cut: GDN core is graph-capturable in PIECEWISE mode "
+        "(removed %s from splitting_ops).",
+        GDN_PIECEWISE_SPLITTING_OP,
+    )
+    return True
 
 
 def _ops_registered() -> bool:
@@ -62,7 +125,7 @@ def _load_dcut_torch_ops() -> bool:
 
 
 def _patch_gdn_dcut() -> bool:
-    """Replace only ``_forward_core`` behind the native PIECEWISE split op."""
+    """Replace ``_forward_core`` used by the graph-captured GDN custom op."""
     try:
         from vllm_ascend.ops import gdn as ascend_gdn
         from vllm_ascend.patch.worker import patch_qwen3_5 as qwen_patch
@@ -87,13 +150,14 @@ def _patch_gdn_dcut() -> bool:
     dcut_forward_core = DcutGatedDeltaNetAttention._forward_core
     dcut_forward_core._dcut_patched = True  # type: ignore[attr-defined]
 
-    # ``forward`` remains the vllm-ascend implementation and therefore still
-    # enters torch.ops.vllm.qwen_gdn_attention_core, the PIECEWISE split point.
-    # Only the Python body invoked from that split point changes.
+    # ``forward`` remains the vllm-ascend implementation and still enters
+    # torch.ops.vllm.qwen_gdn_attention_core. The installer removes only this
+    # op from PIECEWISE splitting_ops, so the custom op and the D-Cut kernels
+    # it dispatches are captured inside the surrounding graph piece.
     ascend_gdn.AscendGatedDeltaNetAttention._forward_core = dcut_forward_core
     target_class._forward_core = dcut_forward_core
     logger.info(
         "D-Cut: enabled independent recurrent/conv state selection inside "
-        "the native vLLM 0.23 PIECEWISE GDN split op."
+        "the vLLM 0.23 PIECEWISE graph-captured GDN core."
     )
     return True
