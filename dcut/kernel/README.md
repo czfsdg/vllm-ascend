@@ -35,10 +35,51 @@ A3 使用 `--soc=ascend910_93`，Ascend 950 使用 `--soc=ascend950`；310P 暂�
 
 `--ops` 适合分别编译和排查单个算子；实际运行 D-Cut 前，建议使用默认命令把两个算子构建到同一个 `dcut_transformer` 安装包。
 
+### Install and validate the AscendC package
+
+The default build produces one package containing both D-Cut operators. Install
+that package into the same CANN OPP tree used by the service:
+
+```bash
+DCUT_RUN="$(ls -t csrc/output/*.run | head -n 1)"
+test -n "${DCUT_RUN}"
+"${DCUT_RUN}" \
+  --install-path=/usr/local/Ascend/cann-9.0.1/opp
+```
+
+Before starting vLLM, verify that the installed custom opapi library exports
+both API phases for both operators:
+
+```bash
+DCUT_OPP_ROOT=/usr/local/Ascend/cann-9.0.1/opp/vendors/dcut_transformer
+DCUT_CUST_OPAPI="${DCUT_OPP_ROOT}/op_api/lib/libcust_opapi.so"
+
+test -f "${DCUT_CUST_OPAPI}"
+if ldd "${DCUT_CUST_OPAPI}" | grep -q 'not found'; then
+  ldd "${DCUT_CUST_OPAPI}"
+  exit 1
+fi
+nm -D "${DCUT_CUST_OPAPI}" | grep -E \
+  'aclnnDcut(CausalConv1d|RecurrentGatedDeltaRule)(GetWorkspaceSize)?$'
+```
+
+The final command must list four symbols. Point the existing ACLNN loader at
+this vendor before the Torch registration library is loaded:
+
+```bash
+export ASCEND_CUSTOM_OPP_PATH="${DCUT_OPP_ROOT}:${ASCEND_CUSTOM_OPP_PATH:-}"
+export LD_LIBRARY_PATH="${DCUT_OPP_ROOT}/op_api/lib:${LD_LIBRARY_PATH:-}"
+```
+
+`ASCEND_CUSTOM_OPP_PATH` is the manual custom-op loading control used by the
+adapter: it opens each vendor's `op_api/lib/libcust_opapi.so` and resolves the
+requested ACLNN symbol there. No extra D-Cut environment variable or
+`LD_PRELOAD` is required.
+
 Torch 注册库可单独构建：
 
 ```bash
-bash dcut/kernel/build.sh --torch-only
+bash dcut/kernel/build.sh --torch-only -j8
 ```
 
 默认输出为：
@@ -47,11 +88,69 @@ bash dcut/kernel/build.sh --torch-only
 dcut/kernel/build/torch_extension/dcut_torch_ops.so
 ```
 
+`-j8` 显式指定 Torch 注册库的并行编译任务数，可按机器 CPU
+资源调整。在容器采用双源码目录时，例如主 `vllm-ascend` editable
+安装位于 `/vllm-workspace/vllm-ascend`、D-Cut 源码位于 `/data` 下的
+独立 clone，应从 D-Cut clone 的仓库根目录执行上述构建命令；不需要
+修改或重新安装 `/vllm-workspace/vllm-ascend`。
+
 D-Cut 插件会在 worker 初始化、ACL Graph 捕获之前自动加载这个默认路径。如果库放在别处，设置：
 
 ```bash
-export VLLM_DCUT_TORCH_OP_LIBRARY=/absolute/path/dcut_torch_ops.so
+export VLLM_PLUGINS=ascend,dcut_adaptive_verify
+export VLLM_DCUT_TORCH_OP_LIBRARY=\
+/absolute/path/to/vllm-ascend/dcut/kernel/build/torch_extension/dcut_torch_ops.so
+
+if [[ ! -f "${VLLM_DCUT_TORCH_OP_LIBRARY}" ]]; then
+  echo "Missing D-Cut Torch ops: ${VLLM_DCUT_TORCH_OP_LIBRARY}"
+  exit 1
+fi
 ```
+
+不需要设置 `LD_PRELOAD`，也不需要在启动前用单独的 Python 进程保持
+算子库加载状态。插件会在每个需要的进程中调用
+`torch.ops.load_library()`。
+
+启动服务前可用下面的命令验证 schema、NPU 实现和 Meta 实现均已注册：
+
+```bash
+python - <<'PY'
+import os
+
+import torch
+
+library_path = os.environ["VLLM_DCUT_TORCH_OP_LIBRARY"]
+torch.ops.load_library(library_path)
+
+op_names = (
+    "npu_dcut_causal_conv1d",
+    "npu_dcut_recurrent_gated_delta_rule",
+)
+for op_name in op_names:
+    qualified_name = f"_C_ascend::{op_name}"
+    print("operator:", getattr(torch.ops._C_ascend, op_name))
+    print(
+        "schema:",
+        torch._C._dispatch_find_schema_or_throw(qualified_name, "").schema(),
+    )
+    print(
+        "PrivateUse1:",
+        torch._C._dispatch_has_kernel_for_dispatch_key(
+            qualified_name, "PrivateUse1"
+        ),
+    )
+    print(
+        "Meta:",
+        torch._C._dispatch_has_kernel_for_dispatch_key(
+            qualified_name, "Meta"
+        ),
+    )
+PY
+```
+
+两个算子的 `PrivateUse1` 和 `Meta` 都应输出 `True`。算子名包含
+`npu_` 前缀；不带前缀的 `dcut_causal_conv1d` 和
+`dcut_recurrent_gated_delta_rule` 不是注册名。
 
 ## PIECEWISE 入图边界
 

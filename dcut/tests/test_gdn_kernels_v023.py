@@ -80,6 +80,34 @@ def test_torch_registration_links_npu_bridge() -> None:
     assert '"${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUBridge.cpp"' in cmake
 
 
+def test_recurrent_opapi_uses_explicit_dcut_dfx_names() -> None:
+    l0_source = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/op_host/op_api/"
+        "dcut_recurrent_gated_delta_rule.cpp"
+    )
+    aclnn_source = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/op_host/op_api/"
+        "aclnn_dcut_recurrent_gated_delta_rule.cpp"
+    )
+    aclnn_header = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/op_host/op_api/"
+        "aclnn_dcut_recurrent_gated_delta_rule.h"
+    )
+
+    assert "L0_DFX(DcutRecurrentGatedDeltaRule" in l0_source
+    assert "L2_DFX_PHASE_1(" in aclnn_source
+    assert "aclnnDcutRecurrentGatedDeltaRule," in aclnn_source
+    assert (
+        "L2_DFX_PHASE_2(aclnnDcutRecurrentGatedDeltaRule)" in aclnn_source
+    )
+    assert "l0op::DcutRecurrentGatedDeltaRule(" in aclnn_source
+    assert "aclnnDcutRecurrentGatedDeltaRuleGetWorkspaceSize(" in aclnn_header
+    for source in (l0_source, aclnn_source):
+        assert "#define L0_DFX" not in source
+        assert "#define RecurrentGatedDeltaRule" not in source
+        assert "../../../../../csrc/attention/" not in source
+
+
 def test_truncation_has_no_previous_acceptance_floor() -> None:
     truncate = _read("truncate.py")
 
