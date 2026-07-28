@@ -67,6 +67,42 @@ def test_conv_host_registers_explicit_dcut_name() -> None:
         assert "causal_conv1d_infershape.cpp\"" not in source
 
 
+def test_recurrent_host_registers_explicit_dcut_name() -> None:
+    tiling = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/vendor/op_host/"
+        "recurrent_gated_delta_rule_tiling.cpp"
+    )
+    arch35 = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/vendor/op_host/arch35/"
+        "recurrent_gated_delta_rule_tiling_arch35.cpp"
+    )
+    infershape = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/op_host/"
+        "dcut_recurrent_gated_delta_rule_infershape.cpp"
+    )
+
+    assert "IMPL_OP_OPTILING(DcutRecurrentGatedDeltaRule)" in tiling
+    assert (
+        "REGISTER_OPS_TILING_TEMPLATE(DcutRecurrentGatedDeltaRule, "
+        "DcutRecurrentGatedDeltaRuleTiling, 0)"
+    ) in tiling
+    assert (
+        "REGISTER_OPS_TILING_TEMPLATE(DcutRecurrentGatedDeltaRule,"
+    ) in arch35
+    assert "DcutRecurrentGatedDeltaRuleTilingArch35" in arch35
+    assert "IMPL_OP_INFERSHAPE(DcutRecurrentGatedDeltaRule)" in infershape
+
+    assert "IMPL_OP_OPTILING(RecurrentGatedDeltaRule)" not in tiling
+    assert (
+        "REGISTER_OPS_TILING_TEMPLATE(RecurrentGatedDeltaRule"
+    ) not in tiling
+    assert (
+        "REGISTER_OPS_TILING_TEMPLATE(RecurrentGatedDeltaRule"
+    ) not in arch35
+    assert "#define RecurrentGatedDeltaRule" not in infershape
+    assert "recurrent_gated_delta_rule_infershape.cpp\"" not in infershape
+
+
 def test_torch_registration_has_graph_metadata() -> None:
     binding = _read("kernel/torch_extension/dcut_torch_binding.cpp")
     conv_wrapper = _read(
