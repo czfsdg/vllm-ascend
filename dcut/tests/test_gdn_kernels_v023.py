@@ -74,6 +74,12 @@ def test_acl_workspace_size_is_valid_tensor_shape() -> None:
     assert "at::empty({static_cast<int64_t>(workspace_size)}" in adapter
 
 
+def test_torch_registration_links_npu_bridge() -> None:
+    cmake = _read("kernel/torch_extension/CMakeLists.txt")
+
+    assert '"${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUBridge.cpp"' in cmake
+
+
 def test_truncation_has_no_previous_acceptance_floor() -> None:
     truncate = _read("truncate.py")
 

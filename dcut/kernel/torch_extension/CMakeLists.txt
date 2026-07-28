@@ -38,7 +38,10 @@ if(NOT DEFINED ASCEND_HOME_PATH)
     endif()
 endif()
 
-add_library(dcut_torch_ops SHARED dcut_torch_binding.cpp)
+add_library(dcut_torch_ops SHARED
+    dcut_torch_binding.cpp
+    "${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUBridge.cpp"
+)
 set_target_properties(dcut_torch_ops PROPERTIES PREFIX "" OUTPUT_NAME "dcut_torch_ops")
 target_include_directories(dcut_torch_ops PRIVATE
     ${TORCH_INCLUDE_DIRS}
