@@ -20,9 +20,10 @@ Only active for parallel speculative methods: ``method=dflash``, or
 ------------------------------------------------------------------------------
 GPU -> NPU deltas include two D-Cut state-aware custom operators for GDN
 spec-decode. The Python control loop still patches only the NPU runner and the
-``_forward_core`` invoked by the GDN custom op. The plugin removes that one
-op from PIECEWISE ``splitting_ops`` so the GDN core is captured with its
-surrounding graph piece:
+``_forward_core`` invoked by the GDN custom op. By default the plugin preserves
+that custom op in PIECEWISE ``splitting_ops``, so GDN remains an eager boundary.
+Set ``VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=1`` to remove the boundary and
+capture GDN with its surrounding graph piece:
 
   1. Patch targets: ``NPUModelRunner`` (vllm_ascend.worker.model_runner_v1) /
      ``NPUWorker`` (vllm_ascend.worker.worker) / the Ascend spec-decode

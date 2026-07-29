@@ -57,6 +57,13 @@ python dcut/tests/validate_gdn_ops_npu.py --mode graph --replays 3
 
 ## PIECEWISE 端到端边界
 
+生产 PIECEWISE 入图验证必须显式启用下列开关；默认值 `0` 会保留 GDN
+splitting boundary，使 GDN 不入图：
+
+```bash
+export VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=1
+```
+
 这个脚本证明算子本身的精度和 ACL Graph replay 安全性。它不能单独证明
 vLLM 的实际 PIECEWISE FX 分片一定包含 GDN。完成算子验证后仍需用
 PIECEWISE 启动服务并发起真实请求，同时确认启动日志包含：

@@ -11,16 +11,26 @@ def _read(relative_path: str) -> str:
     return (DCUT_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_piecewise_gdn_core_is_moved_inside_graph() -> None:
+def test_piecewise_gdn_core_is_switch_gated() -> None:
     patch = _read("patch_gdn_v023.py")
     core = _read("gdn_forward_v023.py")
     install = _read("install.py")
     runner = _read("patch_runner.py")
+    envs = (REPO_ROOT / "vllm_ascend" / "envs.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "target_class._forward_core = dcut_forward_core" in patch
     assert "target_class.forward =" not in patch
     assert "torch.ops.vllm.qwen_gdn_attention_core" in core
     assert 'GDN_PIECEWISE_SPLITTING_OP = "vllm::qwen_gdn_attention_core"' in patch
+    assert '"VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE": lambda: bool(' in envs
+    assert 'os.getenv("VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE", "0")' in envs
+    assert patch.index(
+        "if not _gdn_piecewise_graph_enabled():"
+    ) < patch.index(
+        "from vllm.config.compilation import CompilationConfig"
+    )
     assert "CompilationConfig._attention_ops = _without_gdn_piecewise_split" in patch
     assert "compilation_config.splitting_ops = _without_gdn_piecewise_split" in patch
     assert "_enable_gdn_piecewise_graph()" in install
