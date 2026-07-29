@@ -5,16 +5,50 @@ from __future__ import annotations
 
 import os
 
-from .globals import ENV_CONFIG, logger
-from .patch_attention import _patch_attention
-from .patch_gdn_v023 import (
-    _enable_gdn_piecewise_graph,
-    _gdn_piecewise_graph_enabled,
-    _patch_gdn_dcut,
+# Module-level print so the user can see WHICH process imports dcut.install.
+# Using print(flush=True) because logger.* is silently swallowed in the dcut
+# vLLM service process.
+print(
+    f"[D-Cut] install module imported by pid={os.getpid()} "
+    f"(VLLM_DCUT_GDN_PIECEWISE={os.environ.get('VLLM_DCUT_GDN_PIECEWISE', '<unset>')}).",
+    flush=True,
 )
+
+from .globals import ENV_CONFIG, logger
+# Importing patch_piecewise triggers its module-level arming of the
+# CompilationConfig.set_splitting_ops_for_v1 patch — this is what makes the
+# GDN PIECEWISE patch take effect in the EngineCore process (where
+# install() is never called).  The explicit _arm_* call in install() below
+# is kept as a belt-and-suspenders for the Worker process.
+from .patch_piecewise import _arm_gdn_piecewise_splitting_patch
 from .patch_proposer import _patch_proposer
 from .patch_runner import _patch_runner
 from .patch_worker import _patch_worker
+
+
+def _select_gdn_patch():
+    """Pick the GDN _forward_core patch.
+
+    - VLLM_DCUT_GDN_PIECEWISE=1 → patch_gdn.py (graph-capture-aware, uses
+      pre-allocated static buffers for conv1d/recurrent during ACLGraph
+      capture/replay).
+    - Otherwise → patch_gdn_v023.py (eager-only, uses dcut custom ops
+      npu_dcut_causal_conv1d / npu_dcut_recurrent_gated_delta_rule).
+    """
+    env = os.environ.get("VLLM_DCUT_GDN_PIECEWISE", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        from .patch_gdn import _patch_gdn_dcut as _impl
+        logger.warning(
+            "D-Cut: using PIECEWISE-aware GDN patch (patch_gdn.py) — "
+            "graph capture branches enabled."
+        )
+    else:
+        from .patch_gdn_v023 import _patch_gdn_dcut as _impl
+        logger.warning(
+            "D-Cut: using eager GDN patch (patch_gdn_v023.py) — "
+            "no graph capture branches."
+        )
+    return _impl
 
 
 def _apply_patches_once() -> None:
@@ -29,17 +63,10 @@ def _apply_patches_once() -> None:
     # on every subsequent worker construction and does not spam the log.
     _g._PATCHED = True
     try:
-        if os.environ.get(ENV_CONFIG) and not _patch_gdn_dcut():
+        _patch_gdn = _select_gdn_patch()
+        if os.environ.get(ENV_CONFIG) and not _patch_gdn():
             raise RuntimeError(
                 "D-Cut GDN state operators are unavailable; run `bash dcut/kernel/build.sh` first"
-            )
-        if (
-            os.environ.get(ENV_CONFIG)
-            and _gdn_piecewise_graph_enabled()
-            and not _patch_attention()
-        ):
-            raise RuntimeError(
-                "D-Cut could not patch full attention for PIECEWISE GDN capture"
             )
         _patch_proposer()
         _patch_runner()
@@ -65,6 +92,12 @@ def install(*args, **kwargs) -> None:
     serving.  So here we only *arm* a deferred trigger on the vLLM-core
     ``WorkerBase`` (safe to import at this point) and apply the real patches on
     the first worker construction, by which time vllm-ascend is fully imported.
+
+    The GDN PIECEWISE splitting_ops patch is an exception: it wraps a
+    vLLM-core ``CompilationConfig`` method that runs during config creation
+    (before any worker exists), so it must be armed here *before* the deferred
+    trigger.  Only vLLM-core symbols are imported — no vllm_ascend.worker —
+    so there is no circular-import risk.
     """
     from . import globals as _g
 
@@ -72,10 +105,11 @@ def install(*args, **kwargs) -> None:
         return
     _g._INSTALLED = True
     try:
-        if os.environ.get(ENV_CONFIG) and not _enable_gdn_piecewise_graph():
-            raise RuntimeError(
-                "D-Cut could not configure GDN capture for PIECEWISE ACLGraph"
-            )
+        # Arm the GDN PIECEWISE splitting_ops patch early — must run before
+        # vllm-ascend platform creates the compilation config.  (Also armed
+        # at module-import time above, but re-call here for the Worker
+        # process in case the import was somehow skipped.)
+        _arm_gdn_piecewise_splitting_patch()
 
         from vllm.v1.worker.worker_base import WorkerBase
 
@@ -92,10 +126,11 @@ def install(*args, **kwargs) -> None:
 
         WorkerBase.__init__ = __init__
         WorkerBase._dcut_defer_armed = True
-        logger.info(
-            "D-Cut deferred installer armed on WorkerBase "
+        print(
+            "[D-Cut] deferred installer armed on WorkerBase "
             "(patches apply on first worker init to avoid a vllm-ascend "
-            "circular import)."
+            "circular import).",
+            flush=True,
         )
     except Exception as e:  # pragma: no cover - never break vLLM startup
         logger.error("D-Cut install (arm) failed (vLLM continues normally): %s", e)
