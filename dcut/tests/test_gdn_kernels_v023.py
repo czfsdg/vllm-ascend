@@ -50,6 +50,10 @@ def test_piecewise_gdn_core_is_switch_gated() -> None:
     assert "_dcut_gdn_piecewise_capture_sizes" in runner
     assert "captured during startup; using eager" in runner
     assert "captured PIECEWISE GDN token bucket" in runner
+    assert "PIECEWISE capture dummy token_bucket=" in runner
+    assert "torch.npu.is_current_stream_capturing()" in core
+    assert "GDN core entered an active PIECEWISE ACLGraph" in core
+    assert "executing at a graph boundary" in core
     assert "and not _patch_attention()" in install
 
 

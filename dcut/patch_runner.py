@@ -90,6 +90,17 @@ def _patch_runner() -> None:
             is_profile=bool(is_profile),
             is_graph_capturing=bool(is_graph_capturing),
         )
+        if is_graph_capturing:
+            from vllm.config import CUDAGraphMode
+
+            if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+                logger.warning(
+                    "D-Cut: PIECEWISE capture dummy token_bucket=%d "
+                    "enabled=%s real_warmup=%s.",
+                    num_tokens,
+                    capture_dummy,
+                    getattr(self, "_dcut_in_real_warmup", False),
+                )
         previous = getattr(
             self,
             "_dcut_piecewise_capture_dummy",
@@ -196,7 +207,7 @@ def _patch_runner() -> None:
             self._dcut_gdn_piecewise_capture_sizes.add(
                 num_tokens_padded
             )
-            logger.info(
+            logger.warning(
                 "D-Cut: captured PIECEWISE GDN token bucket %d",
                 num_tokens_padded,
             )

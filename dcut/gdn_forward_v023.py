@@ -37,6 +37,7 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 from .gdn_buffers import _dcut_get_gdn_piecewise_spec_bufs
+from .globals import logger
 
 
 DCUT_PAD_SLOT_ID = -1
@@ -207,11 +208,29 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             == CUDAGraphMode.PIECEWISE
         ):
+            if not torch.npu.is_current_stream_capturing():
+                raise RuntimeError(
+                    "D-Cut GDN reached the PIECEWISE capture branch outside "
+                    "an active ACLGraph stream capture; the GDN core is still "
+                    "executing at a graph boundary"
+                )
             piecewise_spec_bufs = _dcut_get_gdn_piecewise_spec_bufs(
                 forward_context,
                 self.prefix,
                 mixed_qkv.shape[0],
             )
+            if not getattr(
+                self,
+                "_dcut_piecewise_stream_capture_verified",
+                False,
+            ):
+                logger.warning(
+                    "D-Cut: GDN core entered an active PIECEWISE ACLGraph "
+                    "capture (prefix=%s, token_bucket=%d).",
+                    self.prefix,
+                    mixed_qkv.shape[0],
+                )
+                self._dcut_piecewise_stream_capture_verified = True
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
