@@ -6,7 +6,12 @@ from __future__ import annotations
 import os
 
 from .globals import ENV_CONFIG, logger
-from .patch_gdn_v023 import _enable_gdn_piecewise_graph, _patch_gdn_dcut
+from .patch_attention import _patch_attention
+from .patch_gdn_v023 import (
+    _enable_gdn_piecewise_graph,
+    _gdn_piecewise_graph_enabled,
+    _patch_gdn_dcut,
+)
 from .patch_proposer import _patch_proposer
 from .patch_runner import _patch_runner
 from .patch_worker import _patch_worker
@@ -27,6 +32,14 @@ def _apply_patches_once() -> None:
         if os.environ.get(ENV_CONFIG) and not _patch_gdn_dcut():
             raise RuntimeError(
                 "D-Cut GDN state operators are unavailable; run `bash dcut/kernel/build.sh` first"
+            )
+        if (
+            os.environ.get(ENV_CONFIG)
+            and _gdn_piecewise_graph_enabled()
+            and not _patch_attention()
+        ):
+            raise RuntimeError(
+                "D-Cut could not patch full attention for PIECEWISE GDN capture"
             )
         _patch_proposer()
         _patch_runner()

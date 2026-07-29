@@ -50,6 +50,18 @@ def test_piecewise_gdn_core_is_switch_gated() -> None:
     assert "_dcut_gdn_piecewise_capture_sizes" in runner
     assert "captured during startup; using eager" in runner
     assert "captured PIECEWISE GDN token bucket" in runner
+    assert "and not _patch_attention()" in install
+
+
+def test_piecewise_fia_boundary_restores_capture_state() -> None:
+    attention_patch = _read("patch_attention.py")
+
+    assert 'patch_marker = "_dcut_piecewise_fia_patched"' in attention_patch
+    assert "mode == CUDAGraphMode.PIECEWISE" in attention_patch
+    assert "orig_capturing = ctx.capturing" in attention_patch
+    assert "ctx.capturing = False" in attention_patch
+    assert "finally:" in attention_patch
+    assert "ctx.capturing = orig_capturing" in attention_patch
 
 
 def test_recurrent_kernel_uses_fixed_request_rows() -> None:
