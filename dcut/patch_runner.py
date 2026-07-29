@@ -6,8 +6,12 @@ import os
 
 from .controller import _dcut_init_controller, _dcut_enable_drafter_probs
 from .dcut_profile import _adaptive_profile_run
+from .gdn_buffers import _dcut_prepare_gdn_piecewise_replay
 from .globals import ENV_CONFIG, ENV_FULL_DECODE_ONLY, logger
-from .patch_gdn_v023 import _enable_gdn_piecewise_graph
+from .patch_gdn_v023 import (
+    _enable_gdn_piecewise_graph,
+    _gdn_piecewise_graph_enabled,
+)
 from .probs import (
     _dcut_queue_probs,
     _maybe_process_adaptive_probs,
@@ -44,6 +48,53 @@ def _patch_runner() -> None:
             self._verify_adaptive_controller = None
 
     _orig_exec = R.execute_model
+    _orig_model_forward = R._model_forward
+
+    def _model_forward(self, num_tokens_padded, *args, **kwargs):
+        if _gdn_piecewise_graph_enabled():
+            from vllm.config import CUDAGraphMode
+            from vllm.forward_context import get_forward_context
+            from vllm.v1.attention.backends.gdn_attn import (
+                GDNAttentionMetadata,
+            )
+
+            forward_context = get_forward_context()
+            if (
+                forward_context is not None
+                and getattr(
+                    forward_context, "cudagraph_runtime_mode", None
+                )
+                == CUDAGraphMode.PIECEWISE
+            ):
+                max_num_seqs = (
+                    self.vllm_config.scheduler_config.max_num_seqs
+                )
+                try:
+                    graph_safe = _dcut_prepare_gdn_piecewise_replay(
+                        forward_context,
+                        num_tokens_padded,
+                        GDNAttentionMetadata,
+                        max_num_seqs,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "D-Cut: PIECEWISE GDN metadata preparation failed; "
+                        "falling back to eager for this batch: %s",
+                        exc,
+                    )
+                    graph_safe = False
+                if not graph_safe:
+                    # qwen_gdn_attention_core selects its execution branch
+                    # from Python forward-context metadata. A graph captured
+                    # for pure spec decode cannot be replayed for prefill,
+                    # regular decode, mixed batches, or a metadata-free dummy
+                    # run.
+                    forward_context.cudagraph_runtime_mode = (
+                        CUDAGraphMode.NONE
+                    )
+        return _orig_model_forward(
+            self, num_tokens_padded, *args, **kwargs
+        )
 
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         if os.environ.get(ENV_FULL_DECODE_ONLY):
@@ -138,6 +189,7 @@ def _patch_runner() -> None:
         return ret
 
     R.__init__ = __init__
+    R._model_forward = _model_forward
     R.execute_model = execute_model
     R.sample_tokens = sample_tokens
     R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu

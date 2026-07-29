@@ -202,3 +202,27 @@ D-Cut: GDN core is graph-capturable in PIECEWISE mode
 
 只有值为 `1` 时才应检查 `compilation_config.splitting_ops` 中不再包含
 `vllm::qwen_gdn_attention_core`，并继续做真实请求和 ACL Graph replay 验证。
+
+### v0.23 PIECEWISE replay 安全边界
+
+`GDNSpecDecodeMetadata` 在 FULL graph 下使用持久 buffer，但 PIECEWISE 下的
+request 数、实际 token 数和 metadata tensor 地址仍会随 step 改变。开关为 `1`
+时，D-Cut 会在 graph 外原位刷新固定地址的 QSL、SSI、NAT、ASL 和有效 token
+mask；buffer 的 request 维固定为 `--max-num-seqs`，token 维固定为当前
+cudagraph capture size。
+
+只有纯 speculative-decode batch 会 replay 这条 GDN PIECEWISE graph。prefill、
+普通 decode、混合 batch 和没有 attention metadata 的 dummy run 会把当前
+`cudagraph_runtime_mode` 降为 `NONE`，让 GDN custom op eager 执行。这是预期的
+精度保护，不表示全局关闭 PIECEWISE；后续纯 speculative-decode step 仍会入图。
+
+首次为某个 layer/capture size 建立固定 buffer 时会出现：
+
+```text
+D-Cut: allocated v0.23 PIECEWISE GDN buffers prefix=... num_tokens=... max_num_seqs=... stride=...
+```
+
+端到端验收必须同时满足：生成文本与 graph-off baseline 一致、speculative
+acceptance rate 不再接近 0、上述 buffer 日志出现，并且纯 speculative decode
+期间可观察到 ACL Graph replay。不能只用“splitting_ops 中已移除 GDN”作为精度
+验收。

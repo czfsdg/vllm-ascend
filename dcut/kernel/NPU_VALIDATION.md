@@ -73,5 +73,25 @@ D-Cut: GDN core is graph-capturable in PIECEWISE mode
 ```
 
 并确认 `compilation_config.splitting_ops` 不包含
-`vllm::qwen_gdn_attention_core`，请求过程发生 ACL Graph replay 且无
-eager fallback 或 D-Cut 算子加载失败日志。
+`vllm::qwen_gdn_attention_core`，纯 speculative-decode 过程发生 ACL Graph
+replay，且无 D-Cut 算子加载失败日志。
+
+### v0.23 服务级 replay 验收补充
+
+prefill、普通 decode 和混合 batch 的 eager fallback 是预期精度保护；验收时应
+关注纯 speculative-decode step 是否创建并 replay 固定 metadata buffer。启动
+服务后，日志中至少应出现一次：
+
+```text
+D-Cut: allocated v0.23 PIECEWISE GDN buffers
+```
+
+同一套输入分别以
+`VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=0` 和 `1` 运行，比较：
+
+1. 首个请求和 16 并发请求的文本/finish reason；
+2. speculative accepted tokens 或 acceptance rate；
+3. `dcut_trim_stats_graph.jsonl` 是否正常生成；
+4. graph-on 是否存在 ACL Graph replay，且无 metadata preparation failure。
+
+graph-on 若出现乱码或 acceptance rate 接近 0，不得以“算子已入图”判定通过。

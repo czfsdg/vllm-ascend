@@ -40,6 +40,10 @@ def test_piecewise_gdn_core_is_switch_gated() -> None:
     assert "npu_dcut_causal_conv1d" in core
     assert "npu_dcut_recurrent_gated_delta_rule" in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
+    assert "_dcut_get_gdn_piecewise_spec_bufs" in core
+    assert "_dcut_prepare_gdn_piecewise_replay" in runner
+    assert "forward_context.cudagraph_runtime_mode" in runner
+    assert "CUDAGraphMode.NONE" in runner
 
 
 def test_recurrent_kernel_uses_fixed_request_rows() -> None:
