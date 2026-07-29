@@ -203,8 +203,8 @@ private:
 
 } // namespace
 
-REGISTER_OPS_TILING_TEMPLATE(DcutRecurrentGatedDeltaRule,
-                             DcutRecurrentGatedDeltaRuleTilingArch35,
+REGISTER_OPS_TILING_TEMPLATE(RecurrentGatedDeltaRule,
+                             RecurrentGatedDeltaRuleTilingArch35,
                              RGDR_ASCEND_950_TEMPLATE_PRIORITY);
 
 } // namespace optiling
