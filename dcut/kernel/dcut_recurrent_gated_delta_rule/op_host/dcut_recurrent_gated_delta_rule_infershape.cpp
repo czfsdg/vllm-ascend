@@ -1,71 +1,23 @@
-/**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+#define RecurrentGatedDeltaRule DcutRecurrentGatedDeltaRule
 
-#include "exe_graph/runtime/infer_shape_context.h"
-#include "exe_graph/runtime/shape.h"
-#include "exe_graph/runtime/storage_shape.h"
+// Include the CANN header FIRST so its IMPL_OP_INFERSHAPE definition is processed
+// and the include guard INC_EXTERNAL_REGISTER_OP_IMPL_REGISTRY_H_ is set.
+// Otherwise the header (pulled in transitively by the infershape file) would
+// re-define IMPL_OP_INFERSHAPE and clobber our override below.
 #include "register/op_impl_registry.h"
-#include "tiling_base/error_log.h"
 
-using namespace gert;
-namespace ops {
-namespace {
-constexpr size_t VALUE_INDEX = 2;
-constexpr size_t STATE_INDEX = 4;
-constexpr size_t VALUE_DIM = 3;
-constexpr size_t STATE_DIM = 4;
+// Override IMPL_OP_INFERSHAPE to force macro expansion in #op_type (stringification)
+// and ##op_type (token pasting). Per C standard, # and ## do NOT expand macro
+// arguments, so without this override IMPL_OP_INFERSHAPE(RecurrentGatedDeltaRule)
+// would register the infershape for "RecurrentGatedDeltaRule" instead of
+// "DcutRecurrentGatedDeltaRule", and the runtime would fail with
+// "Op has no infershape func, opType: DcutRecurrentGatedDeltaRule".
+#undef IMPL_OP_INFERSHAPE
+#define DCUT_STRINGIFY(x) #x
+#define DCUT_STRINGIFY_EXPAND(x) DCUT_STRINGIFY(x)
+#define DCUT_CAT(a, b) DCUT_CAT_INNER(a, b)
+#define DCUT_CAT_INNER(a, b) a##b
+#define IMPL_OP_INFERSHAPE(op_type) \
+  gert::OpImplRegisterV2 VAR_UNUSED DCUT_CAT(op_impl_register_infershape_, op_type) = gert::OpImplRegisterV2(DCUT_STRINGIFY_EXPAND(op_type))
 
-constexpr size_t DIM_0 = 0;
-constexpr size_t DIM_1 = 1;
-constexpr size_t DIM_2 = 2;
-constexpr size_t DIM_3 = 3;
-
-ge::graphStatus InferShapeDcutRecurrentGatedDeltaRule(
-    InferShapeContext* context) {
-  if (context == nullptr) {
-    OP_LOGE("DcutRecurrentGatedDeltaRule", "inference context is null");
-    return ge::GRAPH_FAILED;
-  }
-
-  auto op_name = context->GetNodeName();
-  auto shape_value = context->GetInputShape(VALUE_INDEX);
-  auto shape_initial_state = context->GetInputShape(STATE_INDEX);
-  auto shape_out = context->GetOutputShape(DIM_0);
-  auto shape_final_state = context->GetOutputShape(DIM_1);
-  if (shape_value == nullptr || shape_initial_state == nullptr ||
-      shape_out == nullptr || shape_final_state == nullptr) {
-    OP_LOGE(op_name, "[InferShape] shape is null");
-    return ge::GRAPH_FAILED;
-  }
-
-  shape_out->SetDimNum(VALUE_DIM);
-  shape_out->SetDim(DIM_0, shape_value->GetDim(DIM_0));
-  shape_out->SetDim(DIM_1, shape_value->GetDim(DIM_1));
-  shape_out->SetDim(DIM_2, shape_value->GetDim(DIM_2));
-
-  shape_final_state->SetDimNum(STATE_DIM);
-  shape_final_state->SetDim(DIM_0, shape_initial_state->GetDim(DIM_0));
-  shape_final_state->SetDim(DIM_1, shape_initial_state->GetDim(DIM_1));
-  shape_final_state->SetDim(DIM_2, shape_initial_state->GetDim(DIM_2));
-  shape_final_state->SetDim(DIM_3, shape_initial_state->GetDim(DIM_3));
-  return ge::GRAPH_SUCCESS;
-}
-
-ge::graphStatus InferDataTypeDcutRecurrentGatedDeltaRule(
-    InferDataTypeContext* context) {
-  context->SetOutputDataType(DIM_0, ge::DT_BF16);
-  context->SetOutputDataType(DIM_1, ge::DT_BF16);
-  return ge::GRAPH_SUCCESS;
-}
-}  // namespace
-
-IMPL_OP_INFERSHAPE(DcutRecurrentGatedDeltaRule)
-    .InferShape(InferShapeDcutRecurrentGatedDeltaRule)
-    .InferDataType(InferDataTypeDcutRecurrentGatedDeltaRule);
-}  // namespace ops
+#include "../../../../csrc/attention/recurrent_gated_delta_rule/op_host/recurrent_gated_delta_rule_infershape.cpp"
