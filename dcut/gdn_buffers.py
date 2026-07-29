@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """GDN static buffer alloc/fill/update for PIECEWISE graph replay.
 
-Key optimization vs old version:
-- ASL and NAT are shared across all GDN layers (same batch composition).
-  Built on CPU from conv1d host args, one copy to GPU.
-- SSI is per-layer (different state indices per KV cache layer).
-  Still uses NPU ops (source tensor is on device), but only 3 kernels/layer.
-- Total: ~2 shared copies + ~3 kernels × 15 layers = ~47 kernels
-  vs old ~9 kernels × 15 layers = ~135 kernels.
+Key optimizations vs old versions:
+- The legacy static path shares batch-level ASL/NAT while keeping SSI local to
+  the owning cache layer.
+- The v0.23 PIECEWISE path follows vLLM attention grouping: layer prefixes that
+  reference the same GDN metadata share QSL/SSI/NAT/ASL/mask buffers and refresh
+  them once per metadata group. Different cache groups remain isolated.
 """
 from __future__ import annotations
 
@@ -296,7 +295,7 @@ def _dcut_gdn_piecewise_spec_key(forward_context, prefix, num_tokens):
 
 def _dcut_alloc_gdn_piecewise_spec_bufs(
     forward_context,
-    prefix,
+    prefixes,
     num_tokens,
     state_indices,
     max_num_seqs,
@@ -314,19 +313,39 @@ def _dcut_alloc_gdn_piecewise_spec_bufs(
             f"got shape={tuple(state_indices.shape)}"
         )
 
-    key = _dcut_gdn_piecewise_spec_key(
-        forward_context, prefix, num_tokens
-    )
+    if not prefixes:
+        raise RuntimeError(
+            "D-Cut PIECEWISE GDN buffer group has no layer prefixes"
+        )
+
+    keys = [
+        _dcut_gdn_piecewise_spec_key(
+            forward_context, prefix, num_tokens
+        )
+        for prefix in prefixes
+    ]
     state_index_stride = state_indices.shape[1]
     expected_shape = (max_num_seqs, state_index_stride)
-    bufs = _dcut_gdn_static.get(key)
+    existing_bufs = [
+        _dcut_gdn_static[key]
+        for key in keys
+        if key in _dcut_gdn_static
+    ]
+    bufs = existing_bufs[0] if existing_bufs else None
     if bufs is not None:
+        if any(existing is not bufs for existing in existing_bufs[1:]):
+            raise RuntimeError(
+                "D-Cut PIECEWISE GDN layer aliases resolved to different "
+                f"buffer groups: prefixes={tuple(prefixes)}"
+            )
         if tuple(bufs["ssi"].shape) != expected_shape:
             raise RuntimeError(
                 "D-Cut PIECEWISE GDN buffer shape changed for an existing "
                 f"graph key: expected={expected_shape}, "
                 f"actual={tuple(bufs['ssi'].shape)}"
             )
+        for key in keys:
+            _dcut_gdn_static[key] = bufs
         return bufs
 
     device = state_indices.device
@@ -353,11 +372,14 @@ def _dcut_alloc_gdn_piecewise_spec_bufs(
             num_tokens, dtype=torch.bool, device=device
         ),
     }
-    _dcut_gdn_static[key] = bufs
+    for key in keys:
+        _dcut_gdn_static[key] = bufs
     logger.info(
         "D-Cut: allocated v0.23 PIECEWISE GDN buffers "
-        "prefix=%s num_tokens=%d max_num_seqs=%d stride=%d",
-        prefix,
+        "group_prefix=%s group_layers=%d num_tokens=%d "
+        "max_num_seqs=%d stride=%d",
+        prefixes[0],
+        len(prefixes),
         num_tokens,
         max_num_seqs,
         state_index_stride,
@@ -367,7 +389,7 @@ def _dcut_alloc_gdn_piecewise_spec_bufs(
 
 def _dcut_fill_gdn_piecewise_spec_bufs(
     forward_context,
-    prefix,
+    prefixes,
     num_tokens,
     meta,
     max_num_seqs,
@@ -391,7 +413,7 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
 
     bufs = _dcut_alloc_gdn_piecewise_spec_bufs(
         forward_context,
-        prefix,
+        prefixes,
         num_tokens,
         state_indices,
         max_num_seqs,
@@ -470,7 +492,17 @@ def _dcut_prepare_gdn_piecewise_replay(
     if not gdn_items:
         return False
 
-    for _, meta in gdn_items:
+    # model_runner assigns the same metadata object to every layer in one
+    # attention group. Identity grouping preserves separate hybrid-cache groups.
+    metadata_groups = {}
+    for prefix, meta in gdn_items:
+        group = metadata_groups.setdefault(
+            id(meta), {"meta": meta, "prefixes": []}
+        )
+        group["prefixes"].append(prefix)
+
+    for group in metadata_groups.values():
+        meta = group["meta"]
         if (
             meta.spec_sequence_masks is None
             or int(meta.num_spec_decodes) <= 0
@@ -487,12 +519,31 @@ def _dcut_prepare_gdn_piecewise_replay(
         ):
             return False
 
-    for prefix, meta in gdn_items:
+    # A captured prefix must keep the same buffer alias topology. If vLLM ever
+    # changes the attention grouping at runtime, reject PIECEWISE safely rather
+    # than letting two now-distinct groups overwrite one captured buffer.
+    claimed_buffer_ids = set()
+    for group in metadata_groups.values():
+        existing_buffer_ids = set()
+        for prefix in group["prefixes"]:
+            key = _dcut_gdn_piecewise_spec_key(
+                forward_context, prefix, num_tokens
+            )
+            if key in _dcut_gdn_static:
+                existing_buffer_ids.add(id(_dcut_gdn_static[key]))
+        if (
+            len(existing_buffer_ids) > 1
+            or not claimed_buffer_ids.isdisjoint(existing_buffer_ids)
+        ):
+            return False
+        claimed_buffer_ids.update(existing_buffer_ids)
+
+    for group in metadata_groups.values():
         _dcut_fill_gdn_piecewise_spec_bufs(
             forward_context,
-            prefix,
+            tuple(group["prefixes"]),
             num_tokens,
-            meta,
+            group["meta"],
             max_num_seqs,
         )
     return True
