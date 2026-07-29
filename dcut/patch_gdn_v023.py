@@ -11,6 +11,7 @@ import torch
 from .globals import logger
 
 ENV_TORCH_OP_LIBRARY = "VLLM_DCUT_TORCH_OP_LIBRARY"
+ENV_GDN_PIECEWISE = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"
 _REQUIRED_OPS = (
     "npu_dcut_causal_conv1d",
     "npu_dcut_recurrent_gated_delta_rule",
@@ -21,7 +22,10 @@ GDN_PIECEWISE_SPLITTING_OP = "vllm::qwen_gdn_attention_core"
 def _gdn_piecewise_graph_enabled() -> bool:
     from vllm_ascend import envs
 
-    return envs.VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE
+    configured = getattr(envs, ENV_GDN_PIECEWISE, None)
+    if configured is not None:
+        return bool(configured)
+    return bool(int(os.getenv(ENV_GDN_PIECEWISE, "0")))
 
 
 def _without_gdn_piecewise_split(ops: list[str]) -> list[str]:

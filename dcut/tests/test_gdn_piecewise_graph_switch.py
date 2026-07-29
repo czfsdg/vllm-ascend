@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from dcut import patch_gdn_v023 as gdn_patch
 
-ENV_NAME = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"
+ENV_NAME = gdn_patch.ENV_GDN_PIECEWISE
 
 
 def test_gdn_piecewise_graph_switch_defaults_to_disabled(monkeypatch) -> None:
@@ -18,6 +18,22 @@ def test_gdn_piecewise_graph_switch_defaults_to_disabled(monkeypatch) -> None:
 
     monkeypatch.setenv(ENV_NAME, "0")
     assert envs.VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE is False
+
+
+def test_switch_falls_back_when_installed_envs_lacks_registration(
+    monkeypatch,
+) -> None:
+    from vllm_ascend import envs
+
+    monkeypatch.delitem(envs.env_variables, ENV_NAME)
+    monkeypatch.delenv(ENV_NAME, raising=False)
+    assert gdn_patch._gdn_piecewise_graph_enabled() is False
+
+    monkeypatch.setenv(ENV_NAME, "1")
+    assert gdn_patch._gdn_piecewise_graph_enabled() is True
+
+    monkeypatch.setenv(ENV_NAME, "0")
+    assert gdn_patch._gdn_piecewise_graph_enabled() is False
 
 
 def test_disabled_switch_preserves_gdn_splitting_boundary(
