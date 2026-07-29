@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os
 
-from .globals import ENV_CONFIG, logger
+from .globals import logger, ENABLE_GDN_MAIN_PIECEWISE_GRAPH, ENV_CONFIG
 from .gdn_buffers import _dcut_alloc_gdn_spec_bufs, _dcut_alloc_gdn_nonspec_bufs
 from .gdn_eager import _conv1d_spec_varlen_eager
 
