@@ -330,8 +330,6 @@ class VerifyAdaptiveController:
         active_probs: np.ndarray = all_probs_np[active_indices]
         active_req_ids: list[str] = [req_ids[i] for i in active_indices]
 
-        if not self._sorted_bs:
-            return
         bs_key = _ceil_lookup(batch_size, self._sorted_bs)
         q_levels = self._sorted_sql_per_bs.get(bs_key) or []
         if not q_levels:
