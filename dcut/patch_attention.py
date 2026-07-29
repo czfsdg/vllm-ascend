@@ -8,8 +8,7 @@ from vllm.config import CUDAGraphMode
 
 from .globals import logger
 
-
-def _patch_attention() -> bool:
+def _patch_attention() -> None:
     """Patch full-attention (FIA) to skip the capturing branch in PIECEWISE mode.
 
     In PIECEWISE mode, full-attention ops are splitting ops — they run eagerly
@@ -30,11 +29,10 @@ def _patch_attention() -> bool:
         )
     except Exception as e:
         logger.warning("D-Cut: cannot import AscendAttentionBackendImpl: %s", e)
-        return False
+        return
 
-    patch_marker = "_dcut_piecewise_fia_patched"
-    if getattr(AscendAttentionBackendImpl, patch_marker, False):
-        return True
+    if getattr(AscendAttentionBackendImpl, "_dcut_patched", False):
+        return
 
     _orig_ffia = AscendAttentionBackendImpl.forward_fused_infer_attention
 
@@ -63,11 +61,10 @@ def _patch_attention() -> bool:
     AscendAttentionBackendImpl.forward_fused_infer_attention = (
         _forward_fused_infer_attention
     )
-    setattr(AscendAttentionBackendImpl, patch_marker, True)
+    AscendAttentionBackendImpl._dcut_patched = True
     logger.warning(
         "D-Cut: patched forward_fused_infer_attention to skip capturing "
         "branch in PIECEWISE mode (full attention is a splitting op)."
     )
-    return True
 
 
