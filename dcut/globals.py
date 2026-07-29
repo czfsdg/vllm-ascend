@@ -93,7 +93,5 @@ ENV_GDN_SHARED_STATIC = "VLLM_DCUT_GDN_SHARED_STATIC"
 # before each replay. The GDN op inside the captured graph reads these buffers
 # at replay time.
 #
-# PIECEWISE aliases every layer prefix in one attention-metadata group to the
-# same buffer dict, matching vLLM's group-shared attention metadata. Keys remain
-# prefix-addressable so the compiled GDN forward can look them up unchanged.
+# Key: (prefix, num_tokens, "spec"|"nonspec")
 _dcut_gdn_static = {}
