@@ -19,11 +19,8 @@ Only active for parallel speculative methods: ``method=dflash``, or
 
 ------------------------------------------------------------------------------
 GPU -> NPU deltas include two D-Cut state-aware custom operators for GDN
-spec-decode. The Python control loop still patches only the NPU runner and the
-``_forward_core`` invoked by the GDN custom op. By default the plugin preserves
-that custom op in PIECEWISE ``splitting_ops``, so GDN remains an eager boundary.
-Set ``VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=1`` to remove the boundary and
-capture GDN with its surrounding graph piece:
+spec-decode. The Python control loop still patches only the NPU runner and
+the ``_forward_core`` invoked inside the native PIECEWISE GDN splitting op:
 
   1. Patch targets: ``NPUModelRunner`` (vllm_ascend.worker.model_runner_v1) /
      ``NPUWorker`` (vllm_ascend.worker.worker) / the Ascend spec-decode
@@ -84,8 +81,10 @@ ENV_PROFILE_FORCE_EAGER = "VLLM_DCUT_PROFILE_FORCE_EAGER"
 ENV_FULL_DECODE_ONLY = "VLLM_DCUT_FULL_DECODE_ONLY"
 ENV_GDN_SHARED_STATIC = "VLLM_DCUT_GDN_SHARED_STATIC"
 
-# vLLM 0.23 owns GDN graph inputs through GDNSpecDecodeMetadata. The removed
-# 0.22 graph-task host-argument APIs must not be patched.
+# vLLM 0.23 owns GDN graph inputs through GDNSpecDecodeMetadata and keeps the
+# attention core as a splitting op in PIECEWISE mode. The removed 0.22
+# graph-task host-argument APIs must not be patched.
+ENABLE_GDN_MAIN_PIECEWISE_GRAPH = False
 
 # ── Static GDN buffers for PIECEWISE graph replay ──────────────────
 # Pre-allocated ASL/SSI/NAT buffers with stable data_ptr.
