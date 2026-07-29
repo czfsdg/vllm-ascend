@@ -24,7 +24,7 @@
 
 namespace optiling {
 
-REGISTER_OPS_TILING_TEMPLATE(DcutRecurrentGatedDeltaRule, DcutRecurrentGatedDeltaRuleTiling, 0);
+REGISTER_OPS_TILING_TEMPLATE(RecurrentGatedDeltaRule, RecurrentGatedDeltaRuleTiling, 0);
 
 const size_t QUERY_INDEX = 0;
 const size_t KEY_INDEX = 1;
@@ -693,7 +693,7 @@ static ge::graphStatus TilingPrepareForRecurrentGatedDeltaRule(gert::TilingParse
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(DcutRecurrentGatedDeltaRule)
+IMPL_OP_OPTILING(RecurrentGatedDeltaRule)
     .Tiling(RecurrentGatedDeltaRuleTilingFunc)
-    .TilingParse<DcutRecurrentGatedDeltaRuleCompileInfo>(TilingPrepareForRecurrentGatedDeltaRule);
+    .TilingParse<RecurrentGatedDeltaRuleCompileInfo>(TilingPrepareForRecurrentGatedDeltaRule);
 } // namespace optiling
