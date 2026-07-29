@@ -3,6 +3,9 @@
 from types import SimpleNamespace
 
 from dcut import patch_gdn_v023 as gdn_patch
+from dcut.patch_runner import (
+    _dcut_piecewise_capture_dummy_enabled,
+)
 
 ENV_NAME = gdn_patch.ENV_GDN_PIECEWISE
 
@@ -97,3 +100,42 @@ def test_enabled_switch_removes_only_gdn_splitting_boundary(
     assert gdn_patch._enable_gdn_piecewise_graph(vllm_config)
     assert CompilationConfig._attention_ops == [unrelated_op]
     assert live_compilation_config.splitting_ops == [unrelated_op]
+
+
+def test_piecewise_dummy_metadata_is_only_for_startup_capture(
+    monkeypatch,
+) -> None:
+    from vllm.config import CUDAGraphMode
+
+    monkeypatch.setattr(
+        "dcut.patch_runner._gdn_piecewise_graph_enabled",
+        lambda: True,
+    )
+    runner = SimpleNamespace(
+        _dcut_in_real_warmup=True,
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.PIECEWISE
+        ),
+    )
+
+    assert _dcut_piecewise_capture_dummy_enabled(
+        runner,
+        CUDAGraphMode.PIECEWISE,
+        is_graph_capturing=True,
+    )
+    assert not _dcut_piecewise_capture_dummy_enabled(
+        runner,
+        CUDAGraphMode.PIECEWISE,
+        is_graph_capturing=False,
+    )
+    assert not _dcut_piecewise_capture_dummy_enabled(
+        runner,
+        CUDAGraphMode.PIECEWISE,
+        is_profile=True,
+        is_graph_capturing=True,
+    )
+    assert not _dcut_piecewise_capture_dummy_enabled(
+        runner,
+        CUDAGraphMode.NONE,
+        is_graph_capturing=True,
+    )

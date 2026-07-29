@@ -211,18 +211,26 @@ request 数、实际 token 数和 metadata tensor 地址仍会随 step 改变。
 mask；buffer 的 request 维固定为 `--max-num-seqs`，token 维固定为当前
 cudagraph capture size。
 
-只有纯 speculative-decode batch 会 replay 这条 GDN PIECEWISE graph。prefill、
-普通 decode、混合 batch 和没有 attention metadata 的 dummy run 会把当前
+启动 capture 阶段是特例：D-Cut 会强制 PIECEWISE capture dummy 构建 GDN
+attention metadata，让配置的 token bucket 在 vLLM 允许捕获的窗口内完成 GDN
+子图捕获。服务阶段只有纯 speculative-decode batch 会 replay 这条 graph；
+prefill、普通 decode、混合 batch 和普通 metadata-free dummy 会把当前
 `cudagraph_runtime_mode` 降为 `NONE`，让 GDN custom op eager 执行。这是预期的
-精度保护，不表示全局关闭 PIECEWISE；后续纯 speculative-decode step 仍会入图。
+精度保护，不表示全局关闭 PIECEWISE。
 
-首次为某个 layer/capture size 建立固定 buffer 时会出现：
+首次为某个 layer/capture size 建立固定 buffer，以及该 token bucket 捕获完成
+时会出现：
 
 ```text
 D-Cut: allocated v0.23 PIECEWISE GDN buffers prefix=... num_tokens=... max_num_seqs=... stride=...
+D-Cut: captured PIECEWISE GDN token bucket ...
 ```
 
+若服务阶段出现 `token bucket ... was not captured during startup`，该 batch 会
+安全 eager 回退，不再尝试运行期补捕获；但这也说明对应 bucket 没有完成入图
+验收，应检查启动 capture 日志和 `--cudagraph-capture-sizes`。
+
 端到端验收必须同时满足：生成文本与 graph-off baseline 一致、speculative
-acceptance rate 不再接近 0、上述 buffer 日志出现，并且纯 speculative decode
-期间可观察到 ACL Graph replay。不能只用“splitting_ops 中已移除 GDN”作为精度
-验收。
+acceptance rate 不再接近 0、上述 buffer/captured 日志出现，并且纯 speculative
+decode 期间可观察到 ACL Graph replay。不能只用“splitting_ops 中已移除 GDN”
+作为精度验收。

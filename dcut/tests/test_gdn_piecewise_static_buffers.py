@@ -9,6 +9,7 @@ from dcut.gdn_buffers import (
     _dcut_prepare_gdn_piecewise_replay,
 )
 from dcut.globals import _dcut_gdn_static
+from dcut.verify_adaptive_controller import VerifyAdaptiveController
 
 
 class _GDNMetadata:
@@ -132,3 +133,22 @@ def test_piecewise_replay_rejects_non_spec_and_mixed_batches() -> None:
     assert not _dcut_prepare_gdn_piecewise_replay(
         context, 8, _GDNMetadata, 4
     )
+
+
+def test_empty_cost_table_keeps_full_length_without_index_error(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VLLM_DCUT_RANDOM_CUT", raising=False)
+    controller = object.__new__(VerifyAdaptiveController)
+    controller.config = SimpleNamespace(enabled=True)
+    controller._sorted_bs = []
+    controller._adaptive_draft_lens = {}
+
+    controller.process_draft_output(
+        selected_probs=torch.ones((1, 2), dtype=torch.float32),
+        req_ids=["request-0"],
+        active_draft_req_ids={"request-0"},
+        batch_size=1,
+    )
+
+    assert controller._adaptive_draft_lens == {}

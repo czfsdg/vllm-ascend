@@ -44,6 +44,12 @@ def test_piecewise_gdn_core_is_switch_gated() -> None:
     assert "_dcut_prepare_gdn_piecewise_replay" in runner
     assert "forward_context.cudagraph_runtime_mode" in runner
     assert "CUDAGraphMode.NONE" in runner
+    assert '"_dcut_piecewise_capture_dummy"' in runner
+    assert "_should_build_dummy_attn_metadata" in runner
+    assert "is_graph_capturing" in runner
+    assert "_dcut_gdn_piecewise_capture_sizes" in runner
+    assert "captured during startup; using eager" in runner
+    assert "captured PIECEWISE GDN token bucket" in runner
 
 
 def test_recurrent_kernel_uses_fixed_request_rows() -> None:

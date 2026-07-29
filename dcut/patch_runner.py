@@ -22,6 +22,27 @@ from .truncate import _dcut_truncate
 ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
 
 
+def _dcut_piecewise_capture_dummy_enabled(
+    runner,
+    cudagraph_runtime_mode,
+    is_profile: bool = False,
+    is_graph_capturing: bool = False,
+) -> bool:
+    """Return whether this dummy run must capture the spec GDN branch."""
+    from vllm.config import CUDAGraphMode
+
+    compilation_config = getattr(runner, "compilation_config", None)
+    return (
+        _gdn_piecewise_graph_enabled()
+        and not is_profile
+        and is_graph_capturing
+        and getattr(runner, "_dcut_in_real_warmup", False)
+        and getattr(compilation_config, "cudagraph_mode", None)
+        == CUDAGraphMode.PIECEWISE
+        and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
+
+
 def _patch_runner() -> None:
     import vllm_ascend.worker.model_runner_v1 as m
 
@@ -41,6 +62,7 @@ def _patch_runner() -> None:
                     "D-Cut could not enable GDN capture in PIECEWISE ACLGraph"
                 )
         _orig_init(self, *a, **k)
+        self._dcut_gdn_piecewise_capture_sizes = set()
         try:
             _dcut_init_controller(self)
         except Exception as e:
@@ -49,8 +71,63 @@ def _patch_runner() -> None:
 
     _orig_exec = R.execute_model
     _orig_model_forward = R._model_forward
+    _orig_dummy_run = R._dummy_run
+    _orig_should_build_dummy = R._should_build_dummy_attn_metadata
+
+    def _dummy_run(self, num_tokens, *args, **kwargs):
+        cudagraph_runtime_mode = kwargs.get("cudagraph_runtime_mode")
+        if cudagraph_runtime_mode is None and len(args) > 1:
+            cudagraph_runtime_mode = args[1]
+        is_profile = kwargs.get("is_profile", False)
+        if len(args) > 4:
+            is_profile = args[4]
+        is_graph_capturing = kwargs.get("is_graph_capturing", False)
+        if len(args) > 9:
+            is_graph_capturing = args[9]
+        capture_dummy = _dcut_piecewise_capture_dummy_enabled(
+            self,
+            cudagraph_runtime_mode,
+            is_profile=bool(is_profile),
+            is_graph_capturing=bool(is_graph_capturing),
+        )
+        previous = getattr(
+            self,
+            "_dcut_piecewise_capture_dummy",
+            False,
+        )
+        self._dcut_piecewise_capture_dummy = capture_dummy
+        try:
+            return _orig_dummy_run(self, num_tokens, *args, **kwargs)
+        finally:
+            self._dcut_piecewise_capture_dummy = previous
+
+    def _should_build_dummy_attn_metadata(
+        self,
+        force_attention=False,
+        is_profile=False,
+        cudagraph_runtime_mode=None,
+    ):
+        return (
+            _orig_should_build_dummy(
+                self,
+                force_attention,
+                is_profile,
+                cudagraph_runtime_mode,
+            )
+            or getattr(
+                self,
+                "_dcut_piecewise_capture_dummy",
+                False,
+            )
+        )
 
     def _model_forward(self, num_tokens_padded, *args, **kwargs):
+        capture_dummy = getattr(
+            self,
+            "_dcut_piecewise_capture_dummy",
+            False,
+        )
+        graph_safe = False
         if _gdn_piecewise_graph_enabled():
             from vllm.config import CUDAGraphMode
             from vllm.forward_context import get_forward_context
@@ -83,6 +160,20 @@ def _patch_runner() -> None:
                         exc,
                     )
                     graph_safe = False
+                capture_sizes = (
+                    self._dcut_gdn_piecewise_capture_sizes
+                )
+                if (
+                    graph_safe
+                    and not capture_dummy
+                    and num_tokens_padded not in capture_sizes
+                ):
+                    logger.warning(
+                        "D-Cut: PIECEWISE GDN token bucket %d was not "
+                        "captured during startup; using eager for this batch.",
+                        num_tokens_padded,
+                    )
+                    graph_safe = False
                 if not graph_safe:
                     # qwen_gdn_attention_core selects its execution branch
                     # from Python forward-context metadata. A graph captured
@@ -92,9 +183,24 @@ def _patch_runner() -> None:
                     forward_context.cudagraph_runtime_mode = (
                         CUDAGraphMode.NONE
                     )
-        return _orig_model_forward(
+        if capture_dummy and not graph_safe:
+            raise RuntimeError(
+                "D-Cut could not build pure speculative GDN metadata "
+                f"while capturing PIECEWISE token bucket "
+                f"{num_tokens_padded}"
+            )
+        result = _orig_model_forward(
             self, num_tokens_padded, *args, **kwargs
         )
+        if capture_dummy:
+            self._dcut_gdn_piecewise_capture_sizes.add(
+                num_tokens_padded
+            )
+            logger.info(
+                "D-Cut: captured PIECEWISE GDN token bucket %d",
+                num_tokens_padded,
+            )
+        return result
 
     def execute_model(self, scheduler_output, intermediate_tensors=None):
         if os.environ.get(ENV_FULL_DECODE_ONLY):
@@ -190,6 +296,8 @@ def _patch_runner() -> None:
 
     R.__init__ = __init__
     R._model_forward = _model_forward
+    R._dummy_run = _dummy_run
+    R._should_build_dummy_attn_metadata = _should_build_dummy_attn_metadata
     R.execute_model = execute_model
     R.sample_tokens = sample_tokens
     R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu

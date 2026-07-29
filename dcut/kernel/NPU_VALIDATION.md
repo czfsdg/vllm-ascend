@@ -80,11 +80,18 @@ replay，且无 D-Cut 算子加载失败日志。
 
 prefill、普通 decode 和混合 batch 的 eager fallback 是预期精度保护；验收时应
 关注纯 speculative-decode step 是否创建并 replay 固定 metadata buffer。启动
-服务后，日志中至少应出现一次：
+capture 阶段会为 GDN 强制构建 dummy metadata。服务 ready 前，日志中应同时
+出现：
 
 ```text
 D-Cut: allocated v0.23 PIECEWISE GDN buffers
+D-Cut: captured PIECEWISE GDN token bucket ...
 ```
+
+对预期入图的纯 speculative-decode bucket，不应出现
+`was not captured during startup`。该警告会让当前 batch 安全 eager 回退，
+避免 vLLM 在捕获许可关闭后尝试在线补图并报
+`CUDA graph capturing detected at an inappropriate time`。
 
 同一套输入分别以
 `VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=0` 和 `1` 运行，比较：
@@ -92,6 +99,7 @@ D-Cut: allocated v0.23 PIECEWISE GDN buffers
 1. 首个请求和 16 并发请求的文本/finish reason；
 2. speculative accepted tokens 或 acceptance rate；
 3. `dcut_trim_stats_graph.jsonl` 是否正常生成；
-4. graph-on 是否存在 ACL Graph replay，且无 metadata preparation failure。
+4. graph-on 是否存在 ACL Graph replay，且无 metadata preparation failure、
+   uncaptured bucket 警告或运行期 capture 异常。
 
 graph-on 若出现乱码或 acceptance rate 接近 0，不得以“算子已入图”判定通过。
