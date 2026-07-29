@@ -22,9 +22,6 @@
 # 两个 AscendC 算子和 Torch 注册库一起构建
 bash dcut/kernel/build.sh --soc=ascend910b
 
-# A3 / runtime SOC ascend910_93
-bash dcut/kernel/build.sh --soc=ascend910_93
-
 # 也可以只构建一个 AscendC 算子
 bash dcut/kernel/build.sh \
   --ops=dcut_recurrent_gated_delta_rule \
@@ -34,60 +31,14 @@ bash dcut/kernel/build.sh \
   --soc=ascend910b
 ```
 
-A3 使用 `--soc=ascend910_93`，Ascend 950 使用 `--soc=ascend950`；310P 暂未接入。`--soc` 必须与运行时识别的 SOC 一致，不能复制改名其他 SOC 的 config/kernel 目录代替重新编译。脚本通过临时符号链接复用 vllm-ascend 的原生 custom-op 工具链，并使用独立的 `dcut` vendor，退出时会删除链接，不会修改或覆盖 `csrc/` 源码和已有的 `custom_transformer` 包。自定义 vendor 的 AscendC 安装包输出到 `csrc/build/cann-ops-transformer-dcut_linux-*.run`。
-
-> The build SOC must exactly match the runtime SOC. In particular, build A3
-> with `--soc=ascend910_93`; do not copy or rename 910B config/kernel folders.
-> Custom-vendor packages are emitted as
-> `csrc/build/cann-ops-transformer-dcut_linux-*.run`.
+A3 使用 `--soc=ascend910_93`，Ascend 950 使用 `--soc=ascend950`；310P 暂未接入。脚本通过临时符号链接复用 vllm-ascend 的原生 custom-op 工具链，并使用独立的 `dcut` vendor，退出时会删除链接，不会修改或覆盖 `csrc/` 源码和已有的 `custom_transformer` 包。AscendC 安装包输出到 `csrc/output/*.run`。
 
 `--ops` 适合分别编译和排查单个算子；实际运行 D-Cut 前，建议使用默认命令把两个算子构建到同一个 `dcut_transformer` 安装包。
-
-### Install and validate the AscendC package
-
-The default build produces one package containing both D-Cut operators. Install
-that package into the same CANN OPP tree used by the service:
-
-```bash
-DCUT_RUN="$(ls -t csrc/build/cann-ops-transformer-dcut_linux-*.run | head -n 1)"
-test -n "${DCUT_RUN}"
-"${DCUT_RUN}" \
-  --install-path=/usr/local/Ascend/cann-9.0.1/opp
-```
-
-Before starting vLLM, verify that the installed custom opapi library exports
-both API phases for both operators:
-
-```bash
-DCUT_OPP_ROOT=/usr/local/Ascend/cann-9.0.1/opp/vendors/dcut_transformer
-DCUT_CUST_OPAPI="${DCUT_OPP_ROOT}/op_api/lib/libcust_opapi.so"
-
-test -f "${DCUT_CUST_OPAPI}"
-if ldd "${DCUT_CUST_OPAPI}" | grep -q 'not found'; then
-  ldd "${DCUT_CUST_OPAPI}"
-  exit 1
-fi
-nm -D "${DCUT_CUST_OPAPI}" | grep -E \
-  'aclnnDcut(CausalConv1d|RecurrentGatedDeltaRule)(GetWorkspaceSize)?$'
-```
-
-The final command must list four symbols. Point the existing ACLNN loader at
-this vendor before the Torch registration library is loaded:
-
-```bash
-export ASCEND_CUSTOM_OPP_PATH="${DCUT_OPP_ROOT}:${ASCEND_CUSTOM_OPP_PATH:-}"
-export LD_LIBRARY_PATH="${DCUT_OPP_ROOT}/op_api/lib:${LD_LIBRARY_PATH:-}"
-```
-
-`ASCEND_CUSTOM_OPP_PATH` is the manual custom-op loading control used by the
-adapter: it opens each vendor's `op_api/lib/libcust_opapi.so` and resolves the
-requested ACLNN symbol there. No extra D-Cut environment variable or
-`LD_PRELOAD` is required.
 
 Torch 注册库可单独构建：
 
 ```bash
-bash dcut/kernel/build.sh --torch-only -j8
+bash dcut/kernel/build.sh --torch-only
 ```
 
 默认输出为：
@@ -96,141 +47,14 @@ bash dcut/kernel/build.sh --torch-only -j8
 dcut/kernel/build/torch_extension/dcut_torch_ops.so
 ```
 
-`-j8` 显式指定 Torch 注册库的并行编译任务数，可按机器 CPU
-资源调整。在容器采用双源码目录时，例如主 `vllm-ascend` editable
-安装位于 `/vllm-workspace/vllm-ascend`、D-Cut 源码位于 `/data` 下的
-独立 clone，应从 D-Cut clone 的仓库根目录执行上述构建命令；不需要
-修改或重新安装 `/vllm-workspace/vllm-ascend`。
-
 D-Cut 插件会在 worker 初始化、ACL Graph 捕获之前自动加载这个默认路径。如果库放在别处，设置：
 
 ```bash
-export VLLM_PLUGINS=ascend,dcut_adaptive_verify
-export VLLM_DCUT_TORCH_OP_LIBRARY=\
-/absolute/path/to/vllm-ascend/dcut/kernel/build/torch_extension/dcut_torch_ops.so
-
-if [[ ! -f "${VLLM_DCUT_TORCH_OP_LIBRARY}" ]]; then
-  echo "Missing D-Cut Torch ops: ${VLLM_DCUT_TORCH_OP_LIBRARY}"
-  exit 1
-fi
+export VLLM_DCUT_TORCH_OP_LIBRARY=/absolute/path/dcut_torch_ops.so
 ```
-
-不需要设置 `LD_PRELOAD`，也不需要在启动前用单独的 Python 进程保持
-算子库加载状态。插件会在每个需要的进程中调用
-`torch.ops.load_library()`。
-
-启动服务前可用下面的命令验证 schema、NPU 实现和 Meta 实现均已注册：
-
-```bash
-python - <<'PY'
-import os
-
-import torch
-
-library_path = os.environ["VLLM_DCUT_TORCH_OP_LIBRARY"]
-torch.ops.load_library(library_path)
-
-op_names = (
-    "npu_dcut_causal_conv1d",
-    "npu_dcut_recurrent_gated_delta_rule",
-)
-for op_name in op_names:
-    qualified_name = f"_C_ascend::{op_name}"
-    print("operator:", getattr(torch.ops._C_ascend, op_name))
-    print(
-        "schema:",
-        torch._C._dispatch_find_schema_or_throw(qualified_name, "").schema(),
-    )
-    print(
-        "PrivateUse1:",
-        torch._C._dispatch_has_kernel_for_dispatch_key(
-            qualified_name, "PrivateUse1"
-        ),
-    )
-    print(
-        "Meta:",
-        torch._C._dispatch_has_kernel_for_dispatch_key(
-            qualified_name, "Meta"
-        ),
-    )
-PY
-```
-
-两个算子的 `PrivateUse1` 和 `Meta` 都应输出 `True`。算子名包含
-`npu_` 前缀；不带前缀的 `dcut_causal_conv1d` 和
-`dcut_recurrent_gated_delta_rule` 不是注册名。
 
 ## PIECEWISE 入图边界
 
-vLLM Ascend 0.23 的 `forward` 和
-`torch.ops.vllm.qwen_gdn_attention_core` 保持不变。D-Cut 始终只替换
-custom op 调用的 `_forward_core`；默认保留该 op 的 PIECEWISE splitting
-boundary。显式开启下节开关后，插件才仅移除这个 boundary，使 GDN 随所在
-FX 分片被 ACL Graph 捕获；其余 attention splitting 边界保持不变。
+vLLM Ascend 0.23 的 `forward` 和 `torch.ops.vllm.qwen_gdn_attention_core` 保持不变，后者继续作为 PIECEWISE splitting op。D-Cut 只替换 splitting op 调用的 `_forward_core`，并只在 speculative 分支调用这两个新算子；prefill、non-spec 分支和 GDN metadata 生命周期不变。
 
-prefill、non-spec 分支和 vLLM 0.23 `GDNSpecDecodeMetadata` 生命周期
-不变。入图开关、启动日志和 `splitting_ops` 验收条件见下节。
-
-两个新 schema 都提供 Meta 实现，描述输出 shape 和 state alias，供
-`torch.compile`/ACL Graph 做 shape 与副作用分析。最终仍需要在目标 NPU
-上跑 PIECEWISE ACL Graph 的精度和 replay 验证。
-
-## GDN PIECEWISE 入图开关
-
-`VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE` 控制是否移除 GDN 的 PIECEWISE
-splitting boundary。有效值是 `0` 和 `1`，默认值是 `0`。
-
-```bash
-# 默认：保留 splitting boundary，GDN 不进入 PIECEWISE ACL Graph。
-export VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=0
-
-# 实验模式：移除 splitting boundary，让 GDN 随所在分片入图。
-export VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=1
-```
-
-值为 `0` 时，启动日志包含：
-
-```text
-D-Cut: GDN PIECEWISE graph capture is disabled
-```
-
-值为 `1` 时，启动日志包含：
-
-```text
-D-Cut: GDN core is graph-capturable in PIECEWISE mode
-```
-
-只有值为 `1` 时才应检查 `compilation_config.splitting_ops` 中不再包含
-`vllm::qwen_gdn_attention_core`，并继续做真实请求和 ACL Graph replay 验证。
-
-### v0.23 PIECEWISE replay 安全边界
-
-`GDNSpecDecodeMetadata` 在 FULL graph 下使用持久 buffer，但 PIECEWISE 下的
-request 数、实际 token 数和 metadata tensor 地址仍会随 step 改变。开关为 `1`
-时，D-Cut 会在 graph 外原位刷新固定地址的 QSL、SSI、NAT、ASL 和有效 token
-mask；buffer 的 request 维固定为 `--max-num-seqs`，token 维固定为当前
-cudagraph capture size。
-
-启动 capture 阶段是特例：D-Cut 会强制 PIECEWISE capture dummy 构建 GDN
-attention metadata，让配置的 token bucket 在 vLLM 允许捕获的窗口内完成 GDN
-子图捕获。服务阶段只有纯 speculative-decode batch 会 replay 这条 graph；
-prefill、普通 decode、混合 batch 和普通 metadata-free dummy 会把当前
-`cudagraph_runtime_mode` 降为 `NONE`，让 GDN custom op eager 执行。这是预期的
-精度保护，不表示全局关闭 PIECEWISE。
-
-首次为某个 layer/capture size 建立固定 buffer，以及该 token bucket 捕获完成
-时会出现：
-
-```text
-D-Cut: allocated v0.23 PIECEWISE GDN buffers prefix=... num_tokens=... max_num_seqs=... stride=...
-D-Cut: captured PIECEWISE GDN token bucket ...
-```
-
-若服务阶段出现 `token bucket ... was not captured during startup`，该 batch 会
-安全 eager 回退，不再尝试运行期补捕获；但这也说明对应 bucket 没有完成入图
-验收，应检查启动 capture 日志和 `--cudagraph-capture-sizes`。
-
-端到端验收必须同时满足：生成文本与 graph-off baseline 一致、speculative
-acceptance rate 不再接近 0、上述 buffer/captured 日志出现，并且纯 speculative
-decode 期间可观察到 ACL Graph replay。不能只用“splitting_ops 中已移除 GDN”
-作为精度验收。
+两个新 schema 都提供 Meta 实现，描述输出 shape 和 state alias，供 `torch.compile`/ACL Graph 做 shape 与副作用分析。最终仍需要在目标 NPU 上跑 PIECEWISE ACL Graph 的精度和 replay 验证。
