@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from dcut.truncate import _dcut_truncate
 
 
@@ -24,11 +26,32 @@ class _Event:
         self.synchronize_calls += 1
 
 
+class _TPGroup:
+    def __init__(self):
+        self.world_size = 1
+        self.rank_in_group = 0
+        self.broadcast_result = None
+        self.broadcast_calls = []
+
+    def broadcast_object(self, value, src=0):
+        self.broadcast_calls.append((value, src))
+        if self.rank_in_group == src:
+            return value
+        return self.broadcast_result
+
+
 @dataclass
 class _SchedulerOutput:
     scheduled_spec_decode_tokens: dict[str, list[int]]
     num_scheduled_tokens: dict[str, int]
     total_num_scheduled_tokens: int
+
+
+@pytest.fixture(autouse=True)
+def single_tp_group(monkeypatch):
+    group = _TPGroup()
+    monkeypatch.setattr("dcut.truncate.get_tp_group", lambda: group)
+    return group
 
 
 def _runner(
@@ -200,3 +223,61 @@ def test_dflash_gdn_cuts_remain_per_request_without_state_floors():
     }
     assert truncated.total_num_scheduled_tokens == 4
     assert event.synchronize_calls == 0
+
+
+def test_tp_rank_zero_broadcasts_one_ordered_decision_list(single_tp_group):
+    single_tp_group.world_size = 2
+    runner, _ = _runner(
+        has_gdn=False,
+        accepted_tokens=[0, 0],
+        draft_lens={"request-0": 1, "request-1": 3},
+        method="dflash",
+        req_id_to_index={"request-0": 0, "request-1": 1},
+    )
+    output = _SchedulerOutput(
+        scheduled_spec_decode_tokens={
+            "request-0": [11, 12, 13, 14],
+            "request-1": [21, 22, 23, 24],
+        },
+        num_scheduled_tokens={"request-0": 5, "request-1": 5},
+        total_num_scheduled_tokens=10,
+    )
+
+    _dcut_truncate(runner, output)
+
+    assert single_tp_group.broadcast_calls == [([1, 3], 0)]
+
+
+def test_nonzero_tp_rank_uses_rank_zero_decisions(single_tp_group):
+    single_tp_group.world_size = 2
+    single_tp_group.rank_in_group = 1
+    single_tp_group.broadcast_result = [1, 3]
+    runner, _ = _runner(
+        has_gdn=False,
+        accepted_tokens=[0, 0],
+        # Deliberately disagree with rank 0 to reproduce an async-event race.
+        draft_lens={"request-0": 4, "request-1": 0},
+        method="dflash",
+        req_id_to_index={"request-0": 0, "request-1": 1},
+    )
+    output = _SchedulerOutput(
+        scheduled_spec_decode_tokens={
+            "request-0": [11, 12, 13, 14],
+            "request-1": [21, 22, 23, 24],
+        },
+        num_scheduled_tokens={"request-0": 5, "request-1": 5},
+        total_num_scheduled_tokens=10,
+    )
+
+    truncated = _dcut_truncate(runner, output)
+
+    assert single_tp_group.broadcast_calls == [(None, 0)]
+    assert truncated.scheduled_spec_decode_tokens == {
+        "request-0": [11],
+        "request-1": [21, 22, 23],
+    }
+    assert truncated.num_scheduled_tokens == {
+        "request-0": 2,
+        "request-1": 4,
+    }
+    assert truncated.total_num_scheduled_tokens == 6

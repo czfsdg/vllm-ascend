@@ -13,6 +13,44 @@ from vllm.distributed import get_pp_group, get_tp_group
 from .globals import logger
 
 
+def _dcut_get_target_draft_lens(ctrl, original_spec) -> list[int]:
+    """Return rank-0's draft-length decisions in scheduler request order.
+
+    The async selected-probability D2H event can become ready on different
+    scheduler ticks on different TP ranks. Letting every rank consume its
+    local controller cache would then produce different verifier token counts
+    and eventually deadlock a later TP collective. Broadcast one small Python
+    integer list because truncation immediately consumes the result on CPU;
+    using a device tensor here would add an avoidable NPU-to-CPU sync.
+    """
+    tp_group = get_tp_group()
+    target_draft_lens = None
+    if tp_group.rank_in_group == 0:
+        target_draft_lens = []
+        for req_id, draft_tokens in original_spec.items():
+            max_draft_len = len(draft_tokens)
+            adaptive_len = ctrl.get_adaptive_draft_len(req_id)
+            if adaptive_len is None:
+                adaptive_len = max_draft_len
+            target_draft_lens.append(
+                min(max(int(adaptive_len), 0), max_draft_len)
+            )
+
+    if tp_group.world_size > 1:
+        target_draft_lens = tp_group.broadcast_object(
+            target_draft_lens,
+            src=0,
+        )
+
+    if target_draft_lens is None or len(target_draft_lens) != len(original_spec):
+        raise RuntimeError(
+            "D-Cut received an invalid TP decision broadcast: "
+            f"expected {len(original_spec)} draft lengths, got "
+            f"{target_draft_lens!r}"
+        )
+    return target_draft_lens
+
+
 def _dcut_truncate(self, scheduler_output):
     """Apply cached per-request draft caps without a GDN state floor.
 
@@ -35,21 +73,14 @@ def _dcut_truncate(self, scheduler_output):
     new_spec = original_spec.copy()
     new_num_scheduled = scheduler_output.num_scheduled_tokens.copy()
 
-    target_draft_lens = {}
-    for req_id, draft_tokens in original_spec.items():
-        max_draft_len = len(draft_tokens)
-        adaptive_len = ctrl.get_adaptive_draft_len(req_id)
-        if adaptive_len is None:
-            adaptive_len = max_draft_len
-        target_draft_lens[req_id] = min(
-            max(adaptive_len, 0),
-            max_draft_len,
-        )
+    target_draft_lens = _dcut_get_target_draft_lens(ctrl, original_spec)
 
     trimmed_tokens = 0
-    for req_id, draft_tokens in list(new_spec.items()):
+    for (req_id, draft_tokens), target_len in zip(
+        list(new_spec.items()),
+        target_draft_lens,
+    ):
         max_draft_len = len(draft_tokens)
-        target_len = target_draft_lens[req_id]
         if target_len >= max_draft_len:
             continue
 
