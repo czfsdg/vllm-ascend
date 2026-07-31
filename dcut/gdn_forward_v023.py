@@ -17,12 +17,12 @@
 
 import torch
 from einops import rearrange
-from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -70,6 +70,128 @@ def _run_spec_causal_conv1d(
         activation_mode=activation_mode,
         pad_slot_id=DCUT_PAD_SLOT_ID,
     )
+
+
+def _dcut_gdn_local_graph_key(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+) -> tuple[int, int, int, int, int]:
+    """Key a local graph by padded tokens and its outer graph addresses."""
+    return (
+        mixed_qkv.shape[0],
+        mixed_qkv.data_ptr(),
+        b.data_ptr(),
+        a.data_ptr(),
+        core_attn_out.data_ptr(),
+    )
+
+
+def _dcut_mark_local_graph_captured(forward_context, prefix: str) -> None:
+    captured_prefixes = getattr(
+        forward_context,
+        "_dcut_gdn_local_graph_captured_prefixes",
+        None,
+    )
+    if captured_prefixes is not None:
+        captured_prefixes.add(prefix)
+
+
+def _dcut_run_gdn_local_graph(
+    attention,
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    forward_context,
+    piecewise_spec_bufs,
+) -> bool:
+    """Capture/replay pure-spec GDN while it remains a splitting op."""
+    graph_key = _dcut_gdn_local_graph_key(
+        mixed_qkv, b, a, core_attn_out
+    )
+    token_bucket = graph_key[0]
+    graph_entries = getattr(
+        attention, "_dcut_gdn_local_graph_entries", None
+    )
+    if graph_entries is None:
+        graph_entries = {}
+        attention._dcut_gdn_local_graph_entries = graph_entries
+
+    graph = graph_entries.get(graph_key)
+    capture_requested = bool(
+        getattr(
+            forward_context,
+            "_dcut_gdn_local_graph_capture_requested",
+            False,
+        )
+    )
+    if graph is None and not capture_requested:
+        missing_buckets = getattr(
+            attention, "_dcut_gdn_local_graph_missing_buckets", None
+        )
+        if missing_buckets is None:
+            missing_buckets = set()
+            attention._dcut_gdn_local_graph_missing_buckets = (
+                missing_buckets
+            )
+        if token_bucket not in missing_buckets:
+            logger.warning(
+                "D-Cut: no local GDN graph matches prefix=%s "
+                "token_bucket=%d; only this GDN boundary uses eager.",
+                attention.prefix,
+                token_bucket,
+            )
+            missing_buckets.add(token_bucket)
+        return False
+
+    if graph is None:
+        if torch.npu.is_current_stream_capturing():
+            raise RuntimeError(
+                "D-Cut cannot nest the local GDN graph inside an active "
+                "outer ACLGraph capture; qwen_gdn_attention_core must "
+                "remain a PIECEWISE splitting op"
+            )
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(
+            graph,
+            pool=current_platform.get_global_graph_pool(),
+        ):
+            AscendGatedDeltaNetAttention._forward_core_impl(
+                attention,
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                piecewise_spec_bufs,
+            )
+        graph_entries[graph_key] = graph
+        _dcut_mark_local_graph_captured(
+            forward_context, attention.prefix
+        )
+        logger.warning(
+            "D-Cut: captured local pure-spec GDN graph "
+            "prefix=%s token_bucket=%d.",
+            attention.prefix,
+            token_bucket,
+        )
+        return True
+
+    graph.replay()
+    if capture_requested:
+        _dcut_mark_local_graph_captured(
+            forward_context, attention.prefix
+        )
+    if not getattr(attention, "_dcut_gdn_local_graph_replay_logged", False):
+        logger.warning(
+            "D-Cut: replaying local pure-spec GDN graph "
+            "prefix=%s token_bucket=%d.",
+            attention.prefix,
+            token_bucket,
+        )
+        attention._dcut_gdn_local_graph_replay_logged = True
+    return True
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -187,6 +309,46 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
+        """Route the GDN splitting op to local graph or eager execution."""
+        forward_context = get_forward_context()
+        if getattr(
+            forward_context,
+            "_dcut_gdn_local_graph_safe",
+            False,
+        ):
+            piecewise_spec_bufs = _dcut_get_gdn_piecewise_spec_bufs(
+                forward_context,
+                self.prefix,
+                mixed_qkv.shape[0],
+            )
+            if _dcut_run_gdn_local_graph(
+                self,
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                forward_context,
+                piecewise_spec_bufs,
+            ):
+                return
+
+        return AscendGatedDeltaNetAttention._forward_core_impl(
+            self,
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            None,
+        )
+
+    def _forward_core_impl(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        piecewise_spec_bufs,
+    ):
         """
         Core attention computation (called by custom op).
         """
@@ -200,37 +362,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
-        piecewise_spec_bufs = None
-        if (
-            getattr(forward_context, "capturing", False)
-            and getattr(
-                forward_context, "cudagraph_runtime_mode", None
-            )
-            == CUDAGraphMode.PIECEWISE
-        ):
-            if not torch.npu.is_current_stream_capturing():
-                raise RuntimeError(
-                    "D-Cut GDN reached the PIECEWISE capture branch outside "
-                    "an active ACLGraph stream capture; the GDN core is still "
-                    "executing at a graph boundary"
-                )
-            piecewise_spec_bufs = _dcut_get_gdn_piecewise_spec_bufs(
-                forward_context,
-                self.prefix,
-                mixed_qkv.shape[0],
-            )
-            if not getattr(
-                self,
-                "_dcut_piecewise_stream_capture_verified",
-                False,
-            ):
-                logger.warning(
-                    "D-Cut: GDN core entered an active PIECEWISE ACLGraph "
-                    "capture (prefix=%s, token_bucket=%d).",
-                    self.prefix,
-                    mixed_qkv.shape[0],
-                )
-                self._dcut_piecewise_stream_capture_verified = True
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx

@@ -20,13 +20,15 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     assert "target_class.forward =" not in patch
     assert "torch.ops.vllm.qwen_gdn_attention_core" in core
     assert "_TARGET_OP = \"vllm::qwen_gdn_attention_core\"" in piecewise
-    assert "_filter_splitting_ops(self.splitting_ops)" in piecewise
+    assert "_ensure_gdn_splitting_op(self.splitting_ops)" in piecewise
     assert "_dcut_get_gdn_piecewise_spec_bufs" in core
     assert "piecewise_spec_bufs[\"token_mask\"]" in core
     assert "_dcut_prepare_gdn_piecewise_replay" in runner
-    assert "CUDAGraphMode.NONE" in runner
+    assert "CUDAGraphMode.NONE" not in runner
+    assert "_dcut_gdn_local_graph_safe" in runner
     assert "_dcut_gdn_piecewise_capture_sizes" in runner
     assert "torch.npu.is_current_stream_capturing()" in core
+    assert "graph.replay()" in core
     assert "npu_dcut_causal_conv1d" in core
     assert "npu_dcut_recurrent_gated_delta_rule" in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core

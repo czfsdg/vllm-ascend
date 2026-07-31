@@ -62,6 +62,7 @@ def _patch_runner() -> None:
             _gdn_piecewise_graph_enabled()
         )
         self._dcut_gdn_piecewise_capture_sizes = set()
+        self._dcut_gdn_piecewise_missing_sizes_logged = set()
         try:
             _dcut_init_controller(self)
         except Exception as e:
@@ -139,8 +140,6 @@ def _patch_runner() -> None:
         )
         graph_safe = False
         forward_context = None
-        original_runtime_mode = None
-        runtime_mode_overridden = False
         if self._dcut_gdn_piecewise_enabled:
             from vllm.config import CUDAGraphMode
             from vllm.forward_context import get_forward_context
@@ -149,6 +148,15 @@ def _patch_runner() -> None:
             )
 
             forward_context = get_forward_context()
+            if forward_context is not None:
+                # Forward contexts may be reused. Reset local routing before
+                # inspecting this batch so no graph-safe state leaks across
+                # PIECEWISE/eager or decode/prefill transitions.
+                forward_context._dcut_gdn_local_graph_safe = False
+                forward_context._dcut_gdn_local_graph_capture_requested = (
+                    False
+                )
+                forward_context._dcut_gdn_local_graph_captured_prefixes = set()
             if (
                 forward_context is not None
                 and getattr(
@@ -156,7 +164,6 @@ def _patch_runner() -> None:
                 )
                 == CUDAGraphMode.PIECEWISE
             ):
-                original_runtime_mode = CUDAGraphMode.PIECEWISE
                 parallel_safe = (
                     getattr(self, "pcp_size", 1) == 1
                     and getattr(self, "dcp_size", 1) == 1
@@ -174,17 +181,16 @@ def _patch_runner() -> None:
                         )
                     except Exception as exc:
                         logger.warning(
-                            "D-Cut: PIECEWISE GDN metadata preparation "
-                            "failed; falling back to eager for this "
-                            "batch: %s",
+                            "D-Cut: local GDN graph metadata preparation "
+                            "failed; only GDN boundaries use eager: %s",
                             exc,
                         )
                 elif not getattr(
                     self, "_dcut_gdn_parallel_fallback_logged", False
                 ):
                     logger.warning(
-                        "D-Cut: GDN PIECEWISE capture is disabled for "
-                        "PCP/DCP (pcp=%d, dcp=%d); using eager GDN.",
+                        "D-Cut: local GDN graphs are disabled for PCP/DCP "
+                        "(pcp=%d, dcp=%d); only GDN boundaries use eager.",
                         getattr(self, "pcp_size", 1),
                         getattr(self, "dcp_size", 1),
                     )
@@ -196,42 +202,59 @@ def _patch_runner() -> None:
                     and not capture_dummy
                     and num_tokens_padded not in capture_sizes
                 ):
-                    logger.warning(
-                        "D-Cut: PIECEWISE GDN token bucket %d was not "
-                        "captured during startup; using eager for this "
-                        "batch.",
-                        num_tokens_padded,
+                    missing_sizes = (
+                        self._dcut_gdn_piecewise_missing_sizes_logged
                     )
+                    if num_tokens_padded not in missing_sizes:
+                        logger.warning(
+                            "D-Cut: local GDN token bucket %d was not "
+                            "captured during startup; only its GDN "
+                            "boundaries use eager.",
+                            num_tokens_padded,
+                        )
+                        missing_sizes.add(num_tokens_padded)
                     graph_safe = False
-                if not graph_safe:
-                    # GDN selects its Python branch from metadata that is not
-                    # part of the graph key. Only pure speculative decode may
-                    # replay a captured GDN graph.
-                    forward_context.cudagraph_runtime_mode = (
-                        CUDAGraphMode.NONE
-                    )
-                    runtime_mode_overridden = True
+
+                # These attributes are consumed only at the eager GDN splitting
+                # boundary. They never disable the surrounding PIECEWISE graph.
+                forward_context._dcut_gdn_local_graph_safe = graph_safe
+                forward_context._dcut_gdn_local_graph_capture_requested = (
+                    capture_dummy
+                )
+
         if capture_dummy and not graph_safe:
             raise RuntimeError(
                 "D-Cut could not build pure speculative GDN metadata "
                 f"while capturing PIECEWISE token bucket "
                 f"{num_tokens_padded}"
             )
-        try:
-            result = _orig_model_forward(
-                self, num_tokens_padded, *args, **kwargs
-            )
-        finally:
-            if runtime_mode_overridden and forward_context is not None:
-                forward_context.cudagraph_runtime_mode = (
-                    original_runtime_mode
-                )
+
+        result = _orig_model_forward(
+            self, num_tokens_padded, *args, **kwargs
+        )
         if capture_dummy:
+            expected_prefixes = getattr(
+                forward_context,
+                "_dcut_gdn_local_graph_expected_prefixes",
+                frozenset(),
+            )
+            captured_prefixes = getattr(
+                forward_context,
+                "_dcut_gdn_local_graph_captured_prefixes",
+                set(),
+            )
+            missing_prefixes = expected_prefixes - captured_prefixes
+            if missing_prefixes:
+                raise RuntimeError(
+                    "D-Cut did not capture every local GDN graph for "
+                    f"token bucket {num_tokens_padded}: "
+                    f"missing={sorted(missing_prefixes)}"
+                )
             self._dcut_gdn_piecewise_capture_sizes.add(
                 num_tokens_padded
             )
             logger.warning(
-                "D-Cut: captured PIECEWISE GDN token bucket %d",
+                "D-Cut: captured local GDN graphs for token bucket %d",
                 num_tokens_padded,
             )
         return result

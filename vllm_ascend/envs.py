@@ -110,8 +110,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Whether D-Cut removes the GDN PIECEWISE boundary to capture GDN in graph.
-    # Valid values: "0" (default, keep GDN eager) and "1" (capture GDN).
+    # Whether D-Cut captures a pure-spec local graph at the GDN PIECEWISE
+    # boundary. Valid values: "0" (default, GDN eager) and "1" (local graph
+    # replay for safe batches; prefill/mixed keep only the GDN boundary eager).
     # This variable is not sensitive.
     "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE": lambda: bool(
         int(os.getenv("VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE", "0"))

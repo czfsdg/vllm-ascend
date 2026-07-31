@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Remove ``vllm::qwen_gdn_attention_core`` from PIECEWISE splitting_ops so the
-native GDN op (and the D-Cut conv/recurrent kernels behind it) are captured
-into the same ACLGraph segment instead of being a graph split boundary.
+"""Keep GDN as a PIECEWISE boundary for hybrid local graph replay.
 
-Only the splitting_ops list is touched.  The GDN forward itself
-(``torch.ops.vllm.qwen_gdn_attention_core`` / ``_forward_core``) is left
-unchanged — the op still exists as a custom op in the graph, it simply no
-longer forces a piecewise boundary.
+The outer model stays in PIECEWISE mode for every batch composition. The
+``vllm::qwen_gdn_attention_core`` boundary selects between a local pure-spec
+GDN ACLGraph and the original eager prefill/mixed implementation.
 """
 
 from __future__ import annotations
@@ -19,15 +16,12 @@ ENV_GDN_PIECEWISE = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"
 LEGACY_ENV_GDN_PIECEWISE = "VLLM_DCUT_GDN_PIECEWISE"
 
 
-def _filter_splitting_ops(ops):
-    """Return a new list with *only* ``_TARGET_OP`` removed.
-
-    A fresh list is returned (never mutates the input in place) so the caller
-    can safely reassign ``self.splitting_ops``.
-    """
-    if ops is None:
-        return None
-    return [op for op in ops if op != _TARGET_OP]
+def _ensure_gdn_splitting_op(ops):
+    """Return a fresh splitting-op list that contains the GDN boundary."""
+    result = list(ops or ())
+    if _TARGET_OP not in result:
+        result.append(_TARGET_OP)
+    return result
 
 
 def _env_flag(value: str) -> bool:
@@ -57,9 +51,7 @@ def _is_enabled() -> bool:
 
 
 def _arm_gdn_piecewise_splitting_patch():
-    """Wrap ``CompilationConfig.set_splitting_ops_for_v1`` and
-    ``splitting_ops_contain_attention`` once per process.
-
+    """Ensure the GDN boundary is present in every PIECEWISE process.
     Must be called **before** vllm-ascend platform code invokes
     ``set_splitting_ops_for_v1`` (i.e. during ``install()``, not during the
     deferred ``WorkerBase.__init__`` trigger).  Only vLLM-core symbols are
@@ -71,7 +63,7 @@ def _arm_gdn_piecewise_splitting_patch():
     """
     if not _is_enabled():
         print(
-            "[D-Cut] GDN PIECEWISE split patch SKIPPED "
+            "[D-Cut] GDN local graph patch SKIPPED "
             f"(requires {ENV_DCUT_CONFIG} and "
             f"{ENV_GDN_PIECEWISE}=1).",
             flush=True,
@@ -83,7 +75,7 @@ def _arm_gdn_piecewise_splitting_patch():
     except Exception as exc:  # pragma: no cover - vLLM not installed
         print(
             f"[D-Cut] cannot import CompilationConfig, "
-            f"GDN PIECEWISE split patch NOT armed: {exc}",
+            f"GDN local graph patch NOT armed: {exc}",
             flush=True,
         )
         return
@@ -93,27 +85,22 @@ def _arm_gdn_piecewise_splitting_patch():
         "_dcut_piecewise_patched",
         False,
     ):
-        print("[D-Cut] GDN PIECEWISE split patch already armed (skip).", flush=True)
+        print("[D-Cut] GDN local graph patch already armed (skip).", flush=True)
         return
 
-    # -------------------------------------------------------------------------
-    # Patch 1: Remove _TARGET_OP from splitting_ops
-    # -------------------------------------------------------------------------
     _ORIG_SET_SPLITTING_OPS = CompilationConfig.set_splitting_ops_for_v1
 
     def _patched_set_splitting_ops_for_v1(self, *args, **kwargs):
         _ORIG_SET_SPLITTING_OPS(self, *args, **kwargs)
 
-        before = list(self.splitting_ops or [])
-        after = _filter_splitting_ops(self.splitting_ops)
+        before = list(self.splitting_ops or ())
+        after = _ensure_gdn_splitting_op(self.splitting_ops)
         self.splitting_ops = after
 
-        removed = [op for op in before if after is None or op not in after]
-        if removed:
+        if _TARGET_OP not in before:
             print(
-                f"[D-Cut] GDN PIECEWISE split patch — removed {removed} "
-                f"from splitting_ops (before={len(before)} ops, "
-                f"after={len(after) if after else 0} ops).",
+                "[D-Cut] added the GDN local-graph boundary to splitting_ops "
+                f"(before={len(before)} ops, after={len(after)} ops).",
                 flush=True,
             )
             print(f"[D-Cut] splitting_ops before={before}", flush=True)
@@ -123,29 +110,10 @@ def _arm_gdn_piecewise_splitting_patch():
     CompilationConfig.set_splitting_ops_for_v1 = (  # type: ignore[assignment]
         _patched_set_splitting_ops_for_v1
     )
-    print("[D-Cut] Patched set_splitting_ops_for_v1.", flush=True)
-
-    # -------------------------------------------------------------------------
-    # Patch 2: Make splitting_ops_contain_attention() exclude _TARGET_OP
-    # This is needed because vLLM's assertion in CudagraphDispatcher.__init__
-    # requires all _attention_ops to be in splitting_ops, but we removed
-    # _TARGET_OP from splitting_ops.
-    # -------------------------------------------------------------------------
-    _ORIG_SPLITTING_OPS_CONTAIN_ATTENTION = CompilationConfig.splitting_ops_contain_attention
-
-    def _patched_splitting_ops_contain_attention(self):
-        # Filter out _TARGET_OP from _attention_ops for this check
-        attention_ops_to_check = [op for op in self._attention_ops if op != _TARGET_OP]
-        return self.splitting_ops is not None and all(
-            op in self.splitting_ops for op in attention_ops_to_check
-        )
-
-    CompilationConfig.splitting_ops_contain_attention = (  # type: ignore[assignment]
-        _patched_splitting_ops_contain_attention
+    print(
+        "[D-Cut] GDN boundary preserved for local PIECEWISE graph replay.",
+        flush=True,
     )
-    print("[D-Cut] Patched splitting_ops_contain_attention to exclude _TARGET_OP.", flush=True)
-
-    print("[D-Cut] GDN PIECEWISE split patch ARMED.", flush=True)
 
 
 # ---------------------------------------------------------------------------

@@ -57,4 +57,7 @@ export VLLM_DCUT_TORCH_OP_LIBRARY=/absolute/path/dcut_torch_ops.so
 
 vLLM Ascend 0.23 的 `forward` 和 `torch.ops.vllm.qwen_gdn_attention_core` 保持不变，后者继续作为 PIECEWISE splitting op。D-Cut 只替换 splitting op 调用的 `_forward_core`，并只在 speculative 分支调用这两个新算子；prefill、non-spec 分支和 GDN metadata 生命周期不变。
 
+打开 `VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE=1` 时，该 splitting op
+内部会为 pure-spec decode 按 padded token bucket 捕获/回放局部 ACL Graph；
+prefill/mixed 仍只在这个 boundary eager，外层 PIECEWISE segment 不会降级。
 两个新 schema 都提供 Meta 实现，描述输出 shape 和 state alias，供 `torch.compile`/ACL Graph 做 shape 与副作用分析。最终仍需要在目标 NPU 上跑 PIECEWISE ACL Graph 的精度和 replay 验证。

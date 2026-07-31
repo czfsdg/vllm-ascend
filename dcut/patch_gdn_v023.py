@@ -88,8 +88,9 @@ def _patch_gdn_dcut() -> bool:
     dcut_forward_core._dcut_patched = True  # type: ignore[attr-defined]
 
     # ``forward`` remains the vllm-ascend implementation and still enters
-    # torch.ops.vllm.qwen_gdn_attention_core. The early config patch decides
-    # whether that custom op is an eager boundary or part of a PIECEWISE graph.
+    # torch.ops.vllm.qwen_gdn_attention_core. It remains a PIECEWISE splitting
+    # boundary: pure-spec batches replay a local GDN graph there, while
+    # prefill/mixed batches execute only that boundary eagerly.
     ascend_gdn.AscendGatedDeltaNetAttention._forward_core = dcut_forward_core
     target_class._forward_core = dcut_forward_core
     logger.info(

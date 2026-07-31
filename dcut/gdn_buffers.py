@@ -448,12 +448,12 @@ def _dcut_prepare_gdn_piecewise_replay(
     GDNAttentionMetadata,
     max_num_seqs,
 ):
-    """Prepare pure speculative GDN replay, or reject the graph safely.
+    """Prepare pure speculative local GDN replay, or reject it safely.
 
     The GDN custom op chooses prefill/decode/spec branches from Python
     metadata that is not part of the compiled graph signature. Only a pure
-    speculative batch can therefore reuse the speculative PIECEWISE graph.
-    Other compositions must execute the custom op eagerly.
+    speculative batch can therefore reuse its local graph. Other compositions
+    execute this custom-op boundary eagerly while outer PIECEWISE stays active.
     """
     attn_metadata = getattr(forward_context, "attn_metadata", None)
     if not isinstance(attn_metadata, dict):
@@ -484,6 +484,9 @@ def _dcut_prepare_gdn_piecewise_replay(
         ):
             return False
 
+    forward_context._dcut_gdn_local_graph_expected_prefixes = (
+        frozenset(prefix for prefix, _ in gdn_items)
+    )
     for prefix, meta in gdn_items:
         _dcut_fill_gdn_piecewise_spec_bufs(
             forward_context,
