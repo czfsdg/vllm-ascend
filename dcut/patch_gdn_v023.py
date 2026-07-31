@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Install D-Cut GDN operators without modifying vllm-ascend sources."""
+"""Install the graph-capturable D-Cut GDN core for vLLM 0.23."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _load_dcut_torch_ops() -> bool:
 
 
 def _patch_gdn_dcut() -> bool:
-    """Replace only ``_forward_core`` behind the native PIECEWISE split op."""
+    """Replace ``_forward_core`` while preserving the native custom-op API."""
     try:
         from vllm_ascend.ops import gdn as ascend_gdn
         from vllm_ascend.patch.worker import patch_qwen3_5 as qwen_patch
@@ -87,13 +87,13 @@ def _patch_gdn_dcut() -> bool:
     dcut_forward_core = DcutGatedDeltaNetAttention._forward_core
     dcut_forward_core._dcut_patched = True  # type: ignore[attr-defined]
 
-    # ``forward`` remains the vllm-ascend implementation and therefore still
-    # enters torch.ops.vllm.qwen_gdn_attention_core, the PIECEWISE split point.
-    # Only the Python body invoked from that split point changes.
+    # ``forward`` remains the vllm-ascend implementation and still enters
+    # torch.ops.vllm.qwen_gdn_attention_core. The early config patch decides
+    # whether that custom op is an eager boundary or part of a PIECEWISE graph.
     ascend_gdn.AscendGatedDeltaNetAttention._forward_core = dcut_forward_core
     target_class._forward_core = dcut_forward_core
     logger.info(
-        "D-Cut: enabled independent recurrent/conv state selection inside "
-        "the native vLLM 0.23 PIECEWISE GDN split op."
+        "D-Cut: enabled independent recurrent/conv state selection for "
+        "the vLLM 0.23 GDN core."
     )
     return True

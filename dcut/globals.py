@@ -20,7 +20,7 @@ Only active for parallel speculative methods: ``method=dflash``, or
 ------------------------------------------------------------------------------
 GPU -> NPU deltas include two D-Cut state-aware custom operators for GDN
 spec-decode. The Python control loop still patches only the NPU runner and
-the ``_forward_core`` invoked inside the native PIECEWISE GDN splitting op:
+the GDN ``_forward_core`` invoked behind the native custom-op API:
 
   1. Patch targets: ``NPUModelRunner`` (vllm_ascend.worker.model_runner_v1) /
      ``NPUWorker`` (vllm_ascend.worker.worker) / the Ascend spec-decode
@@ -81,16 +81,12 @@ ENV_PROFILE_FORCE_EAGER = "VLLM_DCUT_PROFILE_FORCE_EAGER"
 ENV_FULL_DECODE_ONLY = "VLLM_DCUT_FULL_DECODE_ONLY"
 ENV_GDN_SHARED_STATIC = "VLLM_DCUT_GDN_SHARED_STATIC"
 
-# vLLM 0.23 owns GDN graph inputs through GDNSpecDecodeMetadata and keeps the
-# attention core as a splitting op in PIECEWISE mode. The removed 0.22
-# graph-task host-argument APIs must not be patched.
+# Compatibility flag used only by the retired patch_gdn.py path. The active
+# v0.23 path is controlled by the registered
+# VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE variable in vllm_ascend/envs.py.
 ENABLE_GDN_MAIN_PIECEWISE_GRAPH = False
 
-# ── Static GDN buffers for PIECEWISE graph replay ──────────────────
-# Pre-allocated ASL/SSI/NAT buffers with stable data_ptr.
-# Filled graph-externally by _dcut_update_gdn_static() in _model_forward
-# before each replay. The GDN op inside the captured graph reads these buffers
-# at replay time.
-#
-# Key: (prefix, num_tokens, "spec"|"nonspec")
+# Fixed-address GDN metadata buffers. The active v0.23 graph key contains the
+# model instance, layer prefix and padded token bucket so target/draft models
+# and different layers cannot alias state metadata across replay.
 _dcut_gdn_static = {}

@@ -14,27 +14,9 @@ from __future__ import annotations
 import os
 
 _TARGET_OP = "vllm::qwen_gdn_attention_core"
-
-
-def _is_enabled():
-    """Check whether the GDN PIECEWISE patch should be active.
-
-    Reads the module-level ``ENABLE_GDN_MAIN_PIECEWISE_GRAPH`` flag from
-    ``globals`` if available, then allows an env-var override
-    (``VLLM_DCUT_GDN_PIECEWISE``) so the user can force-enable without
-    editing ``globals.py``.
-    """
-    try:
-        from .globals import ENABLE_GDN_MAIN_PIECEWISE_GRAPH as _flag
-    except Exception:
-        _flag = False
-    # Env var override — "0"/"false" disables, "1"/"true" enables.
-    env = os.environ.get("VLLM_DCUT_GDN_PIECEWISE", "").strip().lower()
-    if env in ("1", "true", "yes", "on"):
-        return True
-    if env in ("0", "false", "no", "off"):
-        return False
-    return bool(_flag)
+ENV_DCUT_CONFIG = "VLLM_DCUT_CONFIG"
+ENV_GDN_PIECEWISE = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"
+LEGACY_ENV_GDN_PIECEWISE = "VLLM_DCUT_GDN_PIECEWISE"
 
 
 def _filter_splitting_ops(ops):
@@ -46,6 +28,32 @@ def _filter_splitting_ops(ops):
     if ops is None:
         return None
     return [op for op in ops if op != _TARGET_OP]
+
+
+def _env_flag(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_enabled() -> bool:
+    """Return whether GDN may be captured by PIECEWISE ACLGraph.
+
+    The registered vllm-ascend variable is authoritative. The earlier
+    D-Cut-only spelling remains accepted so existing launch scripts do not
+    silently lose the optimization.
+    """
+    if not os.environ.get(ENV_DCUT_CONFIG):
+        return False
+
+    legacy = os.environ.get(LEGACY_ENV_GDN_PIECEWISE)
+    if legacy is not None:
+        return _env_flag(legacy)
+
+    try:
+        from vllm_ascend import envs
+
+        return bool(envs.VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE)
+    except (AttributeError, ImportError, ValueError):
+        return _env_flag(os.environ.get(ENV_GDN_PIECEWISE, "0"))
 
 
 def _arm_gdn_piecewise_splitting_patch():
@@ -64,8 +72,8 @@ def _arm_gdn_piecewise_splitting_patch():
     if not _is_enabled():
         print(
             "[D-Cut] GDN PIECEWISE split patch SKIPPED "
-            "(ENABLE_GDN_MAIN_PIECEWISE_GRAPH=False, "
-            "set VLLM_DCUT_GDN_PIECEWISE=1 to force-enable).",
+            f"(requires {ENV_DCUT_CONFIG} and "
+            f"{ENV_GDN_PIECEWISE}=1).",
             flush=True,
         )
         return

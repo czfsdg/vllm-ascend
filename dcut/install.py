@@ -10,45 +10,24 @@ import os
 # vLLM service process.
 print(
     f"[D-Cut] install module imported by pid={os.getpid()} "
-    f"(VLLM_DCUT_GDN_PIECEWISE={os.environ.get('VLLM_DCUT_GDN_PIECEWISE', '<unset>')}).",
+    "(GDN PIECEWISE graph switch is evaluated during config creation).",
     flush=True,
 )
 
 from .globals import ENV_CONFIG, logger
+from .patch_attention import _patch_attention
 # Importing patch_piecewise triggers its module-level arming of the
 # CompilationConfig.set_splitting_ops_for_v1 patch — this is what makes the
 # GDN PIECEWISE patch take effect in the EngineCore process (where
 # install() is never called).  The explicit _arm_* call in install() below
 # is kept as a belt-and-suspenders for the Worker process.
-from .patch_piecewise import _arm_gdn_piecewise_splitting_patch
+from .patch_piecewise import (
+    _arm_gdn_piecewise_splitting_patch,
+    _is_enabled as _gdn_piecewise_graph_enabled,
+)
 from .patch_proposer import _patch_proposer
 from .patch_runner import _patch_runner
 from .patch_worker import _patch_worker
-
-
-def _select_gdn_patch():
-    """Pick the GDN _forward_core patch.
-
-    - VLLM_DCUT_GDN_PIECEWISE=1 → patch_gdn.py (graph-capture-aware, uses
-      pre-allocated static buffers for conv1d/recurrent during ACLGraph
-      capture/replay).
-    - Otherwise → patch_gdn_v023.py (eager-only, uses dcut custom ops
-      npu_dcut_causal_conv1d / npu_dcut_recurrent_gated_delta_rule).
-    """
-    env = os.environ.get("VLLM_DCUT_GDN_PIECEWISE", "").strip().lower()
-    if env in ("1", "true", "yes", "on"):
-        from .patch_gdn import _patch_gdn_dcut as _impl
-        logger.warning(
-            "D-Cut: using PIECEWISE-aware GDN patch (patch_gdn.py) — "
-            "graph capture branches enabled."
-        )
-    else:
-        from .patch_gdn_v023 import _patch_gdn_dcut as _impl
-        logger.warning(
-            "D-Cut: using eager GDN patch (patch_gdn_v023.py) — "
-            "no graph capture branches."
-        )
-    return _impl
 
 
 def _apply_patches_once() -> None:
@@ -63,10 +42,20 @@ def _apply_patches_once() -> None:
     # on every subsequent worker construction and does not spam the log.
     _g._PATCHED = True
     try:
-        _patch_gdn = _select_gdn_patch()
-        if os.environ.get(ENV_CONFIG) and not _patch_gdn():
+        from .patch_gdn_v023 import _patch_gdn_dcut
+
+        if os.environ.get(ENV_CONFIG) and not _patch_gdn_dcut():
             raise RuntimeError(
                 "D-Cut GDN state operators are unavailable; run `bash dcut/kernel/build.sh` first"
+            )
+        if (
+            os.environ.get(ENV_CONFIG)
+            and _gdn_piecewise_graph_enabled()
+            and not _patch_attention()
+        ):
+            raise RuntimeError(
+                "D-Cut could not preserve the eager full-attention "
+                "boundary while capturing GDN"
             )
         _patch_proposer()
         _patch_runner()

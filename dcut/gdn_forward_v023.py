@@ -17,6 +17,7 @@
 
 import torch
 from einops import rearrange
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
@@ -34,6 +35,9 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+from .gdn_buffers import _dcut_get_gdn_piecewise_spec_bufs
+from .globals import logger
 
 
 DCUT_PAD_SLOT_ID = -1
@@ -196,14 +200,51 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        piecewise_spec_bufs = None
+        if (
+            getattr(forward_context, "capturing", False)
+            and getattr(
+                forward_context, "cudagraph_runtime_mode", None
+            )
+            == CUDAGraphMode.PIECEWISE
+        ):
+            if not torch.npu.is_current_stream_capturing():
+                raise RuntimeError(
+                    "D-Cut GDN reached the PIECEWISE capture branch outside "
+                    "an active ACLGraph stream capture; the GDN core is still "
+                    "executing at a graph boundary"
+                )
+            piecewise_spec_bufs = _dcut_get_gdn_piecewise_spec_bufs(
+                forward_context,
+                self.prefix,
+                mixed_qkv.shape[0],
+            )
+            if not getattr(
+                self,
+                "_dcut_piecewise_stream_capture_verified",
+                False,
+            ):
+                logger.warning(
+                    "D-Cut: GDN core entered an active PIECEWISE ACLGraph "
+                    "capture (prefix=%s, token_bucket=%d).",
+                    self.prefix,
+                    mixed_qkv.shape[0],
+                )
+                self._dcut_piecewise_stream_capture_verified = True
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        if piecewise_spec_bufs is not None:
+            spec_state_indices_tensor = piecewise_spec_bufs["ssi"]
         self_kv_cache = self.kv_cache
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_actual_tokens = (
+            mixed_qkv.shape[0]
+            if piecewise_spec_bufs is not None
+            else attn_metadata.num_actual_tokens
+        )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -227,8 +268,26 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
-            spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
-            output_spec = torch.empty_like(mixed_qkv_spec)
+            spec_query_start_loc_device = (
+                piecewise_spec_bufs["qsl"]
+                if piecewise_spec_bufs is not None
+                else spec_causal_conv1d_meta.query_start_loc
+            )
+            spec_cache_indices = (
+                piecewise_spec_bufs["ssi"]
+                if piecewise_spec_bufs is not None
+                else spec_causal_conv1d_meta.cache_indices
+            )
+            spec_num_accepted_tokens = (
+                piecewise_spec_bufs["nat"]
+                if piecewise_spec_bufs is not None
+                else spec_causal_conv1d_meta.num_accepted_tokens
+            )
+            output_spec = (
+                torch.zeros_like(mixed_qkv_spec)
+                if piecewise_spec_bufs is not None
+                else torch.empty_like(mixed_qkv_spec)
+            )
             _run_spec_causal_conv1d(
                 output_spec,
                 mixed_qkv_spec,
@@ -236,8 +295,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self_kv_cache[0],
                 self.conv1d.bias,
                 spec_query_start_loc_device,
-                spec_causal_conv1d_meta.cache_indices,
-                spec_causal_conv1d_meta.num_accepted_tokens,
+                spec_cache_indices,
+                spec_num_accepted_tokens,
                 activation_num,
             )
             mixed_qkv_spec = output_spec
@@ -364,7 +423,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+            actual_seq_lengths = (
+                piecewise_spec_bufs["asl"]
+                if piecewise_spec_bufs is not None
+                else attn_metadata.spec_decode_metadata.actual_seq_lengths
+            )
+            recurrent_num_accepted_tokens = (
+                piecewise_spec_bufs["nat"]
+                if piecewise_spec_bufs is not None
+                else spec_causal_conv1d_meta.num_accepted_tokens.to(
+                    torch.int32
+                )
+            )
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
@@ -381,8 +451,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                num_accepted_tokens=recurrent_num_accepted_tokens,
             ).unsqueeze(0)
+            if piecewise_spec_bufs is not None:
+                valid_tokens = piecewise_spec_bufs["token_mask"].view(
+                    1, -1, 1, 1
+                )
+                core_attn_out_spec = torch.where(
+                    valid_tokens,
+                    core_attn_out_spec,
+                    torch.zeros_like(core_attn_out_spec),
+                )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 

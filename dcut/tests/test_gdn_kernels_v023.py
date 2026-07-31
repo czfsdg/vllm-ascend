@@ -10,13 +10,23 @@ def _read(relative_path: str) -> str:
     return (DCUT_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_piecewise_forward_boundary_is_preserved() -> None:
+def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     patch = _read("patch_gdn_v023.py")
+    piecewise = _read("patch_piecewise.py")
     core = _read("gdn_forward_v023.py")
+    runner = _read("patch_runner.py")
 
     assert "target_class._forward_core = dcut_forward_core" in patch
     assert "target_class.forward =" not in patch
     assert "torch.ops.vllm.qwen_gdn_attention_core" in core
+    assert "_TARGET_OP = \"vllm::qwen_gdn_attention_core\"" in piecewise
+    assert "_filter_splitting_ops(self.splitting_ops)" in piecewise
+    assert "_dcut_get_gdn_piecewise_spec_bufs" in core
+    assert "piecewise_spec_bufs[\"token_mask\"]" in core
+    assert "_dcut_prepare_gdn_piecewise_replay" in runner
+    assert "CUDAGraphMode.NONE" in runner
+    assert "_dcut_gdn_piecewise_capture_sizes" in runner
+    assert "torch.npu.is_current_stream_capturing()" in core
     assert "npu_dcut_causal_conv1d" in core
     assert "npu_dcut_recurrent_gated_delta_rule" in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
