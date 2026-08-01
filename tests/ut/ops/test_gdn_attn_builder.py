@@ -295,6 +295,29 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_stable_argsort_casts_bool_mask_to_float32(monkeypatch):
+    captured = {}
+    expected = torch.tensor([1, 3, 0, 2], dtype=torch.int64)
+
+    def fake_argsort(tensor, *, stable):
+        captured["dtype"] = tensor.dtype
+        captured["stable"] = stable
+        return expected
+
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder.torch,
+        "argsort",
+        fake_argsort,
+    )
+
+    result = ascend_gdn_attn_builder._stable_argsort_for_npu(
+        torch.tensor([True, False, True, False])
+    )
+
+    assert torch.equal(result, expected)
+    assert captured == {"dtype": torch.float32, "stable": True}
+
+
 def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder

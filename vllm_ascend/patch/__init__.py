@@ -525,7 +525,7 @@
 #       1. 'torch.argsort' func of npu does not support bool.
 #       2. Without `stable=True`, the output will have a lot of redundant tokens.
 #    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32
+#       Replace with a new torch.argsort that will cast the input to torch.float32
 #       and do stable sort.
 #    Related PR (if no, explain why):
 #       1. It depends on torch_npu.
