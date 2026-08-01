@@ -86,11 +86,14 @@ def _dcut_truncate(self, scheduler_output):
 
         trimmed_tokens += max_draft_len - target_len
         new_num_scheduled[req_id] -= max_draft_len - target_len
-        if target_len:
-            new_spec[req_id] = draft_tokens[:target_len]
-        else:
-            # An empty entry still makes model_runner treat this as a spec step.
-            new_spec.pop(req_id)
+        # Keep zero-length decisions as empty speculative entries. The model
+        # runner represents a speculative request with no draft tokens as
+        # num_decode_draft_tokens == 0 (ordinary decode/prefill uses -1).
+        # Dropping the key would therefore turn a pure-spec batch into a mixed
+        # spec/non-spec batch, making GDN take its prefill fallback and miss the
+        # local PIECEWISE graph. Retaining the key keeps the one anchor token
+        # on the speculative path without adding verifier tokens.
+        new_spec[req_id] = draft_tokens[:target_len]
 
     _dcut_record_trim(
         self,
