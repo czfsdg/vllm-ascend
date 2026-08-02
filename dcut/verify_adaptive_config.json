@@ -15,5 +15,9 @@
   "warmup_seq_lens": 4096,
   "n_warmup_iters": 3,
   "n_measure_iters": 5,
-  "cost_table_dump_path": null
+  "cost_table_dump_path": null,
+  "runtime_cost_calibration": true,
+  "runtime_cost_samples_per_bucket": 8,
+  "runtime_cost_ewma_alpha": 0.25,
+  "runtime_cost_dump_path": null
 }

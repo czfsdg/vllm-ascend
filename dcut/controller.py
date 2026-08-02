@@ -30,6 +30,7 @@ def _dcut_init_controller(self) -> None:
     self._adaptive_num_reqs = 0
     self._adaptive_req_ids = []
     self._adaptive_active = set()
+    self._adaptive_cost_mode = "all"
     # Verify-reduction stats (how much D-Cut trimmed); logged every N steps.
     self._dcut_stat_full = 0
     self._dcut_stat_trimmed = 0
@@ -39,6 +40,14 @@ def _dcut_init_controller(self) -> None:
     self._dcut_trim_stats_out = os.environ.get(ENV_TRIM_STATS_OUT) or None
     self._dcut_missing_probs_steps = 0
     self._dcut_logged_drafter_probs = False
+    self._dcut_runtime_timing = None
+    self._dcut_last_step_cost_mode = "all"
+    self._dcut_step_copy_ms = 0.0
+    self._dcut_step_prob_queue_ms = 0.0
+    self._dcut_step_sample_core_ms = 0.0
+    self._dcut_step_bookkeeping_ms = 0.0
+    self._dcut_step_draft_model_ms = 0.0
+    self._dcut_prev_sample_end = None
 
     cfg_path = os.environ.get(ENV_CONFIG) or None
     if not cfg_path:

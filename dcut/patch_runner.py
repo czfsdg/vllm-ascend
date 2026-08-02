@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from .controller import _dcut_init_controller, _dcut_enable_drafter_probs
 from .dcut_profile import _adaptive_profile_run
@@ -18,6 +19,54 @@ from .probs import (
 from .truncate import _dcut_truncate
 
 ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
+
+
+def _dcut_runtime_mode(
+    runner,
+    *,
+    batch_size: int,
+    spec_request_count: int,
+) -> str:
+    if spec_request_count <= 0:
+        return "non_spec"
+    if spec_request_count != batch_size:
+        return "mixed"
+    if getattr(runner, "_dcut_step_gdn_graph_safe", False):
+        return "pure_spec_graph"
+    return "pure_spec_eager_gdn"
+
+
+def _dcut_finish_execute_timing(
+    runner,
+    scheduler_output,
+    execute_start_s: float,
+) -> None:
+    timing = getattr(runner, "_dcut_runtime_timing", None)
+    execute_end_s = (
+        time.perf_counter() if timing is not None else 0.0
+    )
+    batch_size = len(getattr(scheduler_output, "num_scheduled_tokens", {}))
+    spec_request_count = len(
+        getattr(scheduler_output, "scheduled_spec_decode_tokens", {}) or {}
+    )
+    mode = _dcut_runtime_mode(
+        runner,
+        batch_size=batch_size,
+        spec_request_count=spec_request_count,
+    )
+    runner._dcut_last_step_cost_mode = mode
+    if timing is None:
+        return
+    timing.update(
+        {
+            "batch_size": batch_size,
+            "sum_query_len": int(scheduler_output.total_num_scheduled_tokens),
+            "mode": mode,
+            "execute_start_s": execute_start_s,
+            "execute_end_s": execute_end_s,
+            "execute_wall_ms": (execute_end_s - execute_start_s) * 1e3,
+        }
+    )
 
 
 def _dcut_piecewise_capture_dummy_enabled(
@@ -223,6 +272,10 @@ def _patch_runner() -> None:
                     capture_dummy
                 )
 
+        self._dcut_step_gdn_graph_safe = bool(
+            getattr(self, "_dcut_step_gdn_graph_safe", False)
+            or graph_safe
+        )
         if capture_dummy and not graph_safe:
             raise RuntimeError(
                 "D-Cut could not build pure speculative GDN metadata "
@@ -267,6 +320,66 @@ def _patch_runner() -> None:
         _ctrl = getattr(self, "_verify_adaptive_controller", None)
         _has_spec = bool(getattr(scheduler_output, "scheduled_spec_decode_tokens", None))
         debug_stats = bool(os.environ.get(ENV_DEBUG_STATS))
+        _batch_size = len(
+            getattr(scheduler_output, "num_scheduled_tokens", {})
+        )
+        _spec_request_count = len(
+            getattr(
+                scheduler_output,
+                "scheduled_spec_decode_tokens",
+                {},
+            )
+            or {}
+        )
+        self._dcut_step_gdn_graph_safe = False
+        _last_runtime_mode = getattr(
+            self, "_dcut_last_step_cost_mode", "all"
+        )
+        if _spec_request_count != _batch_size:
+            _provisional_mode = "mixed"
+        elif _last_runtime_mode in (
+            "pure_spec_graph",
+            "pure_spec_eager_gdn",
+        ):
+            _provisional_mode = _last_runtime_mode
+        elif self._dcut_gdn_piecewise_enabled:
+            _provisional_mode = "pure_spec_graph"
+        else:
+            _provisional_mode = "pure_spec_eager_gdn"
+        _measure_runtime = bool(
+            _ctrl is not None
+            and _has_spec
+            and _ctrl.should_measure_runtime_step(
+                batch_size=_batch_size,
+                mode=_provisional_mode,
+            )
+        )
+        if _measure_runtime:
+            self._sync_device()
+            _step_start_s = time.perf_counter()
+            _previous_end_s = getattr(
+                self, "_dcut_prev_sample_end", None
+            )
+            self._dcut_runtime_timing = {
+                "step_start_s": _step_start_s,
+                "inter_step_gap_ms": (
+                    (_step_start_s - _previous_end_s) * 1e3
+                    if _previous_end_s is not None
+                    else 0.0
+                ),
+            }
+            self._dcut_step_copy_ms = 0.0
+            self._dcut_step_prob_queue_ms = 0.0
+            self._dcut_step_sample_core_ms = 0.0
+            self._dcut_step_bookkeeping_ms = 0.0
+            self._dcut_step_draft_model_ms = 0.0
+        else:
+            self._dcut_runtime_timing = None
+        _prepare_start_s = (
+            time.perf_counter()
+            if self._dcut_runtime_timing is not None
+            else 0.0
+        )
         # Capture trim info before truncation only when optional debug timing is
         # enabled.  The regular D-Cut trim logger already records verify-token
         # reduction inside _dcut_truncate; keeping a second unconditional stats
@@ -280,9 +393,20 @@ def _patch_runner() -> None:
             _dcut_enable_drafter_probs(self)
             if dcut_enabled:
                 scheduler_output = _dcut_truncate(self, scheduler_output)
+        if self._dcut_runtime_timing is not None:
+            self._dcut_runtime_timing["dcut_prepare_ms"] = (
+                time.perf_counter() - _prepare_start_s
+            ) * 1e3
 
         if not debug_stats:
-            return _orig_exec(self, scheduler_output, intermediate_tensors)
+            _execute_start_s = (
+                time.perf_counter() if _measure_runtime else 0.0
+            )
+            result = _orig_exec(self, scheduler_output, intermediate_tensors)
+            _dcut_finish_execute_timing(
+                self, scheduler_output, _execute_start_s
+            )
+            return result
 
         # Optional slow-path debug timing.  Keep it behind an env gate because
         # perf_counter plus per-step Python aggregation is visible at high ITL.
@@ -293,6 +417,7 @@ def _patch_runner() -> None:
         import time as _time
         _t0 = _time.perf_counter()
         result = _orig_exec(self, scheduler_output, intermediate_tensors)
+        _dcut_finish_execute_timing(self, scheduler_output, _t0)
         _fwd_ms = (_time.perf_counter() - _t0) * 1000
         if not hasattr(self, "_dcut_fwd_accum"):
             self._dcut_fwd_accum = {"full": 0, "kept": 0, "cut": 0, "fwd_ms": 0.0, "steps": 0, "spec_steps": 0}
@@ -317,30 +442,168 @@ def _patch_runner() -> None:
         return result
 
     _orig_sample_tokens = R.sample_tokens
+    _orig_sample_core = R._sample
+    _orig_bookkeeping_sync = R._bookkeeping_sync
+    _orig_propose_draft_token_ids = R.propose_draft_token_ids
+
+    def _sample(self, *a, **k):
+        timing = getattr(self, "_dcut_runtime_timing", None)
+        start_s = time.perf_counter() if timing is not None else 0.0
+        result = _orig_sample_core(self, *a, **k)
+        if timing is not None:
+            self._dcut_step_sample_core_ms += (
+                time.perf_counter() - start_s
+            ) * 1e3
+        return result
+
+    def _bookkeeping_sync(self, *a, **k):
+        timing = getattr(self, "_dcut_runtime_timing", None)
+        start_s = time.perf_counter() if timing is not None else 0.0
+        result = _orig_bookkeeping_sync(self, *a, **k)
+        if timing is not None:
+            self._dcut_step_bookkeeping_ms += (
+                time.perf_counter() - start_s
+            ) * 1e3
+        return result
+
+    def propose_draft_token_ids(self, *a, **k):
+        timing = getattr(self, "_dcut_runtime_timing", None)
+        start_s = time.perf_counter() if timing is not None else 0.0
+        result = _orig_propose_draft_token_ids(self, *a, **k)
+        if timing is not None:
+            self._dcut_step_draft_model_ms += (
+                time.perf_counter() - start_s
+            ) * 1e3
+        return result
 
     def sample_tokens(self, *a, **k):
+        timing = getattr(self, "_dcut_runtime_timing", None)
+        sample_start_s = (
+            time.perf_counter() if timing is not None else 0.0
+        )
         out = _orig_sample_tokens(self, *a, **k)
+        sample_end_s = (
+            time.perf_counter() if timing is not None else 0.0
+        )
         if os.environ.get(ENV_FULL_DECODE_ONLY):
             return out
+
+        decision_start_s = (
+            time.perf_counter() if timing is not None else 0.0
+        )
         if getattr(self, "_adaptive_probs_pending", False):
             try:
                 _maybe_process_adaptive_probs(self)
             except Exception as e:
                 logger.warning("D-Cut: process probs failed: %s", e)
                 self._adaptive_probs_pending = False
+        decision_end_s = (
+            time.perf_counter() if timing is not None else 0.0
+        )
+
+        if timing is not None:
+            drain_start_s = time.perf_counter()
+            self._sync_device()
+            step_end_s = time.perf_counter()
+            execute_end_s = timing.get(
+                "execute_end_s", sample_start_s
+            )
+            sample_tokens_ms = (
+                sample_end_s - sample_start_s
+            ) * 1e3
+            sample_core_ms = getattr(
+                self, "_dcut_step_sample_core_ms", 0.0
+            )
+            bookkeeping_ms = getattr(
+                self, "_dcut_step_bookkeeping_ms", 0.0
+            )
+            draft_model_ms = getattr(
+                self, "_dcut_step_draft_model_ms", 0.0
+            )
+            draft_copy_ms = getattr(
+                self, "_dcut_step_copy_ms", 0.0
+            )
+            prob_queue_ms = getattr(
+                self, "_dcut_step_prob_queue_ms", 0.0
+            )
+            sample_other_ms = max(
+                sample_tokens_ms
+                - sample_core_ms
+                - bookkeeping_ms
+                - draft_model_ms
+                - draft_copy_ms
+                - prob_queue_ms,
+                0.0,
+            )
+            runner_step_s = step_end_s - timing["step_start_s"]
+            scheduler_gap_s = max(
+                timing.get("inter_step_gap_ms", 0.0) / 1e3,
+                0.0,
+            )
+            full_iteration_s = runner_step_s + scheduler_gap_s
+            components_ms = {
+                "full_iteration_total": full_iteration_s * 1e3,
+                "scheduler_and_ipc_gap": scheduler_gap_s * 1e3,
+                "runner_step_total": runner_step_s * 1e3,
+                "dcut_prepare": timing.get("dcut_prepare_ms", 0.0),
+                "target_execute_total": timing.get(
+                    "execute_wall_ms", 0.0
+                ),
+                "execute_to_sample_gap": (
+                    sample_start_s - execute_end_s
+                ) * 1e3,
+                "sample_tokens_total": sample_tokens_ms,
+                "sampling": sample_core_ms,
+                "bookkeeping": bookkeeping_ms,
+                "draft_model": draft_model_ms,
+                "draft_id_copy": draft_copy_ms,
+                "selected_probs_queue": prob_queue_ms,
+                "sample_tokens_other": sample_other_ms,
+                "adaptive_decision": (
+                    decision_end_s - decision_start_s
+                ) * 1e3,
+                "device_drain": (step_end_s - drain_start_s) * 1e3,
+            }
+            ctrl = getattr(self, "_verify_adaptive_controller", None)
+            if ctrl is not None:
+                ctrl.observe_runtime_step(
+                    batch_size=timing["batch_size"],
+                    sum_query_len=timing["sum_query_len"],
+                    mode=timing["mode"],
+                    full_step_s=full_iteration_s,
+                    components_ms=components_ms,
+                )
+            self._dcut_runtime_timing = None
+            self._dcut_prev_sample_end = time.perf_counter()
+        else:
+            self._dcut_prev_sample_end = None
         return out
 
     _orig_copy = R._copy_draft_token_ids_to_cpu
 
     def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
+        timing = getattr(self, "_dcut_runtime_timing", None)
+        copy_start_s = time.perf_counter() if timing is not None else 0.0
         _orig_copy(self, scheduler_output, zeros_only)
+        if timing is not None:
+            self._dcut_step_copy_ms = (
+                time.perf_counter() - copy_start_s
+            ) * 1e3
         if os.environ.get(ENV_FULL_DECODE_ONLY):
             return
         if getattr(self, "_verify_adaptive_controller", None) is not None:
+            queue_start_s = (
+                time.perf_counter() if timing is not None else 0.0
+            )
             try:
                 _dcut_queue_probs(self, zeros_only)
             except Exception as e:
                 logger.warning("D-Cut: queue probs failed: %s", e)
+            finally:
+                if timing is not None:
+                    self._dcut_step_prob_queue_ms = (
+                        time.perf_counter() - queue_start_s
+                    ) * 1e3
 
     _orig_update = R._update_states
 
@@ -358,6 +621,9 @@ def _patch_runner() -> None:
     R._should_build_dummy_attn_metadata = _should_build_dummy_attn_metadata
     R.execute_model = execute_model
     R.sample_tokens = sample_tokens
+    R._sample = _sample
+    R._bookkeeping_sync = _bookkeeping_sync
+    R.propose_draft_token_ids = propose_draft_token_ids
     R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     R._update_states = _update_states
     R._adaptive_profile_run = _adaptive_profile_run
