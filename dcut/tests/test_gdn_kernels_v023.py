@@ -34,6 +34,21 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
 
 
+def test_piecewise_replay_preserves_previous_accepted_state() -> None:
+    buffers = _read("gdn_buffers.py")
+    fill_start = buffers.index(
+        "def _dcut_fill_gdn_piecewise_spec_bufs("
+    )
+    fill_end = buffers.index(
+        "def _dcut_prepare_gdn_piecewise_replay("
+    )
+    fill = buffers[fill_start:fill_end]
+
+    assert "nat[:num_spec_decodes].copy_(" in fill
+    assert "torch.minimum(" not in fill
+    assert "current segment length" in fill
+
+
 def test_recurrent_kernel_uses_fixed_request_rows() -> None:
     for relative_path in (
         "kernel/dcut_recurrent_gated_delta_rule/vendor/op_kernel/recurrent_gated_delta_rule.h",

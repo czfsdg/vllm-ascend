@@ -73,7 +73,10 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
 
     assert bufs["qsl"].tolist() == [0, 2, 3, 3, 3]
     assert bufs["asl"].tolist() == [0, 2, 1, 0, 0]
-    assert bufs["nat"].tolist() == [2, 1, 0, 0]
+    # NAT addresses the state selected by the previous verifier step.  The
+    # second request accepted three tokens previously even though this step's
+    # segment contains only one token, so it must not be clamped to ASL.
+    assert bufs["nat"].tolist() == [2, 3, 0, 0]
     assert bufs["ssi"].tolist() == [
         [10, 11, 12],
         [20, 21, 22],
@@ -95,7 +98,7 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
         torch.tensor([0, 1, 3], dtype=torch.int32)
     )
     meta.spec_decode_metadata.spec_causal_conv1d.num_accepted_tokens = (
-        torch.tensor([7, 1], dtype=torch.int64)
+        torch.tensor([3, 1], dtype=torch.int64)
     )
     meta.spec_state_indices_tensor = torch.tensor(
         [[30, 31, 32], [40, 41, 42]], dtype=torch.int32
@@ -110,7 +113,7 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
     )
     assert bufs["qsl"].tolist() == [0, 1, 3, 3, 3]
     assert bufs["asl"].tolist() == [0, 1, 2, 0, 0]
-    assert bufs["nat"].tolist() == [1, 1, 0, 0]
+    assert bufs["nat"].tolist() == [3, 1, 0, 0]
     assert bufs["ssi"][:2].tolist() == [
         [30, 31, 32],
         [40, 41, 42],

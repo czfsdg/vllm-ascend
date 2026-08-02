@@ -428,10 +428,13 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
     accepted_tokens = conv_meta.num_accepted_tokens[
         :num_spec_decodes
     ].to(torch.int32)
-    torch.minimum(
+    # This selects the state produced by the *previous* verifier step.  Its
+    # position is independent of the number of tokens retained by D-Cut for
+    # the current step.  Clamping it to the current segment length makes a
+    # shrinking verifier read an older conv/recurrent state than eager mode.
+    nat[:num_spec_decodes].copy_(
         accepted_tokens,
-        asl[1 : num_spec_decodes + 1],
-        out=nat[:num_spec_decodes],
+        non_blocking=True,
     )
 
     torch.lt(
