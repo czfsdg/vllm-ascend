@@ -286,9 +286,20 @@ def _dcut_update_gdn_static(forward_context, num_tokens, GDNAttentionMetadata):
 
 
 def _dcut_gdn_piecewise_spec_key(forward_context, prefix, num_tokens):
-    """Return a key that does not alias target and draft model buffers."""
+    """Return a prefix-local SSI key isolated by model instance."""
     model_instance = getattr(forward_context, "model_instance", None)
     return (id(model_instance), prefix, num_tokens, "v023_piecewise_spec")
+
+
+def _dcut_gdn_piecewise_shared_key(forward_context, num_tokens):
+    """Return the model-local key for metadata identical across GDN layers."""
+    model_instance = getattr(forward_context, "model_instance", None)
+    return (
+        id(model_instance),
+        "__shared__",
+        num_tokens,
+        "v023_piecewise_spec",
+    )
 
 
 def _dcut_alloc_gdn_piecewise_spec_bufs(
@@ -303,7 +314,9 @@ def _dcut_alloc_gdn_piecewise_spec_bufs(
     PIECEWISE ACLGraph keys contain the padded token count, but not the live
     number of speculative requests. Use the scheduler request capacity for
     every graph of a given token size so that different request compositions
-    can safely replay the same graph.
+    can safely replay the same graph. QSL/ASL/NAT/token mask describe the
+    batch and are shared by all GDN layers. Only state indices remain
+    prefix-local.
     """
     if state_indices.ndim != 2:
         raise RuntimeError(
@@ -311,55 +324,70 @@ def _dcut_alloc_gdn_piecewise_spec_bufs(
             f"got shape={tuple(state_indices.shape)}"
         )
 
-    key = _dcut_gdn_piecewise_spec_key(
-        forward_context, prefix, num_tokens
-    )
     state_index_stride = state_indices.shape[1]
     expected_shape = (max_num_seqs, state_index_stride)
-    bufs = _dcut_gdn_static.get(key)
-    if bufs is not None:
-        if tuple(bufs["ssi"].shape) != expected_shape:
+    device = state_indices.device
+
+    shared_key = _dcut_gdn_piecewise_shared_key(
+        forward_context, num_tokens
+    )
+    shared_bufs = _dcut_gdn_static.get(shared_key)
+    if shared_bufs is None:
+        shared_bufs = {
+            "qsl": torch.zeros(
+                max_num_seqs + 1, dtype=torch.int32, device=device
+            ),
+            "nat": torch.zeros(
+                max_num_seqs, dtype=torch.int32, device=device
+            ),
+            "asl": torch.zeros(
+                max_num_seqs + 1, dtype=torch.int32, device=device
+            ),
+            "token_index": torch.arange(
+                num_tokens, dtype=torch.int32, device=device
+            ),
+            "token_mask": torch.zeros(
+                num_tokens, dtype=torch.bool, device=device
+            ),
+        }
+        _dcut_gdn_static[shared_key] = shared_bufs
+    elif shared_bufs["qsl"].numel() != max_num_seqs + 1:
+        raise RuntimeError(
+            "D-Cut PIECEWISE GDN shared buffer capacity changed for an "
+            f"existing graph key: expected={max_num_seqs + 1}, "
+            f"actual={shared_bufs['qsl'].numel()}"
+        )
+
+    layer_key = _dcut_gdn_piecewise_spec_key(
+        forward_context, prefix, num_tokens
+    )
+    layer_bufs = _dcut_gdn_static.get(layer_key)
+    if layer_bufs is not None:
+        if tuple(layer_bufs["ssi"].shape) != expected_shape:
             raise RuntimeError(
                 "D-Cut PIECEWISE GDN buffer shape changed for an existing "
                 f"graph key: expected={expected_shape}, "
-                f"actual={tuple(bufs['ssi'].shape)}"
+                f"actual={tuple(layer_bufs['ssi'].shape)}"
             )
-        return bufs
-
-    device = state_indices.device
-    bufs = {
-        "qsl": torch.zeros(
-            max_num_seqs + 1, dtype=torch.int32, device=device
-        ),
-        "ssi": torch.full(
-            expected_shape,
-            PAD_SLOT_ID,
-            dtype=torch.int32,
-            device=device,
-        ),
-        "nat": torch.zeros(
-            max_num_seqs, dtype=torch.int32, device=device
-        ),
-        "asl": torch.zeros(
-            max_num_seqs + 1, dtype=torch.int32, device=device
-        ),
-        "token_index": torch.arange(
-            num_tokens, dtype=torch.int32, device=device
-        ),
-        "token_mask": torch.zeros(
-            num_tokens, dtype=torch.bool, device=device
-        ),
-    }
-    _dcut_gdn_static[key] = bufs
-    logger.info(
-        "D-Cut: allocated v0.23 PIECEWISE GDN buffers "
-        "prefix=%s num_tokens=%d max_num_seqs=%d stride=%d",
-        prefix,
-        num_tokens,
-        max_num_seqs,
-        state_index_stride,
-    )
-    return bufs
+    else:
+        layer_bufs = {
+            "ssi": torch.full(
+                expected_shape,
+                PAD_SLOT_ID,
+                dtype=torch.int32,
+                device=device,
+            ),
+        }
+        _dcut_gdn_static[layer_key] = layer_bufs
+        logger.info(
+            "D-Cut: allocated v0.23 PIECEWISE GDN buffers "
+            "prefix=%s num_tokens=%d max_num_seqs=%d stride=%d",
+            prefix,
+            num_tokens,
+            max_num_seqs,
+            state_index_stride,
+        )
+    return {**shared_bufs, **layer_bufs}
 
 
 def _dcut_fill_gdn_piecewise_spec_bufs(
@@ -368,6 +396,7 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
     num_tokens,
     meta,
     max_num_seqs,
+    fill_shared: bool = True,
 ):
     """Refresh fixed-address v0.23 GDN inputs before capture or replay."""
     num_spec_decodes = int(meta.num_spec_decodes)
@@ -394,54 +423,60 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
         max_num_seqs,
     )
 
-    qsl = bufs["qsl"]
-    qsl.zero_()
-    qsl[: num_spec_decodes + 1].copy_(
-        conv_meta.query_start_loc[: num_spec_decodes + 1],
-        non_blocking=True,
-    )
-    qsl_tail = qsl[num_spec_decodes + 1 :]
-    if qsl_tail.numel() > 0:
-        qsl_tail.copy_(
-            qsl[num_spec_decodes].expand_as(qsl_tail),
+    if fill_shared:
+        qsl = bufs["qsl"]
+        qsl[: num_spec_decodes + 1].copy_(
+            conv_meta.query_start_loc[: num_spec_decodes + 1],
             non_blocking=True,
+        )
+        qsl_tail = qsl[num_spec_decodes + 1 :]
+        if qsl_tail.numel() > 0:
+            qsl_tail.copy_(
+                qsl[num_spec_decodes].expand_as(qsl_tail),
+                non_blocking=True,
+            )
+
+        asl = bufs["asl"]
+        asl[:1].zero_()
+        torch.sub(
+            qsl[1 : num_spec_decodes + 1],
+            qsl[:num_spec_decodes],
+            out=asl[1 : num_spec_decodes + 1],
+        )
+        asl_tail = asl[num_spec_decodes + 1 :]
+        if asl_tail.numel() > 0:
+            asl_tail.zero_()
+
+        nat = bufs["nat"]
+        accepted_tokens = conv_meta.num_accepted_tokens[:num_spec_decodes]
+        if accepted_tokens.dtype != torch.int32:
+            accepted_tokens = accepted_tokens.to(torch.int32)
+        # This selects the state produced by the previous verifier step. Its
+        # position is independent of the number of tokens retained by D-Cut
+        # for the current step. Clamping to the current segment length would
+        # select an older recurrent/conv state, so it must not use ASL.
+        nat[:num_spec_decodes].copy_(
+            accepted_tokens,
+            non_blocking=True,
+        )
+        nat_tail = nat[num_spec_decodes:]
+        if nat_tail.numel() > 0:
+            nat_tail.zero_()
+
+        torch.lt(
+            bufs["token_index"],
+            qsl[num_spec_decodes],
+            out=bufs["token_mask"],
         )
 
     ssi = bufs["ssi"]
-    ssi.fill_(PAD_SLOT_ID)
     ssi[:num_spec_decodes].copy_(
         state_indices[:num_spec_decodes],
         non_blocking=True,
     )
-
-    asl = bufs["asl"]
-    asl.zero_()
-    asl[:1].copy_(qsl[:1], non_blocking=True)
-    torch.sub(
-        qsl[1 : num_spec_decodes + 1],
-        qsl[:num_spec_decodes],
-        out=asl[1 : num_spec_decodes + 1],
-    )
-
-    nat = bufs["nat"]
-    nat.zero_()
-    accepted_tokens = conv_meta.num_accepted_tokens[
-        :num_spec_decodes
-    ].to(torch.int32)
-    # This selects the state produced by the *previous* verifier step.  Its
-    # position is independent of the number of tokens retained by D-Cut for
-    # the current step.  Clamping it to the current segment length makes a
-    # shrinking verifier read an older conv/recurrent state than eager mode.
-    nat[:num_spec_decodes].copy_(
-        accepted_tokens,
-        non_blocking=True,
-    )
-
-    torch.lt(
-        bufs["token_index"],
-        qsl[num_spec_decodes],
-        out=bufs["token_mask"],
-    )
+    ssi_tail = ssi[num_spec_decodes:]
+    if ssi_tail.numel() > 0:
+        ssi_tail.fill_(PAD_SLOT_ID)
     return bufs
 
 
@@ -490,13 +525,14 @@ def _dcut_prepare_gdn_piecewise_replay(
     forward_context._dcut_gdn_local_graph_expected_prefixes = (
         frozenset(prefix for prefix, _ in gdn_items)
     )
-    for prefix, meta in gdn_items:
+    for item_index, (prefix, meta) in enumerate(gdn_items):
         _dcut_fill_gdn_piecewise_spec_bufs(
             forward_context,
             prefix,
             num_tokens,
             meta,
             max_num_seqs,
+            fill_shared=item_index == 0,
         )
     return True
 
@@ -507,11 +543,17 @@ def _dcut_get_gdn_piecewise_spec_bufs(
     num_tokens,
 ):
     """Get buffers already prepared by the graph-external runner hook."""
-    key = _dcut_gdn_piecewise_spec_key(
+    shared_key = _dcut_gdn_piecewise_shared_key(
+        forward_context, num_tokens
+    )
+    layer_key = _dcut_gdn_piecewise_spec_key(
         forward_context, prefix, num_tokens
     )
     try:
-        return _dcut_gdn_static[key]
+        return {
+            **_dcut_gdn_static[shared_key],
+            **_dcut_gdn_static[layer_key],
+        }
     except KeyError as exc:
         raise RuntimeError(
             "D-Cut PIECEWISE GDN buffers were not prepared before capture: "

@@ -51,18 +51,19 @@ class VerifyAdaptiveConfig:
     n_measure_iters: int = 5
 
     runtime_cost_calibration: bool = True
-    """Calibrate missing full-step cost on initial real serving batches.
+    """Calibrate complete step cost on real serving batches.
 
     Calibration synchronizes only the first ``runtime_cost_samples_per_bucket``
-    speculative steps for each observed batch/mode bucket. Afterwards the
-    learned fixed cost is reused without a per-step synchronization.
+    speculative steps for each observed batch/query/mode bucket. Afterwards
+    the learned full cost is reused without a per-step synchronization. The
+    startup target+draft profile remains the fallback for unseen buckets.
     """
 
     runtime_cost_samples_per_bucket: int = 8
-    """Number of synchronized real steps used per batch/mode bucket."""
+    """Number of synchronized real steps used per batch/query/mode bucket."""
 
     runtime_cost_ewma_alpha: float = 0.25
-    """EWMA weight for each measured fixed-step residual."""
+    """EWMA weight for each measured complete serving-step cost."""
 
     runtime_cost_dump_path: Optional[str] = None
     """Optional JSONL path for full real-step component observations."""

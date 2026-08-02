@@ -172,3 +172,68 @@ def test_piecewise_buffers_do_not_alias_model_instances() -> None:
     )
 
     assert first_bufs["qsl"].data_ptr() != second_bufs["qsl"].data_ptr()
+
+
+def test_piecewise_layers_share_batch_metadata_and_clear_inactive_tails() -> None:
+    _dcut_gdn_static.clear()
+    first_meta = _make_metadata(
+        [0, 2, 3],
+        [[10, 11, 12], [20, 21, 22]],
+        [2, 3],
+    )
+    second_meta = _make_metadata(
+        [0, 2, 3],
+        [[110, 111, 112], [120, 121, 122]],
+        [2, 3],
+    )
+    context = SimpleNamespace(
+        model_instance=object(),
+        attn_metadata={
+            "layers.0.mixer": first_meta,
+            "layers.1.mixer": second_meta,
+        },
+    )
+
+    assert _dcut_prepare_gdn_piecewise_replay(
+        context, 8, _GDNMetadata, 4
+    )
+    first_bufs = _dcut_get_gdn_piecewise_spec_bufs(
+        context, "layers.0.mixer", 8
+    )
+    second_bufs = _dcut_get_gdn_piecewise_spec_bufs(
+        context, "layers.1.mixer", 8
+    )
+    for name in ("qsl", "asl", "nat", "token_mask"):
+        assert first_bufs[name].data_ptr() == second_bufs[name].data_ptr()
+    assert first_bufs["ssi"].data_ptr() != second_bufs["ssi"].data_ptr()
+    assert first_bufs["ssi"][:2].tolist() == [
+        [10, 11, 12],
+        [20, 21, 22],
+    ]
+    assert second_bufs["ssi"][:2].tolist() == [
+        [110, 111, 112],
+        [120, 121, 122],
+    ]
+
+    # Reuse the same graph bucket with a smaller live batch. Only inactive
+    # tails are cleared, preventing state from the previous replay leaking.
+    context.attn_metadata = {
+        "layers.0.mixer": _make_metadata([0, 1], [[30, 31, 32]], [1]),
+        "layers.1.mixer": _make_metadata(
+            [0, 1], [[130, 131, 132]], [1]
+        ),
+    }
+    assert _dcut_prepare_gdn_piecewise_replay(
+        context, 8, _GDNMetadata, 4
+    )
+    assert first_bufs["qsl"].tolist() == [0, 1, 1, 1, 1]
+    assert first_bufs["asl"].tolist() == [0, 1, 0, 0, 0]
+    assert first_bufs["nat"].tolist() == [1, 0, 0, 0]
+    assert first_bufs["ssi"].tolist() == [
+        [30, 31, 32],
+        [-1, -1, -1],
+        [-1, -1, -1],
+        [-1, -1, -1],
+    ]
+    assert second_bufs["ssi"][0].tolist() == [130, 131, 132]
+    assert second_bufs["ssi"][1:].eq(-1).all()
