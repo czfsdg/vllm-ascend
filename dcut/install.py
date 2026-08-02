@@ -15,6 +15,7 @@ print(
 )
 
 from .globals import ENV_CONFIG, logger
+from .patch_attention import _patch_attention
 # Importing patch_piecewise triggers its module-level arming of the
 # CompilationConfig.set_splitting_ops_for_v1 patch — this is what makes the
 # GDN PIECEWISE patch take effect in the EngineCore process (where
@@ -22,6 +23,7 @@ from .globals import ENV_CONFIG, logger
 # is kept as a belt-and-suspenders for the Worker process.
 from .patch_piecewise import (
     _arm_gdn_piecewise_splitting_patch,
+    _is_enabled as _gdn_piecewise_graph_enabled,
 )
 from .patch_proposer import _patch_proposer
 from .patch_runner import _patch_runner
@@ -45,6 +47,15 @@ def _apply_patches_once() -> None:
         if os.environ.get(ENV_CONFIG) and not _patch_gdn_dcut():
             raise RuntimeError(
                 "D-Cut GDN state operators are unavailable; run `bash dcut/kernel/build.sh` first"
+            )
+        if (
+            os.environ.get(ENV_CONFIG)
+            and _gdn_piecewise_graph_enabled()
+            and not _patch_attention()
+        ):
+            raise RuntimeError(
+                "D-Cut could not preserve the eager full-attention "
+                "boundary while capturing GDN"
             )
         _patch_proposer()
         _patch_runner()

@@ -73,9 +73,12 @@ def test_forward_captures_locally_and_masks_padding() -> None:
     assert "meta.num_decodes) != 0" in buffers
 
 
-def test_gdn_graph_switch_does_not_patch_full_attention() -> None:
+def test_full_attention_remains_an_eager_piecewise_boundary() -> None:
     install = _read("install.py")
+    attention = _read("patch_attention.py")
 
-    assert not (DCUT_ROOT / "patch_attention.py").exists()
-    assert "patch_attention" not in install
-    assert "_patch_attention" not in install
+    assert "and not _patch_attention()" in install
+    assert 'patch_marker = "_dcut_piecewise_fia_patched"' in attention
+    assert "mode == CUDAGraphMode.PIECEWISE" in attention
+    assert "ctx.capturing = False" in attention
+    assert "ctx.capturing = orig_capturing" in attention
