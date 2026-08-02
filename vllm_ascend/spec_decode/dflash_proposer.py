@@ -159,6 +159,7 @@ class AscendDflashProposer(AscendEagleProposer):
         batch_descriptor=None,
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
+        context_num_tokens: int | None = None,
         **kwargs,
     ) -> None:
         num_query_tokens = min(num_tokens, self.max_query_tokens)
@@ -169,13 +170,24 @@ class AscendDflashProposer(AscendEagleProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
 
+        num_context_tokens = (
+            num_input_tokens
+            if context_num_tokens is None
+            else context_num_tokens
+        )
+        if num_context_tokens < 0 or num_context_tokens > self.max_num_tokens:
+            raise ValueError(
+                "DFlash dummy context_num_tokens must be within "
+                f"[0, {self.max_num_tokens}], got {num_context_tokens}."
+            )
+
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = num_reqs * num_query_per_req
 
-        context_positions = self._context_positions_buffer[:num_input_tokens]
-        context_states = self.hidden_states[:num_input_tokens]
+        context_positions = self._context_positions_buffer[:num_context_tokens]
+        context_states = self.hidden_states[:num_context_tokens]
 
         multi_steps_attn_metadata = []
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
@@ -235,7 +247,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 )
 
             else:
-                self._dflash_num_context = num_input_tokens
+                self._dflash_num_context = num_context_tokens
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=num_reqs,

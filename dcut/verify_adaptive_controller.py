@@ -31,14 +31,16 @@ def choose_query_lens_discrete(
     cost_lookup: Callable[[int], float],
     max_draft_len: int,
     collect_records: bool = False,
+    draft_cost_lookup: Callable[[int], float] | None = None,
 ) -> dict[str, Any]:
     """Discrete marginal-gain scan over the *measured* sum_query_len levels.
 
     Since verifier cost depends only on ``(batch_size, sum_query_len)``, the
     candidate Q values are exactly the profiled sum_query_len levels for the
     fixed batch size (e.g. ``bs*2, bs*4, …``).  For each level Q we greedily
-    fill the ``S = Q - base_batch_size`` highest marginal gains and score it as
-    ``(base_batch_size + top_S_gain_sum) / cost_lookup(Q)``, keeping the best Q.
+    fill the ``S = Q - base_batch_size`` highest marginal gains and divide the
+    expected progress by ``target_cost(Q) + draft_cost(Q)``, keeping the best
+    end-to-end Q.
 
     Args:
         probs: per-active-sequence accept probs; ``probs[i][t]`` is the
@@ -73,12 +75,25 @@ def choose_query_lens_discrete(
         if S < 0:
             continue
         S = min(S, total_available)
-        cost = cost_lookup(Q)
-        if cost <= 0.0:
+        target_cost = cost_lookup(Q)
+        draft_cost = (
+            draft_cost_lookup(Q)
+            if draft_cost_lookup is not None
+            else 0.0
+        )
+        cost = target_cost + draft_cost
+        if target_cost <= 0.0 or draft_cost < 0.0 or cost <= 0.0:
             continue
         score = (base_batch_size + prefix_gain[S]) / cost
         if records is not None:
-            records.append({"Q": Q, "S": int(S), "score": score, "cost": cost})
+            records.append({
+                "Q": Q,
+                "S": int(S),
+                "score": score,
+                "cost": cost,
+                "target_cost": target_cost,
+                "draft_cost": draft_cost,
+            })
         if score > best_score:
             best_score, best_Q, best_S = score, Q, S
 
@@ -131,6 +146,9 @@ class VerifyAdaptiveController:
 
         # (batch_size, sum_query_len) → ITL in seconds
         self._cost_table: dict[tuple[int, int], float] = {}
+        # DFlash full proposer cost. Although its draft query shape is fixed by
+        # (B, K), context-KV preparation still consumes Q target hidden states.
+        self._draft_cost_table: dict[tuple[int, int], float] = {}
         self._cost_records: list[dict[str, Any]] = []
         self._sorted_bs: list[int] = []
         self._sorted_sql_per_bs: dict[int, list[int]] = {}
@@ -173,12 +191,10 @@ class VerifyAdaptiveController:
         return sorted(set(levels))
 
     def profile_cost_table(self, runner: Any) -> None:
-        """Measure verifier ITL at each (batch_size, query_len_per_req) point.
+        """Measure target and full DFlash proposer cost at every (B, Q).
 
-        INTEGRATION NOTE: ``runner._dummy_run`` must accept the kwarg
-        ``explicit_scheduled_tokens: list[int] | None``.  When set it
-        bypasses the internal token-distribution logic (see model-runner
-        integration step).
+        The two component tables are retained separately and summed only by
+        the decision objective, so profiling output remains diagnosable.
         """
         if not self.config.enabled:
             return
@@ -222,7 +238,20 @@ class VerifyAdaptiveController:
                 )
                 elapsed_s = avg_ms / 1e3
 
+                (
+                    draft_runtime_mode,
+                    draft_avg_ms,
+                    draft_padded_tokens,
+                ) = runner._adaptive_profile_draft_run(
+                    batch_size=bs,
+                    context_tokens=num_tokens,
+                    n_warmup=self.config.n_warmup_iters,
+                    n_measure=self.config.n_measure_iters,
+                )
+                draft_elapsed_s = draft_avg_ms / 1e3
+
                 self._cost_table[(bs, num_tokens)] = elapsed_s
+                self._draft_cost_table[(bs, num_tokens)] = draft_elapsed_s
                 self._cost_records.append({
                     "batch_size": bs,
                     "query_len_per_req": ql,
@@ -230,8 +259,16 @@ class VerifyAdaptiveController:
                     "padded_tokens": padded_tokens,
                     "seq_lens": self.config.warmup_seq_lens,
                     "runtime_mode": runtime_mode,
-                    "avg_ms": avg_ms,
-                    "cost_s": elapsed_s,
+                    "avg_ms": avg_ms + draft_avg_ms,
+                    "cost_s": elapsed_s + draft_elapsed_s,
+                    "target_avg_ms": avg_ms,
+                    "target_cost_s": elapsed_s,
+                    "draft_runtime_mode": draft_runtime_mode,
+                    "draft_padded_tokens": draft_padded_tokens,
+                    "draft_avg_ms": draft_avg_ms,
+                    "draft_cost_s": draft_elapsed_s,
+                    "total_avg_ms": avg_ms + draft_avg_ms,
+                    "total_cost_s": elapsed_s + draft_elapsed_s,
                 })
                 self._sorted_sql_per_bs[bs].append(num_tokens)
                 if (
@@ -240,11 +277,15 @@ class VerifyAdaptiveController:
                 ):
                     logger.info(
                         "profile  bs=%-4d  ql=%-4d  sql=%-6d  padded=%-6d  "
-                        "seq_lens=%-6d  mode=%-6s  avg=%.3f ms",
+                        "seq_lens=%-6d  target=%-6s %.3f ms  "
+                        "draft=%-6s %.3f ms  total=%.3f ms",
                         bs, ql, num_tokens, padded_tokens,
                         self.config.warmup_seq_lens,
                         runtime_mode,
                         avg_ms,
+                        draft_runtime_mode,
+                        draft_avg_ms,
+                        avg_ms + draft_avg_ms,
                     )
 
         # Keep only batch-size buckets with at least one measured query length.
@@ -264,6 +305,10 @@ class VerifyAdaptiveController:
         tp_group = get_tp_group()
         if tp_group.world_size > 1:
             self._cost_table = tp_group.broadcast_object(self._cost_table, src=0)
+            self._draft_cost_table = tp_group.broadcast_object(
+                self._draft_cost_table,
+                src=0,
+            )
 
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
             logger.info(
@@ -343,6 +388,7 @@ class VerifyAdaptiveController:
             cost_lookup=lambda q: self._cost_table[(bs_key, q)],
             max_draft_len=self.max_query_len_per_req - 1,
             collect_records=bool(decision_dump_path),
+            draft_cost_lookup=lambda q: self._draft_cost_table[(bs_key, q)],
         )
 
         draft_lens = result["draft_lens"]
@@ -404,6 +450,8 @@ class VerifyAdaptiveController:
                 "S": int(record["S"]),
                 "score": float(record["score"]),
                 "cost_ms": float(record["cost"]) * 1e3,
+                "target_cost_ms": float(record["target_cost"]) * 1e3,
+                "draft_cost_ms": float(record["draft_cost"]) * 1e3,
             })
 
         payload = {
@@ -448,7 +496,7 @@ class VerifyAdaptiveController:
         qls = list(self._query_len_levels)
         bss = list(self._batch_size_levels)
         logger.info(
-            "D-Cut cost table (ms/verifier-forward, seq_lens=%d; rows=batch_size, cols=query_len/req):",
+            "D-Cut total cost table (ms/target+draft, seq_lens=%d; rows=batch_size, cols=query_len/req):",
             self.config.warmup_seq_lens,
         )
         header = "  bs\\ql |" + "".join(f"{q:>9d}" for q in qls)
@@ -457,7 +505,15 @@ class VerifyAdaptiveController:
         for bs in bss:
             cells = []
             for ql in qls:
-                cost_s = self._cost_table.get((bs, bs * ql))
+                key = (bs, bs * ql)
+                target_cost_s = self._cost_table.get(key)
+                draft_cost_s = self._draft_cost_table.get(key)
+                cost_s = (
+                    target_cost_s + draft_cost_s
+                    if target_cost_s is not None
+                    and draft_cost_s is not None
+                    else None
+                )
                 cells.append(
                     f"{cost_s * 1e3:>9.2f}" if cost_s is not None else f"{'-':>9}"
                 )
@@ -474,7 +530,9 @@ class VerifyAdaptiveController:
             return
 
         rows = []
-        for (bs, sum_query_len), cost_s in sorted(self._cost_table.items()):
+        for (bs, sum_query_len), target_cost_s in sorted(self._cost_table.items()):
+            draft_cost_s = self._draft_cost_table.get((bs, sum_query_len), 0.0)
+            cost_s = target_cost_s + draft_cost_s
             rows.append({
                 "batch_size": bs,
                 "sum_query_len": sum_query_len,
@@ -484,10 +542,14 @@ class VerifyAdaptiveController:
                 ),
                 "cost_s": cost_s,
                 "cost_ms": cost_s * 1e3,
+                "target_cost_s": target_cost_s,
+                "target_cost_ms": target_cost_s * 1e3,
+                "draft_cost_s": draft_cost_s,
+                "draft_cost_ms": draft_cost_s * 1e3,
             })
 
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "num_spec_tokens": self.num_spec_tokens,
             "max_batch_size": self.max_batch_size,
             "warmup_seq_lens": self.config.warmup_seq_lens,

@@ -6,6 +6,7 @@ import os
 
 from .controller import _dcut_init_controller, _dcut_enable_drafter_probs
 from .dcut_profile import _adaptive_profile_run
+from .draft_profile import _adaptive_profile_draft_run
 from .gdn_buffers import _dcut_prepare_gdn_piecewise_replay
 from .globals import ENV_FULL_DECODE_ONLY, logger
 from .patch_piecewise import _is_enabled as _gdn_piecewise_graph_enabled
@@ -360,6 +361,7 @@ def _patch_runner() -> None:
     R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     R._update_states = _update_states
     R._adaptive_profile_run = _adaptive_profile_run
+    R._adaptive_profile_draft_run = _adaptive_profile_draft_run
     R.profile_adaptive_cost = profile_adaptive_cost
     R._maybe_process_adaptive_probs = _maybe_process_adaptive_probs
     R._dcut_enable_drafter_probs = _dcut_enable_drafter_probs
