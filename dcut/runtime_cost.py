@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Runtime full-step cost calibration for adaptive D-Cut decisions."""
+"""Runtime fixed-cost calibration for adaptive D-Cut decisions."""
 
 from __future__ import annotations
 
@@ -10,22 +10,20 @@ ALL_RUNTIME_MODES = "all"
 
 @dataclass
 class RuntimeCostEstimate:
-    """EWMA estimate measured from complete real serving iterations."""
+    """EWMA estimate of cost missing from the startup NPU profiles."""
 
     samples: int = 0
-    full_step_s: float = 0.0
-    profiled_step_s: float = 0.0
     overhead_s: float = 0.0
 
 
 class RuntimeCostCalibrator:
-    """Learn real cost per ``(batch bucket, query bucket, runtime mode)``.
+    """Learn full-step residual cost per ``(batch bucket, runtime mode)``.
 
-    Startup profiling remains a fallback for query buckets not observed yet.
-    Once a real bucket is sampled, decisions use its complete synchronized
-    iteration cost directly instead of adding a batch-wide residual to every
-    query length. This keeps short-query profile errors from contaminating
-    longer query buckets.
+    Startup profiling measures target and full-drafter device work for every
+    candidate Q. A short synchronized calibration on real serving steps then
+    measures the complete runner pipeline. Their non-negative difference is
+    the fixed cost paid once per speculative iteration (sampling, bookkeeping,
+    metadata/copies, D-Cut and graph dispatch/host work).
     """
 
     def __init__(self, *, alpha: float, samples_per_bucket: int) -> None:
@@ -35,56 +33,31 @@ class RuntimeCostCalibrator:
             raise ValueError("samples_per_bucket must be >= 1.")
         self.alpha = alpha
         self.samples_per_bucket = samples_per_bucket
-        self._estimates: dict[
-            tuple[int, int, str], RuntimeCostEstimate
-        ] = {}
+        self._estimates: dict[tuple[int, str], RuntimeCostEstimate] = {}
 
-    def needs_sample(
-        self,
-        batch_size: int,
-        query_len: int,
-        mode: str,
-    ) -> bool:
-        estimate = self._estimates.get((batch_size, query_len, mode))
+    def needs_sample(self, batch_size: int, mode: str) -> bool:
+        estimate = self._estimates.get((batch_size, mode))
         return estimate is None or estimate.samples < self.samples_per_bucket
 
     def observe(
         self,
         *,
         batch_size: int,
-        query_len: int,
         mode: str,
         full_step_s: float,
         profiled_step_s: float,
     ) -> tuple[float, RuntimeCostEstimate]:
         residual_s = max(float(full_step_s) - float(profiled_step_s), 0.0)
-        exact = self._update(
-            (batch_size, query_len, mode),
-            full_step_s=float(full_step_s),
-            profiled_step_s=float(profiled_step_s),
-            residual_s=residual_s,
-        )
+        exact = self._update((batch_size, mode), residual_s)
         if mode != ALL_RUNTIME_MODES:
-            self._update(
-                (batch_size, query_len, ALL_RUNTIME_MODES),
-                full_step_s=float(full_step_s),
-                profiled_step_s=float(profiled_step_s),
-                residual_s=residual_s,
-            )
+            self._update((batch_size, ALL_RUNTIME_MODES), residual_s)
         return residual_s, exact
 
-    def get(
-        self,
-        batch_size: int,
-        query_len: int,
-        mode: str,
-    ) -> RuntimeCostEstimate:
-        exact = self._estimates.get((batch_size, query_len, mode))
+    def get(self, batch_size: int, mode: str) -> RuntimeCostEstimate:
+        exact = self._estimates.get((batch_size, mode))
         if exact is not None and exact.samples:
             return exact
-        aggregate = self._estimates.get(
-            (batch_size, query_len, ALL_RUNTIME_MODES)
-        )
+        aggregate = self._estimates.get((batch_size, ALL_RUNTIME_MODES))
         if aggregate is not None:
             return aggregate
         return RuntimeCostEstimate()
@@ -93,47 +66,25 @@ class RuntimeCostCalibrator:
         return [
             {
                 "batch_size": batch_size,
-                "query_len": query_len,
                 "mode": mode,
                 "samples": estimate.samples,
-                "full_step_s": estimate.full_step_s,
-                "full_step_ms": estimate.full_step_s * 1e3,
-                "profiled_step_s": estimate.profiled_step_s,
-                "profiled_step_ms": estimate.profiled_step_s * 1e3,
                 "overhead_s": estimate.overhead_s,
                 "overhead_ms": estimate.overhead_s * 1e3,
             }
-            for (
-                batch_size,
-                query_len,
-                mode,
-            ), estimate in sorted(self._estimates.items())
+            for (batch_size, mode), estimate in sorted(self._estimates.items())
         ]
 
     def _update(
         self,
-        key: tuple[int, int, str],
-        *,
-        full_step_s: float,
-        profiled_step_s: float,
-        residual_s: float,
+        key: tuple[int, str],
+        sample_s: float,
     ) -> RuntimeCostEstimate:
         estimate = self._estimates.setdefault(key, RuntimeCostEstimate())
         if estimate.samples == 0:
-            estimate.full_step_s = full_step_s
-            estimate.profiled_step_s = profiled_step_s
-            estimate.overhead_s = residual_s
+            estimate.overhead_s = sample_s
         else:
-            estimate.full_step_s = (
-                self.alpha * full_step_s
-                + (1.0 - self.alpha) * estimate.full_step_s
-            )
-            estimate.profiled_step_s = (
-                self.alpha * profiled_step_s
-                + (1.0 - self.alpha) * estimate.profiled_step_s
-            )
             estimate.overhead_s = (
-                self.alpha * residual_s
+                self.alpha * sample_s
                 + (1.0 - self.alpha) * estimate.overhead_s
             )
         estimate.samples += 1

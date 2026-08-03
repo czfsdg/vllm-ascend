@@ -110,29 +110,3 @@ def test_fixed_step_cost_can_make_longer_verify_shape_optimal() -> None:
     assert records[0]["cost"] == 5.0
     assert records[1]["fixed_cost"] == 4.0
     assert records[1]["cost"] == 6.0
-
-
-def test_runtime_full_cost_overrides_only_observed_query_bucket() -> None:
-    choose = _load_choose_query_lens_discrete()
-    result = choose(
-        probs=[[0.8, 0.8, 0.8], [0.8, 0.8, 0.8]],
-        base_batch_size=2,
-        q_levels=[4, 8],
-        cost_lookup=lambda q: {4: 1.0, 8: 2.0}[q],
-        max_draft_len=3,
-        collect_records=True,
-        full_cost_lookup=lambda q: 5.0 if q == 4 else None,
-    )
-
-    # Q=4 uses the measured complete serving step. Q=8 has no runtime sample
-    # yet, so it keeps the startup profile rather than inheriting Q=4 cost.
-    assert result["best_Q"] == 8
-    records = result["records"]
-    assert records is not None
-    assert records[0]["cost_source"] == "runtime_full"
-    assert records[0]["cost"] == 5.0
-    assert records[0]["profiled_cost"] == 1.0
-    assert records[0]["runtime_full_cost"] == 5.0
-    assert records[1]["cost_source"] == "startup_profile"
-    assert records[1]["cost"] == 2.0
-    assert records[1]["runtime_full_cost"] is None
