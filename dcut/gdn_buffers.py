@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GDN metadata buffers used outside PIECEWISE graph replay.
+"""GDN metadata buffers used by eager and PIECEWISE GDN execution.
 
 The legacy helpers keep their shared ASL/NAT layout for the retired
 ``patch_gdn.py`` path. The active v0.23 capture path deliberately owns fixed
@@ -283,6 +283,91 @@ def _dcut_update_gdn_static(forward_context, num_tokens, GDNAttentionMetadata):
                 prefix, num_tokens, meta, meta.non_spec_query_start_loc.device,
                 fill_shared_asl=fill_shared,
             )
+
+
+def _dcut_prepare_gdn_eager_state(
+    forward_context,
+    GDNAttentionMetadata,
+) -> bool:
+    """Build batch-level speculative state once for all eager GDN layers.
+
+    ``num_accepted_tokens`` and ``actual_seq_lengths`` describe the batch and
+    are identical for every GDN layer. The eager implementation previously
+    cast accepted counts and derived conv-state offsets at every layer. Keep
+    state indices layer-local, but share these batch-level tensors for the
+    duration of one model forward.
+    """
+    forward_context._dcut_gdn_eager_spec_state = None
+    attn_metadata = getattr(forward_context, "attn_metadata", None)
+    if not isinstance(attn_metadata, dict):
+        return False
+
+    spec_items = [
+        meta
+        for meta in attn_metadata.values()
+        if (
+            isinstance(meta, GDNAttentionMetadata)
+            and meta.spec_sequence_masks is not None
+            and int(meta.num_spec_decodes) > 0
+            and meta.spec_decode_metadata is not None
+        )
+    ]
+    if not spec_items:
+        return False
+
+    reference = spec_items[0]
+    num_spec_decodes = int(reference.num_spec_decodes)
+    spec_decode_metadata = reference.spec_decode_metadata
+    conv_metadata = spec_decode_metadata.spec_causal_conv1d
+    num_accepted_tokens = conv_metadata.num_accepted_tokens
+    actual_seq_lengths = spec_decode_metadata.actual_seq_lengths
+    num_conv_requests = int(conv_metadata.cache_indices.shape[0])
+    if (
+        num_accepted_tokens is None
+        or actual_seq_lengths is None
+        or num_accepted_tokens.numel() < num_conv_requests
+    ):
+        return False
+
+    # Only share metadata when every GDN layer describes the same batch
+    # shape. Values are produced from the same scheduler output; state indices
+    # intentionally remain on each layer's metadata object.
+    for meta in spec_items[1:]:
+        layer_spec_metadata = meta.spec_decode_metadata
+        layer_conv_metadata = layer_spec_metadata.spec_causal_conv1d
+        if (
+            int(meta.num_spec_decodes) != num_spec_decodes
+            or tuple(layer_conv_metadata.num_accepted_tokens.shape)
+            != tuple(num_accepted_tokens.shape)
+            or int(layer_conv_metadata.cache_indices.shape[0])
+            != num_conv_requests
+            or tuple(layer_spec_metadata.actual_seq_lengths.shape)
+            != tuple(actual_seq_lengths.shape)
+        ):
+            return False
+
+    accepted_tokens_int32 = num_accepted_tokens
+    if accepted_tokens_int32.dtype != torch.int32:
+        accepted_tokens_int32 = accepted_tokens_int32.to(torch.int32)
+
+    conv_state_offsets = torch.empty(
+        num_conv_requests,
+        dtype=torch.int32,
+        device=accepted_tokens_int32.device,
+    )
+    torch.sub(
+        accepted_tokens_int32[:num_conv_requests],
+        1,
+        out=conv_state_offsets,
+    )
+    conv_state_offsets.clamp_min_(0)
+
+    forward_context._dcut_gdn_eager_spec_state = {
+        "actual_seq_lengths": actual_seq_lengths,
+        "num_accepted_tokens": accepted_tokens_int32,
+        "conv_state_offsets": conv_state_offsets,
+    }
+    return True
 
 
 def _dcut_gdn_piecewise_spec_key(forward_context, prefix, num_tokens):

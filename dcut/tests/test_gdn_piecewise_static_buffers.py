@@ -9,6 +9,7 @@ pytest.importorskip("vllm")
 
 from dcut.gdn_buffers import (  # noqa: E402
     _dcut_get_gdn_piecewise_spec_bufs,
+    _dcut_prepare_gdn_eager_state,
     _dcut_prepare_gdn_piecewise_replay,
 )
 from dcut.globals import _dcut_gdn_static  # noqa: E402
@@ -40,9 +41,20 @@ def _make_metadata(
         num_accepted_tokens=torch.tensor(
             accepted_tokens, dtype=torch.int64
         ),
+        cache_indices=torch.arange(
+            len(state_indices), dtype=torch.int32
+        ),
     )
     meta.spec_decode_metadata = SimpleNamespace(
-        spec_causal_conv1d=conv_meta
+        spec_causal_conv1d=conv_meta,
+        actual_seq_lengths=torch.tensor(
+            [0]
+            + [
+                query_start_loc[index + 1] - query_start_loc[index]
+                for index in range(len(state_indices))
+            ],
+            dtype=torch.int32,
+        ),
     )
     return meta
 
@@ -118,6 +130,42 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
         [30, 31, 32],
         [40, 41, 42],
     ]
+
+
+def test_eager_spec_state_is_prepared_once_per_forward() -> None:
+    first = _make_metadata(
+        [0, 2, 3],
+        [[10, 11, 12], [20, 21, 22]],
+        [2, 0],
+    )
+    second = _make_metadata(
+        [0, 2, 3],
+        [[30, 31, 32], [40, 41, 42]],
+        [2, 0],
+    )
+    context = SimpleNamespace(
+        attn_metadata={
+            "layers.0.mixer": first,
+            "layers.1.mixer": second,
+        }
+    )
+
+    assert _dcut_prepare_gdn_eager_state(context, _GDNMetadata)
+    state = context._dcut_gdn_eager_spec_state
+    assert state["num_accepted_tokens"].dtype == torch.int32
+    assert state["num_accepted_tokens"].tolist() == [2, 0]
+    assert state["conv_state_offsets"].tolist() == [1, 0]
+    assert (
+        state["actual_seq_lengths"]
+        is first.spec_decode_metadata.actual_seq_lengths
+    )
+
+    first.spec_sequence_masks = None
+    second.spec_sequence_masks = None
+    assert not _dcut_prepare_gdn_eager_state(
+        context, _GDNMetadata
+    )
+    assert context._dcut_gdn_eager_spec_state is None
 
 
 def test_piecewise_replay_rejects_non_spec_and_mixed_batches() -> None:

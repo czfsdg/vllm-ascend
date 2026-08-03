@@ -7,7 +7,6 @@ import bisect
 import json
 import math
 import os
-import time
 from collections.abc import Callable
 from typing import Any
 
@@ -16,8 +15,6 @@ import torch
 
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.logger import init_logger
-
-from .runtime_cost import RuntimeCostCalibrator
 from .verify_adaptive_config import VerifyAdaptiveConfig
 
 logger = init_logger(__name__)
@@ -35,7 +32,6 @@ def choose_query_lens_discrete(
     max_draft_len: int,
     collect_records: bool = False,
     draft_cost_lookup: Callable[[int], float] | None = None,
-    fixed_cost_lookup: Callable[[int], float] | None = None,
 ) -> dict[str, Any]:
     """Discrete marginal-gain scan over the *measured* sum_query_len levels.
 
@@ -85,13 +81,8 @@ def choose_query_lens_discrete(
             if draft_cost_lookup is not None
             else 0.0
         )
-        fixed_cost = (
-            fixed_cost_lookup(Q)
-            if fixed_cost_lookup is not None
-            else 0.0
-        )
-        cost = target_cost + draft_cost + fixed_cost
-        if target_cost <= 0.0 or min(draft_cost, fixed_cost) < 0.0 or cost <= 0.0:
+        cost = target_cost + draft_cost
+        if target_cost <= 0.0 or draft_cost < 0.0 or cost <= 0.0:
             continue
         score = (base_batch_size + prefix_gain[S]) / cost
         if records is not None:
@@ -102,7 +93,6 @@ def choose_query_lens_discrete(
                 "cost": cost,
                 "target_cost": target_cost,
                 "draft_cost": draft_cost,
-                "fixed_cost": fixed_cost,
             })
         if score > best_score:
             best_score, best_Q, best_S = score, Q, S
@@ -162,11 +152,6 @@ class VerifyAdaptiveController:
         self._cost_records: list[dict[str, Any]] = []
         self._sorted_bs: list[int] = []
         self._sorted_sql_per_bs: dict[int, list[int]] = {}
-        self._runtime_cost = RuntimeCostCalibrator(
-            alpha=config.runtime_cost_ewma_alpha,
-            samples_per_bucket=config.runtime_cost_samples_per_bucket,
-        )
-        self._runtime_cost_step = 0
 
         # req_id → recommended draft_len for the next verifier step
         self._adaptive_draft_lens: dict[str, int] = {}
@@ -333,134 +318,12 @@ class VerifyAdaptiveController:
             self._log_cost_table()
         self._dump_cost_table_if_requested()
 
-    def should_measure_runtime_step(
-        self,
-        *,
-        batch_size: int,
-        mode: str,
-    ) -> bool:
-        """Whether this real serving bucket still needs synchronized samples."""
-        if (
-            not self.config.runtime_cost_calibration
-            or not self._sorted_bs
-            or batch_size < 1
-        ):
-            return False
-        bs_key = _ceil_lookup(batch_size, self._sorted_bs)
-        return self._runtime_cost.needs_sample(bs_key, mode)
-
-    def observe_runtime_step(
-        self,
-        *,
-        batch_size: int,
-        sum_query_len: int,
-        mode: str,
-        full_step_s: float,
-        components_ms: dict[str, float],
-    ) -> dict[str, Any] | None:
-        """Learn and optionally dump cost missing from startup NPU profiles."""
-        if (
-            not self.config.runtime_cost_calibration
-            or not self._sorted_bs
-            or batch_size < 1
-            or full_step_s <= 0.0
-        ):
-            return None
-
-        bs_key = _ceil_lookup(batch_size, self._sorted_bs)
-        q_levels = self._sorted_sql_per_bs.get(bs_key) or []
-        if not q_levels:
-            return None
-        q_key = _ceil_lookup(sum_query_len, q_levels)
-        target_cost_s = self._cost_table[(bs_key, q_key)]
-        draft_cost_s = self._draft_cost_table[(bs_key, q_key)]
-        profiled_step_s = target_cost_s + draft_cost_s
-        residual_s, estimate = self._runtime_cost.observe(
-            batch_size=bs_key,
-            mode=mode,
-            full_step_s=full_step_s,
-            profiled_step_s=profiled_step_s,
-        )
-        self._runtime_cost_step += 1
-
-        payload: dict[str, Any] = {
-            "time_unix": time.time(),
-            "step": self._runtime_cost_step,
-            "batch_size": int(batch_size),
-            "bs_key": int(bs_key),
-            "sum_query_len": int(sum_query_len),
-            "q_key": int(q_key),
-            "mode": mode,
-            "full_step_ms": float(full_step_s * 1e3),
-            "profiled_target_ms": float(target_cost_s * 1e3),
-            "profiled_draft_ms": float(draft_cost_s * 1e3),
-            "profiled_total_ms": float(profiled_step_s * 1e3),
-            "observed_fixed_ms": float(residual_s * 1e3),
-            "learned_fixed_ms": float(estimate.overhead_s * 1e3),
-            "calibration_samples": int(estimate.samples),
-            "components_ms": {
-                key: float(value) for key, value in components_ms.items()
-            },
-        }
-        self._dump_runtime_cost_if_requested(payload)
-
-        if estimate.samples == self.config.runtime_cost_samples_per_bucket:
-            logger.warning(
-                "D-Cut runtime cost ready: bs=%d mode=%s samples=%d "
-                "fixed=%.3fms last_full=%.3fms target=%.3fms draft=%.3fms",
-                bs_key,
-                mode,
-                estimate.samples,
-                estimate.overhead_s * 1e3,
-                full_step_s * 1e3,
-                target_cost_s * 1e3,
-                draft_cost_s * 1e3,
-            )
-        return payload
-
-    def runtime_fixed_cost(self, batch_size: int, mode: str) -> float:
-        """Return learned once-per-step cost in seconds."""
-        if not self.config.runtime_cost_calibration or not self._sorted_bs:
-            return 0.0
-        bs_key = _ceil_lookup(batch_size, self._sorted_bs)
-        return self._runtime_cost.get(bs_key, mode).overhead_s
-
-    def _runtime_cost_dump_path(self) -> str | None:
-        if self.config.runtime_cost_dump_path:
-            return self.config.runtime_cost_dump_path
-        cost_table_path = (
-            os.getenv("VLLM_DCUT_COST_TABLE_OUT")
-            or self.config.cost_table_dump_path
-        )
-        if not cost_table_path:
-            return None
-        return f"{cost_table_path}.runtime.jsonl"
-
-    def _dump_runtime_cost_if_requested(
-        self,
-        payload: dict[str, Any],
-    ) -> None:
-        dump_path = self._runtime_cost_dump_path()
-        if not dump_path:
-            return
-        if get_tp_group().rank_in_group != 0 or not get_pp_group().is_first_rank:
-            return
-        try:
-            dirname = os.path.dirname(dump_path)
-            if dirname:
-                os.makedirs(dirname, exist_ok=True)
-            with open(dump_path, "a", encoding="utf-8") as file:
-                file.write(json.dumps(payload, sort_keys=True) + "\n")
-        except Exception as exc:
-            logger.debug("D-Cut: failed to write runtime cost stats: %s", exc)
-
     def process_draft_output(
         self,
         selected_probs: torch.Tensor,  # [B, T] on CPU (pinned), already transferred
         req_ids: list[str],
         active_draft_req_ids: set[str],
         batch_size: int,
-        cost_mode: str = "all",
     ) -> None:
         """Compute and cache adaptive draft_lens from this step's drafter probs."""
         if not self.config.enabled or not active_draft_req_ids:
@@ -518,7 +381,6 @@ class VerifyAdaptiveController:
             return
 
         decision_dump_path = os.getenv("VLLM_DCUT_DECISION_STATS_OUT")
-        fixed_cost_s = self.runtime_fixed_cost(batch_size, cost_mode)
         result = choose_query_lens_discrete(
             probs=active_probs,
             base_batch_size=batch_size,
@@ -527,7 +389,6 @@ class VerifyAdaptiveController:
             max_draft_len=self.max_query_len_per_req - 1,
             collect_records=bool(decision_dump_path),
             draft_cost_lookup=lambda q: self._draft_cost_table[(bs_key, q)],
-            fixed_cost_lookup=lambda _q: fixed_cost_s,
         )
 
         draft_lens = result["draft_lens"]
@@ -539,7 +400,6 @@ class VerifyAdaptiveController:
             batch_size=batch_size,
             active_count=len(active_req_ids),
             bs_key=bs_key,
-            cost_mode=cost_mode,
             result=result,
             draft_lens=draft_lens,
         )
@@ -565,7 +425,6 @@ class VerifyAdaptiveController:
         batch_size: int,
         active_count: int,
         bs_key: int,
-        cost_mode: str,
         result: dict[str, Any],
         draft_lens: list[int],
     ) -> None:
@@ -579,7 +438,6 @@ class VerifyAdaptiveController:
         draft_sum = int(sum(draft_lens))
         cap_sum = int(active_count * controller_cap_draft_len)
         best_Q = int(result["best_Q"])
-        runtime_estimate = self._runtime_cost.get(bs_key, cost_mode)
         records = result.get("records") or []
         scores = []
         for record in records:
@@ -594,7 +452,6 @@ class VerifyAdaptiveController:
                 "cost_ms": float(record["cost"]) * 1e3,
                 "target_cost_ms": float(record["target_cost"]) * 1e3,
                 "draft_cost_ms": float(record["draft_cost"]) * 1e3,
-                "fixed_cost_ms": float(record["fixed_cost"]) * 1e3,
             })
 
         payload = {
@@ -602,9 +459,6 @@ class VerifyAdaptiveController:
             "batch_size": int(batch_size),
             "active_count": int(active_count),
             "bs_key": int(bs_key),
-            "cost_mode": cost_mode,
-            "runtime_cost_samples": int(runtime_estimate.samples),
-            "learned_fixed_cost_ms": float(runtime_estimate.overhead_s * 1e3),
             "best_Q": best_Q,
             "best_query_len_per_req": (
                 best_Q // bs_key if bs_key > 0 and best_Q % bs_key == 0 else None
@@ -695,20 +549,12 @@ class VerifyAdaptiveController:
             })
 
         payload = {
-            "schema_version": 3,
+            "schema_version": 2,
             "num_spec_tokens": self.num_spec_tokens,
             "max_batch_size": self.max_batch_size,
             "warmup_seq_lens": self.config.warmup_seq_lens,
             "n_warmup_iters": self.config.n_warmup_iters,
             "n_measure_iters": self.config.n_measure_iters,
-            "runtime_cost_calibration": {
-                "enabled": self.config.runtime_cost_calibration,
-                "samples_per_bucket": (
-                    self.config.runtime_cost_samples_per_bucket
-                ),
-                "ewma_alpha": self.config.runtime_cost_ewma_alpha,
-                "dump_path": self._runtime_cost_dump_path(),
-            },
             "batch_size_levels": self._batch_size_levels,
             "query_len_levels": self._query_len_levels,
             "cost_table": rows,

@@ -50,23 +50,6 @@ class VerifyAdaptiveConfig:
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
 
-    runtime_cost_calibration: bool = True
-    """Calibrate missing full-step cost on initial real serving batches.
-
-    Calibration synchronizes only the first ``runtime_cost_samples_per_bucket``
-    speculative steps for each observed batch/mode bucket. Afterwards the
-    learned fixed cost is reused without a per-step synchronization.
-    """
-
-    runtime_cost_samples_per_bucket: int = 8
-    """Number of synchronized real steps used per batch/mode bucket."""
-
-    runtime_cost_ewma_alpha: float = 0.25
-    """EWMA weight for each measured fixed-step residual."""
-
-    runtime_cost_dump_path: Optional[str] = None
-    """Optional JSONL path for full real-step component observations."""
-
     cost_table_dump_path: Optional[str] = None
     """Optional JSON path for exporting the profiled verifier cost table.
     The environment variable ``VLLM_DCUT_COST_TABLE_OUT`` overrides this."""
@@ -107,10 +90,6 @@ class VerifyAdaptiveConfig:
             raise ValueError("n_warmup_iters must be >= 0.")
         if self.n_measure_iters < 1:
             raise ValueError("n_measure_iters must be >= 1.")
-        if self.runtime_cost_samples_per_bucket < 1:
-            raise ValueError("runtime_cost_samples_per_bucket must be >= 1.")
-        if not 0.0 < self.runtime_cost_ewma_alpha <= 1.0:
-            raise ValueError("runtime_cost_ewma_alpha must be in (0, 1].")
         if self.warmup_batch_sizes and any(
             bs < 1 for bs in self.warmup_batch_sizes
         ):

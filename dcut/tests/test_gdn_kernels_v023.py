@@ -23,6 +23,7 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     assert "_ensure_gdn_splitting_op(self.splitting_ops)" in piecewise
     assert "_dcut_get_gdn_piecewise_spec_bufs" in core
     assert "piecewise_spec_bufs[\"token_mask\"]" in core
+    assert "_dcut_prepare_gdn_eager_state" in runner
     assert "_dcut_prepare_gdn_piecewise_replay" in runner
     assert "CUDAGraphMode.NONE" not in runner
     assert "_dcut_gdn_local_graph_safe" in runner
@@ -32,6 +33,8 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     assert "npu_dcut_causal_conv1d" in core
     assert "npu_dcut_recurrent_gated_delta_rule" in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
+    assert 'eager_spec_state["conv_state_offsets"]' in core
+    assert 'eager_spec_state["num_accepted_tokens"]' in core
 
 
 def test_piecewise_replay_preserves_previous_accepted_state() -> None:

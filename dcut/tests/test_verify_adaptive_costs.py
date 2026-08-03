@@ -89,24 +89,3 @@ def test_q_dependent_draft_cost_is_included_in_records() -> None:
         records[1]["score"],
         (1.0 + 0.9 + 0.81) / 4.5,
     )
-
-
-def test_fixed_step_cost_can_make_longer_verify_shape_optimal() -> None:
-    choose = _load_choose_query_lens_discrete()
-    result = choose(
-        probs=[[0.8, 0.8, 0.8], [0.8, 0.8, 0.8]],
-        base_batch_size=2,
-        q_levels=[4, 8],
-        cost_lookup=lambda q: {4: 1.0, 8: 2.0}[q],
-        max_draft_len=3,
-        collect_records=True,
-        fixed_cost_lookup=lambda _q: 4.0,
-    )
-
-    assert result["best_Q"] == 8
-    records = result["records"]
-    assert records is not None
-    assert records[0]["fixed_cost"] == 4.0
-    assert records[0]["cost"] == 5.0
-    assert records[1]["fixed_cost"] == 4.0
-    assert records[1]["cost"] == 6.0

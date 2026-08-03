@@ -66,9 +66,6 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
             return
     self._adaptive_probs_pending = True
     self._adaptive_num_reqs = num_reqs
-    self._adaptive_cost_mode = getattr(
-        self, "_dcut_last_step_cost_mode", "all"
-    )
     self._adaptive_req_ids = self.input_batch.req_ids.copy()
     self._adaptive_active = {
         self.input_batch.req_ids[i]
@@ -109,7 +106,6 @@ def _maybe_process_adaptive_probs(self) -> None:
             req_ids=self._adaptive_req_ids,
             active_draft_req_ids=active,
             batch_size=num_reqs,
-            cost_mode=self._adaptive_cost_mode,
         )
 
 

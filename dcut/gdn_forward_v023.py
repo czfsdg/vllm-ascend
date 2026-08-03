@@ -53,11 +53,15 @@ def _run_spec_causal_conv1d(
     cache_indices: torch.Tensor,
     num_accepted_tokens: torch.Tensor,
     activation_mode: int,
+    state_offsets: torch.Tensor | None = None,
 ) -> None:
     """Read the previous conv window independently of this round's length."""
-    num_requests = cache_indices.shape[0]
-    state_offsets = num_accepted_tokens[:num_requests].to(torch.int32) - 1
-    state_offsets = state_offsets.clamp_min(0).contiguous()
+    if state_offsets is None:
+        num_requests = cache_indices.shape[0]
+        state_offsets = (
+            num_accepted_tokens[:num_requests].to(torch.int32) - 1
+        )
+        state_offsets = state_offsets.clamp_min(0).contiguous()
     torch.ops._C_ascend.npu_dcut_causal_conv1d(
         output=output,
         x=x,
@@ -362,6 +366,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        eager_spec_state = (
+            getattr(
+                forward_context,
+                "_dcut_gdn_eager_spec_state",
+                None,
+            )
+            if piecewise_spec_bufs is None
+            else None
+        )
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
@@ -412,7 +425,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             spec_num_accepted_tokens = (
                 piecewise_spec_bufs["nat"]
                 if piecewise_spec_bufs is not None
-                else spec_causal_conv1d_meta.num_accepted_tokens
+                else (
+                    eager_spec_state["num_accepted_tokens"]
+                    if eager_spec_state is not None
+                    else spec_causal_conv1d_meta.num_accepted_tokens
+                )
             )
             output_spec = (
                 torch.zeros_like(mixed_qkv_spec)
@@ -429,6 +446,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 spec_cache_indices,
                 spec_num_accepted_tokens,
                 activation_num,
+                state_offsets=(
+                    eager_spec_state["conv_state_offsets"]
+                    if eager_spec_state is not None
+                    else None
+                ),
             )
             mixed_qkv_spec = output_spec
 
@@ -557,13 +579,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = (
                 piecewise_spec_bufs["asl"]
                 if piecewise_spec_bufs is not None
-                else attn_metadata.spec_decode_metadata.actual_seq_lengths
+                else (
+                    eager_spec_state["actual_seq_lengths"]
+                    if eager_spec_state is not None
+                    else attn_metadata.spec_decode_metadata.actual_seq_lengths
+                )
             )
             recurrent_num_accepted_tokens = (
                 piecewise_spec_bufs["nat"]
                 if piecewise_spec_bufs is not None
-                else spec_causal_conv1d_meta.num_accepted_tokens.to(
-                    torch.int32
+                else (
+                    eager_spec_state["num_accepted_tokens"]
+                    if eager_spec_state is not None
+                    else spec_causal_conv1d_meta.num_accepted_tokens.to(
+                        torch.int32
+                    )
                 )
             )
             query_spec = l2norm_fwd(query_spec)
