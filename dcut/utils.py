@@ -2,11 +2,134 @@
 """Small utility functions."""
 from __future__ import annotations
 
+import os
+
 import torch
 
 from vllm.distributed import get_tp_group
 
-from .globals import logger
+from .globals import ENV_PROCESS_PROBS_STAGE, ENV_REUSE_ARGMAX
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _dcut_process_probs_stage() -> str:
+    raw = (
+        os.environ.get(ENV_PROCESS_PROBS_STAGE, "pre_truncate")
+        or "pre_truncate"
+    ).strip().lower()
+    stage = raw.replace("-", "_")
+    if stage in {"post", "post_sample", "sync", "synchronous"}:
+        return "post_sample"
+    return "pre_truncate"
+
+
+def _dcut_reuse_argmax_enabled() -> bool:
+    return _env_flag(ENV_REUSE_ARGMAX, True)
+
+
+def _dcut_in_graph_capture() -> bool:
+    """Return whether the current Ascend forward is recording an ACLGraph."""
+    try:
+        from vllm.forward_context import get_forward_context
+
+        forward_context = get_forward_context()
+        if bool(getattr(forward_context, "capturing", False)):
+            return True
+    except Exception:
+        pass
+
+    try:
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+        return bool(getattr(_EXTRA_CTX, "capturing", False))
+    except Exception:
+        return False
+
+
+def _dcut_selected_token_probs(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Compute probabilities for token IDs already selected from *logits*.
+
+    This avoids repeating argmax over the full vocabulary. The caller only
+    uses this helper on paths where the original sampler selected IDs directly
+    from the same logits tensor, so their vocab indexing is identical.
+    """
+    idx = token_ids.long().unsqueeze(-1)
+    chosen = logits.gather(-1, idx).squeeze(-1)
+    return (chosen - logits.logsumexp(dim=-1)).exp()
+
+
+def _dcut_can_reuse_argmax_for_probs(drafter) -> bool:
+    return (
+        _dcut_reuse_argmax_enabled()
+        and getattr(drafter, "method", None) == "dflash"
+        and getattr(type(drafter), "_dcut_run_merged_patched", False)
+    )
+
+
+def _dcut_selected_probs_from_reused_logits(
+    drafter,
+    draft_token_ids: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Derive selected probabilities after eager execution or graph replay."""
+    if (
+        draft_token_ids is None
+        or not torch.is_tensor(draft_token_ids)
+        or not _dcut_can_reuse_argmax_for_probs(drafter)
+    ):
+        return None
+
+    logits = getattr(drafter, "_dcut_last_logits_for_probs", None)
+    if logits is None:
+        # A Python execution should have populated the per-step logits. Only a
+        # graph replay is allowed to fall back to the fixed-address capture
+        # tensors retained below.
+        if getattr(drafter, "_dcut_last_draft_ran_python", False):
+            return None
+        if getattr(drafter, "_dcut_graph_logits_for_probs_ready", False):
+            shape_key = tuple(draft_token_ids.shape)
+            by_shape = getattr(
+                drafter,
+                "_dcut_graph_logits_for_probs_by_shape",
+                {},
+            )
+            by_numel = getattr(
+                drafter,
+                "_dcut_graph_logits_for_probs_by_numel",
+                {},
+            )
+            logits = by_shape.get(shape_key)
+            if logits is None:
+                logits = by_numel.get(int(draft_token_ids.numel()))
+            if logits is None:
+                logits = getattr(
+                    drafter,
+                    "_dcut_graph_logits_for_probs",
+                    None,
+                )
+    if logits is None:
+        return None
+
+    flat_token_ids = draft_token_ids.reshape(-1)
+    n_tokens = min(int(logits.shape[0]), int(flat_token_ids.numel()))
+    if n_tokens <= 0:
+        return None
+    selected_probs = _dcut_selected_token_probs(
+        logits[:n_tokens],
+        flat_token_ids[:n_tokens],
+    )
+    if selected_probs.numel() == draft_token_ids.numel():
+        selected_probs = selected_probs.view(draft_token_ids.shape)
+    return selected_probs.float().contiguous()
+
 
 def _npu_event(enable_timing: bool = False):
     """torch.npu.Event, mirroring torch.cuda.Event on the CUDA plugin."""

@@ -5,7 +5,11 @@ from __future__ import annotations
 import torch
 
 from .globals import logger
-from .utils import _dcut_greedy_sample_with_selected_probs
+from .utils import (
+    _dcut_greedy_sample_with_selected_probs,
+    _dcut_in_graph_capture,
+    _dcut_selected_token_probs,
+)
 
 # ---------------------------------------------------------------------------
 # Patch installers (idempotent, per class).  Targets are the *NPU* classes.
@@ -48,8 +52,7 @@ def _patch_proposer() -> None:
             idx = token_ids.long().unsqueeze(-1)
             if full_probs is not None:
                 return full_probs.gather(-1, idx).squeeze(-1)
-            chosen = logits.gather(-1, idx).squeeze(-1)
-            return (chosen - logits.logsumexp(dim=-1)).exp()
+            return _dcut_selected_token_probs(logits, token_ids)
 
         @staticmethod
         def _greedy_sample_with_selected_probs(logits):
@@ -124,3 +127,88 @@ def _patch_proposer() -> None:
             "D-Cut: patched compute_draft_token_ids on %s.", owner.__name__
         )
 
+    run_merged_owners = []
+    for pc in proposer_classes:
+        for klass in pc.__mro__:
+            if "_run_merged_draft" in klass.__dict__:
+                if klass not in run_merged_owners:
+                    run_merged_owners.append(klass)
+                break
+
+    for owner in run_merged_owners:
+        if getattr(owner, "_dcut_run_merged_patched", False):
+            continue
+        original_run_merged = owner._run_merged_draft
+
+        def _make_run_merged_wrapper(orig):
+            def _run_merged_draft(self, *args, **kwargs):
+                in_graph_capture = _dcut_in_graph_capture()
+                self._dcut_last_draft_ran_python = True
+                self._dcut_last_logits_for_probs = None
+                self._last_selected_probs = None
+                out = orig(self, *args, **kwargs)
+                if not type(self)._should_collect_draft_probs(self):
+                    return out
+
+                logits = getattr(self, "_dcut_last_logits_for_probs", None)
+                if logits is None:
+                    return out
+                if in_graph_capture:
+                    # Keep fixed-address graph tensors by output shape. Replay
+                    # updates these tensors even though this Python wrapper does
+                    # not execute again.
+                    self._dcut_graph_logits_for_probs_by_shape = getattr(
+                        self,
+                        "_dcut_graph_logits_for_probs_by_shape",
+                        {},
+                    )
+                    self._dcut_graph_logits_for_probs_by_numel = getattr(
+                        self,
+                        "_dcut_graph_logits_for_probs_by_numel",
+                        {},
+                    )
+                    self._dcut_graph_logits_for_probs_by_shape[
+                        tuple(out.shape)
+                    ] = logits
+                    self._dcut_graph_logits_for_probs_by_numel[
+                        int(out.numel())
+                    ] = logits
+                    self._dcut_graph_logits_for_probs = logits
+                    self._dcut_graph_logits_for_probs_ready = True
+                    return out
+
+                try:
+                    flat_token_ids = out.reshape(-1)
+                    n_tokens = min(
+                        int(logits.shape[0]),
+                        int(flat_token_ids.numel()),
+                    )
+                    selected_probs = _dcut_selected_token_probs(
+                        logits[:n_tokens],
+                        flat_token_ids[:n_tokens],
+                    )
+                    if selected_probs.numel() == out.numel():
+                        selected_probs = selected_probs.view(out.shape)
+                    self._last_selected_probs = (
+                        selected_probs.float().contiguous()
+                    )
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning(
+                        "D-Cut: reused-argmax selected-prob capture failed: %s",
+                        e,
+                    )
+                    self._last_selected_probs = None
+                finally:
+                    self._dcut_last_logits_for_probs = None
+                return out
+
+            return _run_merged_draft
+
+        owner._run_merged_draft = _make_run_merged_wrapper(
+            original_run_merged
+        )
+        owner._dcut_run_merged_patched = True
+        logger.info(
+            "D-Cut: patched _run_merged_draft on %s.",
+            owner.__name__,
+        )

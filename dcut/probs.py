@@ -2,10 +2,20 @@
 """Async D2H selected-probs queue + controller cache update."""
 from __future__ import annotations
 
-import torch
 
-from .globals import logger
 from .controller import _dcut_enable_drafter_probs
+from .globals import logger
+from .utils import _dcut_selected_probs_from_reused_logits
+
+
+def _dcut_prepare_prob_capture(self, scheduler_output) -> None:
+    """Reset per-step execution state before the drafter runs or replays."""
+    drafter = getattr(self, "drafter", None)
+    if drafter is not None:
+        drafter._dcut_last_draft_ran_python = False
+        # Force graph replay to select its retained logits by current output
+        # shape instead of accidentally reusing the final startup-capture bucket.
+        drafter._dcut_last_logits_for_probs = None
 
 def _dcut_queue_probs(self, zeros_only: bool) -> None:
     """Queue this step's selected_probs D2H (non-blocking) for next-step use.
@@ -33,6 +43,18 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
             )
         return
     probs = drafter.take_last_selected_probs()
+    if probs is None:
+        try:
+            probs = _dcut_selected_probs_from_reused_logits(
+                drafter,
+                getattr(self, "_draft_token_ids", None),
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "D-Cut: deriving selected probs from reused logits failed: %s",
+                e,
+            )
+            probs = None
     if probs is None:
         cnt = getattr(self, "_dcut_missing_probs_steps", 0) + 1
         self._dcut_missing_probs_steps = cnt
@@ -75,30 +97,42 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
             >= self.input_batch.num_prompt_tokens[i]
         )
     }
-    # Non-blocking D2H on the default stream (the drafter runs there too); the
-    # event lets _maybe_process_adaptive_probs verify completion cheaply.
-    self._adaptive_probs_pinned[:num_reqs].copy_(probs.contiguous(), non_blocking=True)
+    # Non-blocking D2H on the default stream (the drafter runs there too). The
+    # next execute_model consumes it immediately before truncation, allowing
+    # this copy to overlap the remainder of the current scheduler step.
+    self._adaptive_probs_pinned[:num_reqs].copy_(
+        probs.contiguous(),
+        non_blocking=True,
+    )
     self._adaptive_probs_event.record()
 
 
-def _maybe_process_adaptive_probs(self) -> None:
-    """Consume step-N probs and update the controller's draft_len cache.
-
-    Device-agnostic; npu.Event exposes the same query()/synchronize() API.
-    """
+def _maybe_process_adaptive_probs(
+    self,
+    stage: str = "pre_truncate",
+) -> None:
+    """Consume queued probs before truncating the next verifier batch."""
     if not self._adaptive_probs_pending:
         return
     assert self._adaptive_probs_event is not None
-    # Do not force a host-side wait here.  D-Cut can reuse the previous cached
-    # decision for one more scheduler tick, while synchronizing every tick adds
-    # a CPU/NPU barrier on the serving hot path and can make adaptive verify
-    # slower than vanilla speculative decoding.
     if not self._adaptive_probs_event.query():
-        return
+        if getattr(self, "_dcut_skip_unready_probs", False):
+            return
+        # In the default pre_truncate path the copy has had the rest of the
+        # previous iteration to complete. Synchronize only if it is still late,
+        # so this step uses fresh probabilities and the next D2H queue is free.
+        self._adaptive_probs_event.synchronize()
     self._adaptive_probs_pending = False
 
     num_reqs = self._adaptive_num_reqs
     active = self._adaptive_active
+    if active:
+        current_req_ids = set(
+            self.input_batch.req_ids[
+                : getattr(self.input_batch, "num_reqs", 0)
+            ]
+        )
+        active = active & current_req_ids
     if active and self._verify_adaptive_controller is not None:
         assert self._adaptive_probs_pinned is not None
         self._verify_adaptive_controller.process_draft_output(

@@ -7,7 +7,13 @@ from types import MethodType
 import torch
 
 from .globals import logger
-from .utils import _dcut_greedy_sample_with_selected_probs
+from .utils import (
+    _dcut_can_reuse_argmax_for_probs,
+    _dcut_greedy_sample_with_selected_probs,
+    _dcut_in_graph_capture,
+    _dcut_selected_token_probs,
+)
+
 
 def _dcut_patch_drafter_instance(drafter) -> None:
     """Patch the live Ascend drafter instance; robust to MRO/load order quirks."""
@@ -28,22 +34,34 @@ def _dcut_patch_drafter_instance(drafter) -> None:
             logits = orig_compute_logits(hidden_states, *args, **kwargs)
             if getattr(drafter, "needs_draft_probs", False) and logits is not None:
                 try:
-                    token_ids = logits.argmax(dim=-1)
-                    chosen = logits.gather(-1, token_ids.long().unsqueeze(-1))
-                    selected_probs = (
-                        chosen.squeeze(-1) - logits.logsumexp(dim=-1)
-                    ).exp()
-                    drafter._last_selected_probs = (
-                        selected_probs.float().contiguous()
-                    )
+                    can_reuse_argmax = _dcut_can_reuse_argmax_for_probs(drafter)
+                    if can_reuse_argmax:
+                        # _run_merged_draft already returns the selected IDs.
+                        # Keep logits alive and derive their probabilities after
+                        # sampling instead of scanning the vocabulary again.
+                        drafter._dcut_last_logits_for_probs = logits
+                        if _dcut_in_graph_capture():
+                            drafter._dcut_graph_logits_for_probs = logits
+                        drafter._last_selected_probs = None
+                    else:
+                        token_ids = logits.argmax(dim=-1)
+                        selected_probs = _dcut_selected_token_probs(
+                            logits,
+                            token_ids,
+                        )
+                        drafter._last_selected_probs = (
+                            selected_probs.float().contiguous()
+                        )
                     if not getattr(
                         drafter, "_dcut_logged_compute_logits_probs", False
                     ):
                         logger.warning(
-                            "D-Cut: captured selected draft probs from "
-                            "compute_logits on %s (logits_shape=%s).",
+                            "D-Cut: captured selected draft probs/logits from "
+                            "compute_logits on %s "
+                            "(logits_shape=%s reuse_argmax=%s).",
                             type(drafter).__name__,
                             tuple(logits.shape),
+                            can_reuse_argmax,
                         )
                         drafter._dcut_logged_compute_logits_probs = True
                 except Exception as e:  # pragma: no cover - defensive

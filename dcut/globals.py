@@ -81,6 +81,20 @@ ENV_PROFILE_FORCE_EAGER = "VLLM_DCUT_PROFILE_FORCE_EAGER"
 ENV_FULL_DECODE_ONLY = "VLLM_DCUT_FULL_DECODE_ONLY"
 ENV_GDN_SHARED_STATIC = "VLLM_DCUT_GDN_SHARED_STATIC"
 
+# Adaptive-probability pipeline controls. These are centralized here because
+# the D-Cut directory is installed as an independent vLLM general plugin.
+# They are non-sensitive runtime tuning flags:
+#
+# * PROCESS_PROBS_STAGE: "pre_truncate" (default, overlap the previous D2H
+#   copy with the rest of the step) or "post_sample" (synchronous baseline).
+# * SKIP_UNREADY_PROBS: when true, never wait for the D2H event; reuse the
+#   previous cached decision until the copy becomes ready. Default: false.
+# * REUSE_ARGMAX: reuse the token IDs already selected by DFlash when deriving
+#   selected-token probabilities. Default: true.
+ENV_PROCESS_PROBS_STAGE = "VLLM_DCUT_PROCESS_PROBS_STAGE"
+ENV_SKIP_UNREADY_PROBS = "VLLM_DCUT_SKIP_UNREADY_PROBS"
+ENV_REUSE_ARGMAX = "VLLM_DCUT_REUSE_ARGMAX"
+
 # Compatibility flag used only by the retired patch_gdn.py path. The active
 # v0.23 path is controlled by the registered
 # VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE variable in vllm_ascend/envs.py.

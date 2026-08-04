@@ -14,6 +14,7 @@ from .gdn_buffers import (
 from .globals import ENV_FULL_DECODE_ONLY, logger
 from .patch_piecewise import _is_enabled as _gdn_piecewise_graph_enabled
 from .probs import (
+    _dcut_prepare_prob_capture,
     _dcut_queue_probs,
     _maybe_process_adaptive_probs,
     profile_adaptive_cost,
@@ -301,9 +302,19 @@ def _patch_runner() -> None:
             _full_draft = sum(len(t) for t in _orig_spec.values())
         dcut_enabled = _ctrl is not None and not os.environ.get("VLLM_DCUT_DISABLE")
         if _ctrl is not None:
+            if getattr(self, "_adaptive_probs_pending", False):
+                try:
+                    _maybe_process_adaptive_probs(
+                        self,
+                        stage="pre_truncate",
+                    )
+                except Exception as e:
+                    logger.warning("D-Cut: process probs failed: %s", e)
+                    self._adaptive_probs_pending = False
             _dcut_enable_drafter_probs(self)
             if dcut_enabled:
                 scheduler_output = _dcut_truncate(self, scheduler_output)
+            _dcut_prepare_prob_capture(self, scheduler_output)
 
         if not debug_stats:
             return _orig_exec(self, scheduler_output, intermediate_tensors)
@@ -346,9 +357,18 @@ def _patch_runner() -> None:
         out = _orig_sample_tokens(self, *a, **k)
         if os.environ.get(ENV_FULL_DECODE_ONLY):
             return out
-        if getattr(self, "_adaptive_probs_pending", False):
+        if (
+            getattr(self, "_adaptive_probs_pending", False)
+            and not getattr(self, "_dcut_skip_unready_probs", False)
+            and getattr(
+                self,
+                "_dcut_process_probs_stage",
+                "pre_truncate",
+            )
+            == "post_sample"
+        ):
             try:
-                _maybe_process_adaptive_probs(self)
+                _maybe_process_adaptive_probs(self, stage="post_sample")
             except Exception as e:
                 logger.warning("D-Cut: process probs failed: %s", e)
                 self._adaptive_probs_pending = False

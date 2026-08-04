@@ -6,8 +6,20 @@ import os
 
 import torch
 
-from .globals import logger, ENV_CONFIG, ENV_TRIM_STATS_OUT, ENV_FULL_DECODE_ONLY
-from .utils import _npu_event, _supports_adaptive_verify
+from .globals import (
+    ENV_CONFIG,
+    ENV_FULL_DECODE_ONLY,
+    ENV_SKIP_UNREADY_PROBS,
+    ENV_TRIM_STATS_OUT,
+    logger,
+)
+from .utils import (
+    _dcut_process_probs_stage,
+    _dcut_reuse_argmax_enabled,
+    _env_flag,
+    _npu_event,
+    _supports_adaptive_verify,
+)
 from .drafter import _dcut_patch_drafter_instance
 from .verify_adaptive_config import VerifyAdaptiveConfig
 from .verify_adaptive_controller import VerifyAdaptiveController
@@ -37,6 +49,8 @@ def _dcut_init_controller(self) -> None:
     self._dcut_stat_steps = 0
     self._dcut_stat_log_every = int(os.environ.get("VLLM_DCUT_STAT_EVERY", "200") or 0)
     self._dcut_trim_stats_out = os.environ.get(ENV_TRIM_STATS_OUT) or None
+    self._dcut_skip_unready_probs = _env_flag(ENV_SKIP_UNREADY_PROBS)
+    self._dcut_process_probs_stage = _dcut_process_probs_stage()
     self._dcut_missing_probs_steps = 0
     self._dcut_logged_drafter_probs = False
 
@@ -82,7 +96,15 @@ def _dcut_init_controller(self) -> None:
         pin_memory=self.pin_memory,
     )
     _dcut_enable_drafter_probs(self)
-    logger.info("D-Cut adaptive verify ENABLED on NPU (config=%s).", cfg_path)
+    logger.info(
+        "D-Cut adaptive verify ENABLED on NPU "
+        "(config=%s process_probs_stage=%s skip_unready_probs=%s "
+        "reuse_argmax=%s).",
+        cfg_path,
+        self._dcut_process_probs_stage,
+        self._dcut_skip_unready_probs,
+        _dcut_reuse_argmax_enabled(),
+    )
 
 
 def _dcut_enable_drafter_probs(self) -> None:
