@@ -89,6 +89,7 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
     # second request accepted three tokens previously even though this step's
     # segment contains only one token, so it must not be clamped to ASL.
     assert bufs["nat"].tolist() == [2, 3, 0, 0]
+    assert bufs["conv_state_offsets"].tolist() == [1, 2, 0, 0]
     assert bufs["ssi"].tolist() == [
         [10, 11, 12],
         [20, 21, 22],
@@ -126,11 +127,61 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
     assert bufs["qsl"].tolist() == [0, 1, 3, 3, 3]
     assert bufs["asl"].tolist() == [0, 1, 2, 0, 0]
     assert bufs["nat"].tolist() == [3, 1, 0, 0]
+    assert bufs["conv_state_offsets"].tolist() == [2, 0, 0, 0]
     assert bufs["ssi"][:2].tolist() == [
         [30, 31, 32],
         [40, 41, 42],
     ]
 
+
+def test_piecewise_batch_buffers_are_shared_across_gdn_layers() -> None:
+    _dcut_gdn_static.clear()
+    first = _make_metadata(
+        [0, 2, 3],
+        [[10, 11, 12], [20, 21, 22]],
+        [2, 3],
+    )
+    second = _make_metadata(
+        [0, 2, 3],
+        [[30, 31, 32], [40, 41, 42]],
+        [2, 3],
+    )
+    context = SimpleNamespace(
+        model_instance=object(),
+        attn_metadata={
+            "layers.0.mixer": first,
+            "layers.1.mixer": second,
+        },
+    )
+
+    assert _dcut_prepare_gdn_piecewise_replay(
+        context, 8, _GDNMetadata, 4
+    )
+    first_bufs = _dcut_get_gdn_piecewise_spec_bufs(
+        context, "layers.0.mixer", 8
+    )
+    second_bufs = _dcut_get_gdn_piecewise_spec_bufs(
+        context, "layers.1.mixer", 8
+    )
+
+    for name in (
+        "qsl",
+        "asl",
+        "nat",
+        "token_index",
+        "token_mask",
+        "conv_state_offsets",
+    ):
+        assert first_bufs[name].data_ptr() == second_bufs[name].data_ptr()
+    assert first_bufs["ssi"].data_ptr() != second_bufs["ssi"].data_ptr()
+    assert first_bufs["ssi"][:2].tolist() == [
+        [10, 11, 12],
+        [20, 21, 22],
+    ]
+    assert second_bufs["ssi"][:2].tolist() == [
+        [30, 31, 32],
+        [40, 41, 42],
+    ]
 
 def test_eager_spec_state_is_prepared_once_per_forward() -> None:
     first = _make_metadata(

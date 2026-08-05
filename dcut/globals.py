@@ -100,7 +100,7 @@ ENV_REUSE_ARGMAX = "VLLM_DCUT_REUSE_ARGMAX"
 # VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE variable in vllm_ascend/envs.py.
 ENABLE_GDN_MAIN_PIECEWISE_GRAPH = False
 
-# Fixed-address GDN metadata buffers. The active v0.23 graph key contains the
-# model instance, layer prefix and padded token bucket so target/draft models
-# and different layers cannot alias state metadata across replay.
+# Fixed-address GDN metadata buffers. The active v0.23 graph keys isolate
+# target/draft model instances and padded token buckets. Batch metadata is
+# shared across GDN layers, while each layer keeps separate state indices.
 _dcut_gdn_static = {}

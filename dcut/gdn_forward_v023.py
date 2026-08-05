@@ -447,9 +447,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 spec_num_accepted_tokens,
                 activation_num,
                 state_offsets=(
-                    eager_spec_state["conv_state_offsets"]
-                    if eager_spec_state is not None
-                    else None
+                    piecewise_spec_bufs["conv_state_offsets"]
+                    if piecewise_spec_bufs is not None
+                    else (
+                        eager_spec_state["conv_state_offsets"]
+                        if eager_spec_state is not None
+                        else None
+                    )
                 ),
             )
             mixed_qkv_spec = output_spec

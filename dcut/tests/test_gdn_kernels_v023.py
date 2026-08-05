@@ -34,6 +34,7 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     assert "npu_dcut_recurrent_gated_delta_rule" in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
     assert 'eager_spec_state["conv_state_offsets"]' in core
+    assert 'piecewise_spec_bufs["conv_state_offsets"]' in core
     assert 'eager_spec_state["num_accepted_tokens"]' in core
 
 
@@ -48,8 +49,10 @@ def test_piecewise_replay_preserves_previous_accepted_state() -> None:
     fill = buffers[fill_start:fill_end]
 
     assert "nat[:num_spec_decodes].copy_(" in fill
+    assert "torch.sub(nat, 1, out=conv_state_offsets)" in fill
     assert "torch.minimum(" not in fill
     assert "current segment length" in fill
+    assert "fill_shared_batch=index == 0" in buffers
 
 
 def test_recurrent_kernel_uses_fixed_request_rows() -> None:
