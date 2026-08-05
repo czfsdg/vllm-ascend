@@ -13,6 +13,60 @@ from vllm.distributed import get_pp_group, get_tp_group
 from .globals import logger
 
 
+def _dcut_has_prefill(self, scheduler_output) -> bool:
+    """Return whether the current scheduler batch contains prefill work.
+
+    D-Cut's cost model assumes that every request contributes exactly one
+    anchor token. That assumption does not hold for mixed prefill/decode
+    batches, so leave all speculative drafts intact whenever prefill work is
+    present.
+    """
+    if getattr(scheduler_output, "scheduled_new_reqs", None):
+        return True
+
+    scheduled_spec = getattr(
+        scheduler_output,
+        "scheduled_spec_decode_tokens",
+        None,
+    ) or {}
+    num_scheduled_tokens = getattr(
+        scheduler_output,
+        "num_scheduled_tokens",
+        None,
+    ) or {}
+
+    input_batch = getattr(self, "input_batch", None)
+    req_id_to_index = getattr(input_batch, "req_id_to_index", {})
+    num_computed_tokens = getattr(
+        input_batch,
+        "num_computed_tokens_cpu",
+        None,
+    )
+    num_prompt_tokens = getattr(input_batch, "num_prompt_tokens", None)
+
+    for req_id, num_scheduled in num_scheduled_tokens.items():
+        if req_id in scheduled_spec:
+            continue
+
+        # Ordinary decode contributes one token. Any larger non-spec query is
+        # prefill (including a continuation chunk).
+        if int(num_scheduled) != 1:
+            return True
+
+        # The final chunk of a prefill can contain exactly one token. Use the
+        # runner's request state to distinguish it from ordinary decode.
+        req_idx = req_id_to_index.get(req_id)
+        if (
+            req_idx is not None
+            and num_computed_tokens is not None
+            and num_prompt_tokens is not None
+            and num_computed_tokens[req_idx] < num_prompt_tokens[req_idx]
+        ):
+            return True
+
+    return False
+
+
 def _dcut_get_target_draft_lens(ctrl, original_spec) -> list[int]:
     """Return rank-0's draft-length decisions in scheduler request order.
 
@@ -65,6 +119,8 @@ def _dcut_truncate(self, scheduler_output):
         None,
     )
     if ctrl is None or not scheduled_spec:
+        return scheduler_output
+    if _dcut_has_prefill(self, scheduler_output):
         return scheduler_output
 
     original_spec = scheduler_output.scheduled_spec_decode_tokens

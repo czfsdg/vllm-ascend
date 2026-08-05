@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,17 +14,18 @@ class _SchedulerOutput:
     scheduled_spec_decode_tokens: dict[str, list[int]]
     num_scheduled_tokens: dict[str, int]
     total_num_scheduled_tokens: int
+    scheduled_new_reqs: list[object] = field(default_factory=list)
 
 
 def _load_truncate(target_draft_lens: list[int]):
     tree = ast.parse(TRUNCATE_PATH.read_text(encoding="utf-8"))
-    function = next(
+    functions = [
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name == "_dcut_truncate"
-    )
-    module = ast.Module(body=[function], type_ignores=[])
+        and node.name in {"_dcut_has_prefill", "_dcut_truncate"}
+    ]
+    module = ast.Module(body=functions, type_ignores=[])
     ast.fix_missing_locations(module)
 
     trim_records = []
@@ -37,6 +38,51 @@ def _load_truncate(target_draft_lens: list[int]):
     }
     exec(compile(module, str(TRUNCATE_PATH), "exec"), namespace)
     return namespace["_dcut_truncate"], trim_records
+
+
+def test_mixed_prefill_decode_batch_is_not_truncated() -> None:
+    truncate, trim_records = _load_truncate([1])
+    original = _SchedulerOutput(
+        scheduled_spec_decode_tokens={"decode": [10, 11, 12]},
+        num_scheduled_tokens={"decode": 4, "prefill": 8},
+        total_num_scheduled_tokens=12,
+        scheduled_new_reqs=[SimpleNamespace(req_id="prefill")],
+    )
+
+    result = truncate(
+        SimpleNamespace(_verify_adaptive_controller=object()),
+        original,
+    )
+
+    assert result is original
+    assert result.scheduled_spec_decode_tokens["decode"] == [10, 11, 12]
+    assert trim_records == []
+
+
+def test_single_token_prefill_tail_is_not_truncated() -> None:
+    truncate, trim_records = _load_truncate([1])
+    original = _SchedulerOutput(
+        scheduled_spec_decode_tokens={"decode": [10, 11, 12]},
+        num_scheduled_tokens={"decode": 4, "prefill": 1},
+        total_num_scheduled_tokens=5,
+    )
+    input_batch = SimpleNamespace(
+        req_id_to_index={"decode": 0, "prefill": 1},
+        num_computed_tokens_cpu=[32, 7],
+        num_prompt_tokens=[32, 8],
+    )
+
+    result = truncate(
+        SimpleNamespace(
+            _verify_adaptive_controller=object(),
+            input_batch=input_batch,
+        ),
+        original,
+    )
+
+    assert result is original
+    assert result.scheduled_spec_decode_tokens["decode"] == [10, 11, 12]
+    assert trim_records == []
 
 
 def test_zero_draft_decision_stays_on_spec_path_without_adding_tokens() -> None:
