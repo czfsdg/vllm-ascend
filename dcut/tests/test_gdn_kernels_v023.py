@@ -18,11 +18,15 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
 
     assert "target_class._forward_core = dcut_forward_core" in patch
     assert "target_class.forward =" not in patch
+    assert "_patch_gdn_spec_metadata_builder" in patch
+    assert "actual_seq_lengths=attn_metadata.spec_query_start_loc" in patch
+    assert "_build_actual_seq_lengths(" not in patch
     assert "torch.ops.vllm.qwen_gdn_attention_core" in core
     assert "_TARGET_OP = \"vllm::qwen_gdn_attention_core\"" in piecewise
     assert "_ensure_gdn_splitting_op(self.splitting_ops)" in piecewise
     assert "_dcut_get_gdn_piecewise_spec_bufs" in core
-    assert "piecewise_spec_bufs[\"token_mask\"]" in core
+    assert "piecewise_spec_bufs[\"token_mask\"]" not in core
+    assert "zero_padded_output=piecewise_spec_bufs is not None" in core
     assert "_dcut_prepare_gdn_eager_state" in runner
     assert "_dcut_prepare_gdn_piecewise_replay" in runner
     assert "CUDAGraphMode.NONE" not in runner
@@ -33,8 +37,10 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     assert "npu_dcut_causal_conv1d" in core
     assert "npu_dcut_recurrent_gated_delta_rule" in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
-    assert 'eager_spec_state["conv_state_offsets"]' in core
-    assert 'piecewise_spec_bufs["conv_state_offsets"]' in core
+    assert 'eager_spec_state["query_start_loc"]' in core
+    assert 'piecewise_spec_bufs["qsl"]' in core
+    assert 'eager_spec_state["conv_state_offsets"]' not in core
+    assert 'piecewise_spec_bufs["conv_state_offsets"]' not in core
     assert 'eager_spec_state["num_accepted_tokens"]' in core
 
 
@@ -49,7 +55,10 @@ def test_piecewise_replay_preserves_previous_accepted_state() -> None:
     fill = buffers[fill_start:fill_end]
 
     assert "nat[:num_spec_decodes].copy_(" in fill
-    assert "torch.sub(nat, 1, out=conv_state_offsets)" in fill
+    assert "torch.sub(nat, 1, out=conv_state_offsets)" not in fill
+    assert "torch.lt(" not in fill
+    assert "qsl.zero_()" not in fill
+    assert "ssi.fill_(" not in fill
     assert "torch.minimum(" not in fill
     assert "current segment length" in fill
     assert "fill_shared_batch=index == 0" in buffers
@@ -66,12 +75,34 @@ def test_recurrent_kernel_uses_fixed_request_rows() -> None:
         assert "acceptedTokenNum > static_cast<int32_t>(stateIndexStride_)" in kernel
 
 
-def test_conv_kernel_accepts_zero_based_state_offsets() -> None:
+def test_recurrent_kernel_consumes_query_start_locations() -> None:
+    wrapper = _read(
+        "kernel/dcut_recurrent_gated_delta_rule/op_kernel/"
+        "dcut_recurrent_gated_delta_rule.cpp"
+    )
+    assert "DCUT_RECURRENT_QUERY_START_LOC" in wrapper
+
+    for relative_path in (
+        "kernel/dcut_recurrent_gated_delta_rule/vendor/op_kernel/recurrent_gated_delta_rule.h",
+        "kernel/dcut_recurrent_gated_delta_rule/vendor/op_kernel/arch35/recurrent_gated_delta_rule.h",
+    ):
+        kernel = _read(relative_path)
+        assert "#if defined(DCUT_RECURRENT_QUERY_START_LOC)" in kernel
+        assert "const int32_t seqLen = seq1 - seq0;" in kernel
+        assert (
+            "gamaInQueue_.FreeTensor(gamaInUb);\n"
+            "            }\n"
+            "            seq0 = seq1;"
+        ) in kernel
+
+
+def test_conv_kernel_derives_state_offsets_from_accepted_counts() -> None:
     wrapper = _read("kernel/dcut_causal_conv1d/op_kernel/dcut_causal_conv1d.cpp")
     kernel = _read("kernel/dcut_causal_conv1d/vendor/op_kernel/causal_conv1d.h")
 
-    assert "DCUT_CAUSAL_CONV_DIRECT_STATE_OFFSETS" in wrapper
-    assert "stateTokenOffset = ReadNumAcceptedTokensValue(seq);" in kernel
+    assert "DCUT_CAUSAL_CONV_DIRECT_STATE_OFFSETS" not in wrapper
+    assert "int32_t accepted = ReadNumAcceptedTokensValue(seq);" in kernel
+    assert "stateTokenOffset = accepted - 1;" in kernel
 
 
 def test_torch_registration_has_graph_metadata() -> None:
@@ -82,6 +113,9 @@ def test_torch_registration_has_graph_metadata() -> None:
     assert "TORCH_LIBRARY_IMPL(_C_ascend, Meta, ops)" in binding
     assert "Tensor(a!) state" in binding
     assert "Tensor(b!) conv_state" in binding
+    assert "Tensor? query_start_loc=None" in binding
+    assert "Tensor? num_accepted_tokens=None" in binding
+    assert "bool zero_padded_output=False" in binding
 
 
 def test_truncation_has_no_previous_acceptance_floor() -> None:

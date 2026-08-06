@@ -45,17 +45,7 @@ def _make_metadata(
             len(state_indices), dtype=torch.int32
         ),
     )
-    meta.spec_decode_metadata = SimpleNamespace(
-        spec_causal_conv1d=conv_meta,
-        actual_seq_lengths=torch.tensor(
-            [0]
-            + [
-                query_start_loc[index + 1] - query_start_loc[index]
-                for index in range(len(state_indices))
-            ],
-            dtype=torch.int32,
-        ),
-    )
+    meta.spec_decode_metadata = SimpleNamespace(spec_causal_conv1d=conv_meta)
     return meta
 
 
@@ -78,43 +68,31 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
         context, "layers.0.mixer", 8
     )
     pointers = {
-        name: tensor.data_ptr()
-        for name, tensor in bufs.items()
-        if name != "token_index"
+        name: tensor.data_ptr() for name, tensor in bufs.items()
     }
 
+    assert set(bufs) == {"qsl", "nat", "ssi"}
     assert bufs["qsl"].tolist() == [0, 2, 3, 3, 3]
-    assert bufs["asl"].tolist() == [0, 2, 1, 0, 0]
-    # NAT addresses the state selected by the previous verifier step.  The
-    # second request accepted three tokens previously even though this step's
-    # segment contains only one token, so it must not be clamped to ASL.
+    # NAT selects state from the previous verifier step. The second request
+    # accepted three tokens previously even though this step has one token, so
+    # the accepted count must not be clamped to the current segment length.
     assert bufs["nat"].tolist() == [2, 3, 0, 0]
-    assert bufs["conv_state_offsets"].tolist() == [1, 2, 0, 0]
     assert bufs["ssi"].tolist() == [
         [10, 11, 12],
         [20, 21, 22],
         [-1, -1, -1],
         [-1, -1, -1],
     ]
-    assert bufs["token_mask"].tolist() == [
-        True,
-        True,
-        True,
-        False,
-        False,
-        False,
-        False,
-        False,
-    ]
 
+    meta.num_spec_decodes = 1
     meta.spec_decode_metadata.spec_causal_conv1d.query_start_loc = (
-        torch.tensor([0, 1, 3], dtype=torch.int32)
+        torch.tensor([0, 1], dtype=torch.int32)
     )
     meta.spec_decode_metadata.spec_causal_conv1d.num_accepted_tokens = (
-        torch.tensor([3, 1], dtype=torch.int64)
+        torch.tensor([3], dtype=torch.int64)
     )
     meta.spec_state_indices_tensor = torch.tensor(
-        [[30, 31, 32], [40, 41, 42]], dtype=torch.int32
+        [[30, 31, 32]], dtype=torch.int32
     )
 
     assert _dcut_prepare_gdn_piecewise_replay(
@@ -124,14 +102,9 @@ def test_piecewise_spec_buffers_keep_addresses_and_refresh_values() -> None:
         bufs[name].data_ptr() == pointer
         for name, pointer in pointers.items()
     )
-    assert bufs["qsl"].tolist() == [0, 1, 3, 3, 3]
-    assert bufs["asl"].tolist() == [0, 1, 2, 0, 0]
-    assert bufs["nat"].tolist() == [3, 1, 0, 0]
-    assert bufs["conv_state_offsets"].tolist() == [2, 0, 0, 0]
-    assert bufs["ssi"][:2].tolist() == [
-        [30, 31, 32],
-        [40, 41, 42],
-    ]
+    assert bufs["qsl"].tolist() == [0, 1, 1, 1, 1]
+    assert bufs["nat"][0].item() == 3
+    assert bufs["ssi"][0].tolist() == [30, 31, 32]
 
 
 def test_piecewise_batch_buffers_are_shared_across_gdn_layers() -> None:
@@ -164,14 +137,7 @@ def test_piecewise_batch_buffers_are_shared_across_gdn_layers() -> None:
         context, "layers.1.mixer", 8
     )
 
-    for name in (
-        "qsl",
-        "asl",
-        "nat",
-        "token_index",
-        "token_mask",
-        "conv_state_offsets",
-    ):
+    for name in ("qsl", "nat"):
         assert first_bufs[name].data_ptr() == second_bufs[name].data_ptr()
     assert first_bufs["ssi"].data_ptr() != second_bufs["ssi"].data_ptr()
     assert first_bufs["ssi"][:2].tolist() == [
@@ -205,10 +171,10 @@ def test_eager_spec_state_is_prepared_once_per_forward() -> None:
     state = context._dcut_gdn_eager_spec_state
     assert state["num_accepted_tokens"].dtype == torch.int32
     assert state["num_accepted_tokens"].tolist() == [2, 0]
-    assert state["conv_state_offsets"].tolist() == [1, 0]
+    assert set(state) == {"query_start_loc", "num_accepted_tokens"}
     assert (
-        state["actual_seq_lengths"]
-        is first.spec_decode_metadata.actual_seq_lengths
+        state["query_start_loc"]
+        is first.spec_decode_metadata.spec_causal_conv1d.query_start_loc
     )
 
     first.spec_sequence_masks = None

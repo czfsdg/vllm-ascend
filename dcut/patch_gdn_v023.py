@@ -61,10 +61,56 @@ def _load_dcut_torch_ops() -> bool:
     return False
 
 
+def _patch_gdn_spec_metadata_builder(gdn_attn_builder) -> None:
+    """Avoid materializing speculative lengths no D-Cut kernel consumes."""
+    target_class = gdn_attn_builder.AscendGDNAttentionMetadataBuilder
+    current = target_class._attach_spec_decode_metadata
+    if getattr(current, "_dcut_patched", False):
+        return
+
+    def _dcut_attach_spec_decode_metadata(self, attn_metadata):
+        attn_metadata.spec_decode_metadata = None
+        if attn_metadata.spec_sequence_masks is None:
+            return attn_metadata
+
+        if attn_metadata.spec_query_start_loc is None:
+            raise RuntimeError(
+                "Expected attn_metadata.spec_query_start_loc for Ascend "
+                "GDN speculative path."
+            )
+        if attn_metadata.spec_state_indices_tensor is None:
+            raise RuntimeError(
+                "Expected spec_state_indices_tensor for Ascend GDN "
+                "speculative conv1d path."
+            )
+        if attn_metadata.num_accepted_tokens is None:
+            raise RuntimeError(
+                "Expected num_accepted_tokens for Ascend GDN speculative "
+                "conv1d path."
+            )
+
+        spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
+        attn_metadata.spec_decode_metadata = (
+            gdn_attn_builder.GDNSpecDecodeMetadata(
+                spec_causal_conv1d=gdn_attn_builder.GDNSpecCausalConv1dMetadata(
+                    query_start_loc=attn_metadata.spec_query_start_loc,
+                    cache_indices=attn_metadata.spec_state_indices_tensor[:spec_num_rows],
+                    num_accepted_tokens=attn_metadata.num_accepted_tokens[:spec_num_rows],
+                ),
+                actual_seq_lengths=attn_metadata.spec_query_start_loc,
+            )
+        )
+        return attn_metadata
+
+    _dcut_attach_spec_decode_metadata._dcut_patched = True
+    target_class._attach_spec_decode_metadata = _dcut_attach_spec_decode_metadata
+
+
 def _patch_gdn_dcut() -> bool:
     """Replace ``_forward_core`` while preserving the native custom-op API."""
     try:
         from vllm_ascend.ops import gdn as ascend_gdn
+        from vllm_ascend.ops import gdn_attn_builder
         from vllm_ascend.patch.worker import patch_qwen3_5 as qwen_patch
         from vllm_ascend.utils import is_310p
     except Exception as exc:  # pragma: no cover - depends on runtime imports
@@ -76,11 +122,13 @@ def _patch_gdn_dcut() -> bool:
         return False
 
     target_class = qwen_patch._GDN_PATCH_TARGET
-    if getattr(target_class._forward_core, "_dcut_patched", False):
-        return True
 
     if not _load_dcut_torch_ops():
         return False
+
+    _patch_gdn_spec_metadata_builder(gdn_attn_builder)
+    if getattr(target_class._forward_core, "_dcut_patched", False):
+        return True
 
     from .gdn_forward_v023 import AscendGatedDeltaNetAttention as DcutGatedDeltaNetAttention
 

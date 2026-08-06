@@ -39,8 +39,8 @@ class DcutCausalConv1d : public OpDef {
         .DataTypeList({ge::DT_BOOL, ge::DT_INT32, ge::DT_INT64})
         .FormatList({ge::FORMAT_ND})
         .AutoContiguous();
-    // Zero-based offsets into each request's persistent convolution row.
-    this->Input("stateOffsets")
+    // Previous-step accepted counts; the kernel derives zero-based offsets.
+    this->Input("numAcceptedTokens")
         .ParamType(OPTIONAL)
         .DataTypeList({ge::DT_INT32, ge::DT_INT64})
         .FormatList({ge::FORMAT_ND})

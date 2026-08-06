@@ -26,8 +26,8 @@ if not ops:
         print(f"    hasattr({name}) = {exists}")
 
 # Call dcut op with the CORRECT signature:
-# (q, k, v, state, *, beta, scale, actual_seq_lengths,
-#  ssm_state_indices, num_accepted_tokens, g, gk) -> Tensor
+# (q, k, v, state, *, beta, scale, query_start_loc,
+#  ssm_state_indices, num_accepted_tokens, g, gk, zero_padded_output) -> Tensor
 print("\n[3] Calling npu_dcut_recurrent_gated_delta_rule (correct sig) ...")
 import torch
 dev = "npu:0"
@@ -43,8 +43,8 @@ g  = torch.randn(T, H, D,  device=dev, dtype=torch.float32)  # gate must be floa
 state = torch.randn(B, H, D, D, device=dev, dtype=dt)
 # 2D beta: (T, H)
 beta  = torch.randn(T, H,    device=dev, dtype=dt)
-# actual_seq_lengths: cumulative (B+1,) — tiling treats it as cu_seqlens
-asl   = torch.tensor([0, S, 2*S], device=dev, dtype=torch.int32)
+# query_start_loc: cumulative packed-token offsets, shape (B+1,)
+qsl   = torch.tensor([0, S, 2*S], device=dev, dtype=torch.int32)
 # ssm_state_indices: (B, S) where 1 <= S <= 16
 ssi   = torch.tensor([[0]*S]*B, device=dev, dtype=torch.int32)
 nat   = torch.tensor([S]*B, device=dev, dtype=torch.int32)
@@ -55,7 +55,7 @@ try:
         g=g,
         beta=beta,
         scale=1.0,
-        actual_seq_lengths=asl,
+        query_start_loc=qsl,
         ssm_state_indices=ssi,
         num_accepted_tokens=nat,
     )

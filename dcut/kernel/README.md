@@ -2,8 +2,8 @@
 
 这里包含两个仅服务于 D-Cut 变长 speculative decode 的 AscendC 算子，所有新增和修改的源码都在 `dcut/` 下：
 
-- `dcut_recurrent_gated_delta_rule`：输入固定槽位矩阵 `ssm_state_indices[B, S]` 和上一轮的 `num_accepted_tokens[B]`。它按 request 行读取上一轮接受位置的 recurrent state，再只写回本轮有效 token 对应的槽位。
-- `dcut_causal_conv1d`：通过 `state_offsets[B]` 读取每个 request 上一轮的卷积窗口；`query_start_loc[B+1]` 独立描述本轮的变长 token。
+- `dcut_recurrent_gated_delta_rule`：直接输入 `query_start_loc[B+1]`、固定槽位矩阵 `ssm_state_indices[B, S]` 和上一轮的 `num_accepted_tokens[B]`。算子内部计算每个 request 的本轮长度，并只写回有效 token 对应的 recurrent state。
+- `dcut_causal_conv1d`：直接输入 `num_accepted_tokens[B]` 和 `query_start_loc[B+1]`；算子内部推导上一轮卷积窗口的零基偏移和本轮变长 token 范围。
 
 这样，上一轮接受位置可以大于本轮 D-Cut 长度，不再需要 `target = max(random_len, gdn_min)`。索引都保留为 device tensor，Python 热路径没有 `item()`。
 

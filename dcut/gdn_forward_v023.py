@@ -53,15 +53,8 @@ def _run_spec_causal_conv1d(
     cache_indices: torch.Tensor,
     num_accepted_tokens: torch.Tensor,
     activation_mode: int,
-    state_offsets: torch.Tensor | None = None,
 ) -> None:
     """Read the previous conv window independently of this round's length."""
-    if state_offsets is None:
-        num_requests = cache_indices.shape[0]
-        state_offsets = (
-            num_accepted_tokens[:num_requests].to(torch.int32) - 1
-        )
-        state_offsets = state_offsets.clamp_min(0).contiguous()
     torch.ops._C_ascend.npu_dcut_causal_conv1d(
         output=output,
         x=x,
@@ -70,7 +63,7 @@ def _run_spec_causal_conv1d(
         bias=bias,
         query_start_loc=query_start_loc,
         cache_indices=cache_indices,
-        state_offsets=state_offsets,
+        num_accepted_tokens=num_accepted_tokens,
         activation_mode=activation_mode,
         pad_slot_id=DCUT_PAD_SLOT_ID,
     )
@@ -446,15 +439,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 spec_cache_indices,
                 spec_num_accepted_tokens,
                 activation_num,
-                state_offsets=(
-                    piecewise_spec_bufs["conv_state_offsets"]
-                    if piecewise_spec_bufs is not None
-                    else (
-                        eager_spec_state["conv_state_offsets"]
-                        if eager_spec_state is not None
-                        else None
-                    )
-                ),
             )
             mixed_qkv_spec = output_spec
 
@@ -580,13 +564,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = (
-                piecewise_spec_bufs["asl"]
+            recurrent_query_start_loc = (
+                piecewise_spec_bufs["qsl"]
                 if piecewise_spec_bufs is not None
                 else (
-                    eager_spec_state["actual_seq_lengths"]
+                    eager_spec_state["query_start_loc"]
                     if eager_spec_state is not None
-                    else attn_metadata.spec_decode_metadata.actual_seq_lengths
+                    else spec_causal_conv1d_meta.query_start_loc
                 )
             )
             recurrent_num_accepted_tokens = (
@@ -614,19 +598,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_spec.squeeze(0),
                 state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
+                query_start_loc=recurrent_query_start_loc,
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=recurrent_num_accepted_tokens,
+                zero_padded_output=piecewise_spec_bufs is not None,
             ).unsqueeze(0)
-            if piecewise_spec_bufs is not None:
-                valid_tokens = piecewise_spec_bufs["token_mask"].view(
-                    1, -1, 1, 1
-                )
-                core_attn_out_spec = torch.where(
-                    valid_tokens,
-                    core_attn_out_spec,
-                    torch.zeros_like(core_attn_out_spec),
-                )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 

@@ -292,11 +292,9 @@ def _dcut_prepare_gdn_eager_state(
 ) -> bool:
     """Build batch-level speculative state once for all eager GDN layers.
 
-    ``num_accepted_tokens`` and ``actual_seq_lengths`` describe the batch and
-    are identical for every GDN layer. The eager implementation previously
-    cast accepted counts and derived conv-state offsets at every layer. Keep
-    state indices layer-local, but share these batch-level tensors for the
-    duration of one model forward.
+    ``query_start_loc`` and ``num_accepted_tokens`` describe the batch and
+    are identical for every GDN layer. Keep state indices layer-local, but
+    share these batch-level tensors for the duration of one model forward.
     """
     forward_context._dcut_gdn_eager_spec_state = None
     attn_metadata = getattr(forward_context, "attn_metadata", None)
@@ -321,11 +319,11 @@ def _dcut_prepare_gdn_eager_state(
     spec_decode_metadata = reference.spec_decode_metadata
     conv_metadata = spec_decode_metadata.spec_causal_conv1d
     num_accepted_tokens = conv_metadata.num_accepted_tokens
-    actual_seq_lengths = spec_decode_metadata.actual_seq_lengths
+    query_start_loc = conv_metadata.query_start_loc
     num_conv_requests = int(conv_metadata.cache_indices.shape[0])
     if (
         num_accepted_tokens is None
-        or actual_seq_lengths is None
+        or query_start_loc is None
         or num_accepted_tokens.numel() < num_conv_requests
     ):
         return False
@@ -342,8 +340,8 @@ def _dcut_prepare_gdn_eager_state(
             != tuple(num_accepted_tokens.shape)
             or int(layer_conv_metadata.cache_indices.shape[0])
             != num_conv_requests
-            or tuple(layer_spec_metadata.actual_seq_lengths.shape)
-            != tuple(actual_seq_lengths.shape)
+            or tuple(layer_conv_metadata.query_start_loc.shape)
+            != tuple(query_start_loc.shape)
         ):
             return False
 
@@ -351,22 +349,9 @@ def _dcut_prepare_gdn_eager_state(
     if accepted_tokens_int32.dtype != torch.int32:
         accepted_tokens_int32 = accepted_tokens_int32.to(torch.int32)
 
-    conv_state_offsets = torch.empty(
-        num_conv_requests,
-        dtype=torch.int32,
-        device=accepted_tokens_int32.device,
-    )
-    torch.sub(
-        accepted_tokens_int32[:num_conv_requests],
-        1,
-        out=conv_state_offsets,
-    )
-    conv_state_offsets.clamp_min_(0)
-
     forward_context._dcut_gdn_eager_spec_state = {
-        "actual_seq_lengths": actual_seq_lengths,
+        "query_start_loc": query_start_loc,
         "num_accepted_tokens": accepted_tokens_int32,
-        "conv_state_offsets": conv_state_offsets,
     }
     return True
 
@@ -441,18 +426,6 @@ def _dcut_alloc_gdn_piecewise_spec_bufs(
             "nat": torch.zeros(
                 max_num_seqs, dtype=torch.int32, device=device
             ),
-            "asl": torch.zeros(
-                max_num_seqs + 1, dtype=torch.int32, device=device
-            ),
-            "token_index": torch.arange(
-                num_tokens, dtype=torch.int32, device=device
-            ),
-            "token_mask": torch.zeros(
-                num_tokens, dtype=torch.bool, device=device
-            ),
-            "conv_state_offsets": torch.zeros(
-                max_num_seqs, dtype=torch.int32, device=device
-            ),
         }
         _dcut_gdn_static[shared_key] = shared_bufs
         logger.info(
@@ -525,7 +498,6 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
 
     if fill_shared_batch:
         qsl = bufs["qsl"]
-        qsl.zero_()
         qsl[: num_spec_decodes + 1].copy_(
             conv_meta.query_start_loc[: num_spec_decodes + 1],
             non_blocking=True,
@@ -537,20 +509,10 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
                 non_blocking=True,
             )
 
-        asl = bufs["asl"]
-        asl.zero_()
-        asl[:1].copy_(qsl[:1], non_blocking=True)
-        torch.sub(
-            qsl[1 : num_spec_decodes + 1],
-            qsl[:num_spec_decodes],
-            out=asl[1 : num_spec_decodes + 1],
-        )
-
         nat = bufs["nat"]
-        nat.zero_()
-        accepted_tokens = conv_meta.num_accepted_tokens[
-            :num_spec_decodes
-        ].to(torch.int32)
+        accepted_tokens = conv_meta.num_accepted_tokens[:num_spec_decodes]
+        if accepted_tokens.dtype != torch.int32:
+            accepted_tokens = accepted_tokens.to(torch.int32)
         # This selects the state produced by the *previous* verifier step. Its
         # position is independent of the number of tokens retained by D-Cut for
         # the current step. Clamping it to the current segment length makes a
@@ -560,18 +522,7 @@ def _dcut_fill_gdn_piecewise_spec_bufs(
             non_blocking=True,
         )
 
-        conv_state_offsets = bufs["conv_state_offsets"]
-        torch.sub(nat, 1, out=conv_state_offsets)
-        conv_state_offsets.clamp_min_(0)
-
-        torch.lt(
-            bufs["token_index"],
-            qsl[num_spec_decodes],
-            out=bufs["token_mask"],
-        )
-
     ssi = bufs["ssi"]
-    ssi.fill_(PAD_SLOT_ID)
     ssi[:num_spec_decodes].copy_(
         state_indices[:num_spec_decodes],
         non_blocking=True,

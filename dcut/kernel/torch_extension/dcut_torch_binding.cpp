@@ -15,7 +15,7 @@ at::Tensor npu_dcut_causal_conv1d_meta(
     const c10::optional<at::Tensor>& bias,
     const c10::optional<at::Tensor>& query_start_loc,
     const c10::optional<at::Tensor>& cache_indices,
-    const c10::optional<at::Tensor>& state_offsets,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
     int64_t activation_mode,
     int64_t pad_slot_id) {
   return output;
@@ -28,11 +28,12 @@ at::Tensor npu_dcut_recurrent_gated_delta_rule_meta(
     at::Tensor& state,
     const c10::optional<at::Tensor>& beta,
     const c10::optional<double> scale,
-    const c10::optional<at::Tensor>& actual_seq_lengths,
+    const c10::optional<at::Tensor>& query_start_loc,
     const c10::optional<at::Tensor>& ssm_state_indices,
     const c10::optional<at::Tensor>& num_accepted_tokens,
     const c10::optional<at::Tensor>& g,
-    const c10::optional<at::Tensor>& gk) {
+    const c10::optional<at::Tensor>& gk,
+    bool zero_padded_output) {
   auto options = value.options().dtype(at::ScalarType::BFloat16);
   return at::empty_symint(value.sym_sizes(), options);
 }
@@ -48,18 +49,19 @@ TORCH_LIBRARY_FRAGMENT(_C_ascend, ops) {
       "                                    *, "
       "                                    Tensor? beta=None, "
       "                                    float? scale=None, "
-      "                                    Tensor? actual_seq_lengths=None, "
+      "                                    Tensor? query_start_loc=None, "
       "                                    Tensor? ssm_state_indices=None, "
       "                                    Tensor? num_accepted_tokens=None, "
       "                                    Tensor? g=None, "
-      "                                    Tensor? gk=None) -> Tensor");
+      "                                    Tensor? gk=None, "
+      "                                    bool zero_padded_output=False) -> Tensor");
   ops.def(
       "npu_dcut_causal_conv1d(Tensor(a!) output, Tensor x, "
       "                         Tensor weight, Tensor(b!) conv_state, "
       "                         Tensor? bias=None, "
       "                         Tensor? query_start_loc=None, "
       "                         Tensor? cache_indices=None, "
-      "                         Tensor? state_offsets=None, "
+      "                         Tensor? num_accepted_tokens=None, "
       "                         int activation_mode=0, "
       "                         int pad_slot_id=-1) -> Tensor(a!)");
 }

@@ -271,7 +271,7 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::CheckShapeDimAndRelation(const ge
     if (!CheckDim(queryShape, QKV_DIM_NUM, "query") || !CheckDim(keyShape, QKV_DIM_NUM, "key") ||
         !CheckDim(valueShape, QKV_DIM_NUM, "value") || !CheckDim(betaShape, BETA_DIM_NUM, "beta") ||
         !CheckDim(stateShape, STATE_DIM_NUM, "state") ||
-        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths") ||
+        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "query_start_loc") ||
         !CheckDim(ssmStateShape, SSM_STATE_INDICES_DIM_NUM, "ssm_state_indices")) {
         return ge::GRAPH_FAILED;
     }
@@ -280,7 +280,7 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::CheckShapeDimAndRelation(const ge
     OP_CHECK_IF(ssmStateShape.GetDim(DIM_0) != cuSeqlensShape.GetDim(DIM_0) - 1 ||
                     ssmStateShape.GetDim(DIM_1) <= 0 || ssmStateShape.GetDim(DIM_1) > MAX_MTP,
                 OP_LOGE(inputParams_.opName,
-                        "ssm_state_indices must have shape [B, S], where B matches actual_seq_lengths and 1 <= S <= %zu",
+                    "ssm_state_indices must have shape [B, S], where B matches query_start_loc and 1 <= S <= %zu",
                         MAX_MTP),
                 return ge::GRAPH_FAILED);
 #endif
@@ -451,7 +451,7 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::AnalyzeFormat()
         !CheckFormat(context_->GetInputDesc(KEY_INDEX)->GetStorageFormat(), "key") ||
         !CheckFormat(context_->GetInputDesc(VALUE_INDEX)->GetStorageFormat(), "value") ||
         !CheckFormat(context_->GetInputDesc(STATE_INDEX)->GetStorageFormat(), "state") ||
-        !CheckFormat(context_->GetInputDesc(CUSEQLENS_INDEX)->GetStorageFormat(), "actual_seq_lengths") ||
+        !CheckFormat(context_->GetInputDesc(CUSEQLENS_INDEX)->GetStorageFormat(), "query_start_loc") ||
         !CheckFormat(context_->GetInputDesc(SSM_STATE_INDICES_INDEX)->GetStorageFormat(), "ssm_state_indices")) {
         return ge::GRAPH_FAILED;
     }

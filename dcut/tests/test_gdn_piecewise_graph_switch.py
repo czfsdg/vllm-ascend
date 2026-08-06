@@ -51,7 +51,7 @@ def test_runner_keeps_outer_piecewise_and_routes_gdn_locally() -> None:
     assert "_should_build_dummy_attn_metadata" in runner
 
 
-def test_forward_captures_locally_and_masks_padding() -> None:
+def test_forward_captures_locally_and_zeroes_padding_in_kernel() -> None:
     core = _read("gdn_forward_v023.py")
     buffers = _read("gdn_buffers.py")
 
@@ -64,8 +64,9 @@ def test_forward_captures_locally_and_masks_padding() -> None:
     assert 'piecewise_spec_bufs["qsl"]' in core
     assert 'piecewise_spec_bufs["ssi"]' in core
     assert 'piecewise_spec_bufs["nat"]' in core
-    assert 'piecewise_spec_bufs["asl"]' in core
-    assert 'piecewise_spec_bufs["token_mask"]' in core
+    assert 'piecewise_spec_bufs["asl"]' not in core
+    assert 'piecewise_spec_bufs["token_mask"]' not in core
+    assert "zero_padded_output=piecewise_spec_bufs is not None" in core
     assert "_dcut_gdn_piecewise_spec_key" in buffers
     assert "_dcut_gdn_local_graph_expected_prefixes" in buffers
     assert "id(model_instance)" in buffers

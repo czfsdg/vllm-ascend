@@ -29,7 +29,7 @@ class DcutRecurrentGatedDeltaRule : public OpDef {
         .DataType({ge::DT_BF16, ge::DT_FLOAT})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
-    this->Input("actual_seq_lengths")
+    this->Input("query_start_loc")
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32, ge::DT_INT32})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND})

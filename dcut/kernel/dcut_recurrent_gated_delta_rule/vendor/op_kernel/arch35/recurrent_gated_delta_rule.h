@@ -159,19 +159,39 @@ public:
     __aicore__ inline void ComputeAvgload()
     {
         uint64_t realT = 0;
+#if defined(DCUT_RECURRENT_QUERY_START_LOC)
+        if (B_ > 0) {
+            const int32_t firstToken = cuSeqlensGm_.GetValue(0);
+            const int32_t lastToken = cuSeqlensGm_.GetValue(B_);
+            if (firstToken >= 0 && lastToken >= firstToken) {
+                realT = static_cast<uint64_t>(lastToken - firstToken);
+            }
+        }
+#else
         for (uint64_t batch_i = 1; batch_i < B_ + 1; batch_i++) {
             realT += cuSeqlensGm_.GetValue(batch_i);
         }
+#endif
         avgload = Ceil(realT * NV_, GetBlockNum());
     }
 
     __aicore__ inline void Process()
     {
         ComputeAvgload();
-        int32_t seq1 = cuSeqlensGm_.GetValue(0);
+        int32_t seq0 = cuSeqlensGm_.GetValue(0);
         for (uint64_t batch_i = 0; batch_i < B_; batch_i++) {
-            int32_t seqLen = cuSeqlensGm_.GetValue(batch_i+1);
-            if (seqLen <= 0) {
+#if defined(DCUT_RECURRENT_QUERY_START_LOC)
+            const int32_t seq1 = cuSeqlensGm_.GetValue(batch_i + 1);
+            const int32_t seqLen = seq1 - seq0;
+#else
+            const int32_t seqLen = cuSeqlensGm_.GetValue(batch_i + 1);
+            const int32_t seq1 = seq0 + seqLen;
+#endif
+            if (seqLen < 0) {
+                return;
+            }
+            if (seqLen == 0) {
+                seq0 = seq1;
                 continue;
             }
             if (seqLen > static_cast<int32_t>(MAX_MTP)) {
@@ -182,11 +202,9 @@ public:
                 return;
             }
 #endif
-            if (seq1 < 0 || seq1 > static_cast<int32_t>(T_) || (seq1 + seqLen) > static_cast<int32_t>(T_)) {
+            if (seq0 < 0 || seq1 < seq0 || seq1 > static_cast<int32_t>(T_)) {
                 return;
             }
-            int32_t seq0 = seq1;
-            seq1 += seqLen;
             uint32_t copyFlag = 0;
             uint64_t stateOffset;
             for (uint64_t head_i = 0; head_i < NV_; head_i++) {
@@ -234,6 +252,7 @@ public:
             if (hasGama_ && copyFlag != 0) {
                 gamaInQueue_.FreeTensor(gamaInUb);
             }
+            seq0 = seq1;
         }
     }
 
