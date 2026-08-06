@@ -193,3 +193,23 @@ def test_pending_probs_are_processed_before_truncation() -> None:
     process_at = execute_source.index("_maybe_process_adaptive_probs")
     truncate_at = execute_source.index("scheduler_output = _dcut_truncate")
     assert process_at < truncate_at
+
+
+def test_scheduler_prefill_route_is_scoped_to_execute_model() -> None:
+    route = _load_functions(
+        DCUT_DIR / "patch_runner.py",
+        {"_dcut_execute_with_gdn_prefill_route"},
+        {},
+    )["_dcut_execute_with_gdn_prefill_route"]
+    runner = SimpleNamespace()
+    observed = []
+
+    def execute(active_runner, scheduler_output, intermediate_tensors):
+        observed.append(active_runner._dcut_gdn_scheduler_has_prefill)
+        return scheduler_output, intermediate_tensors
+
+    result = route(runner, execute, "schedule", "intermediate", False)
+
+    assert result == ("schedule", "intermediate")
+    assert observed == [False]
+    assert not hasattr(runner, "_dcut_gdn_scheduler_has_prefill")

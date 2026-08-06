@@ -38,10 +38,24 @@ def _dcut_gdn_has_prefill(forward_context, prefix: str | None = None) -> bool:
 
 def _dcut_gdn_use_native_core(forward_context, prefix: str) -> bool:
     """Route prefill-containing batches around every D-Cut GDN operator."""
-    return bool(
-        getattr(forward_context, "_dcut_gdn_native_batch", False)
-        or _dcut_gdn_has_prefill(forward_context, prefix)
+    if forward_context is None:
+        return False
+
+    # ``GDNAttentionMetadata.num_prefills`` is overloaded for mixed
+    # speculative/non-speculative decode: the native builder folds ordinary
+    # decode rows into that count even though no prompt tokens are present.
+    # When the model runner has propagated the scheduler's real-prefill
+    # decision, it must therefore be authoritative, including when False.
+    native_batch = getattr(
+        forward_context,
+        "_dcut_gdn_native_batch",
+        None,
     )
+    if native_batch is not None:
+        return bool(native_batch)
+
+    # Dummy graph capture and direct unit paths do not have a SchedulerOutput.
+    return _dcut_gdn_has_prefill(forward_context, prefix)
 
 
 def _ops_registered() -> bool:

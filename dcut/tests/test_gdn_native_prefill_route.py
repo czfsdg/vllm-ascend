@@ -53,6 +53,21 @@ def test_pure_spec_batch_keeps_dcut_gdn_core() -> None:
     assert not use_native(context, "layers.0.mixer")
 
 
+def test_scheduler_non_prefill_overrides_synthetic_gdn_prefill() -> None:
+    has_prefill, use_native = _load_prefill_routers()
+    context = SimpleNamespace(
+        _dcut_gdn_native_batch=False,
+        attn_metadata={
+            # The native GDN builder reports ordinary decode rows here when
+            # speculative and non-speculative decode coexist.
+            "layers.0.mixer": SimpleNamespace(num_prefills=3),
+        },
+    )
+
+    assert has_prefill(context, "layers.0.mixer")
+    assert not use_native(context, "layers.0.mixer")
+
+
 def test_reused_context_can_return_to_pure_spec_route() -> None:
     has_prefill, use_native = _load_prefill_routers()
     context = SimpleNamespace(

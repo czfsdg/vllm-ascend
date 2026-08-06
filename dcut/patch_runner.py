@@ -20,9 +20,34 @@ from .probs import (
     _maybe_process_adaptive_probs,
     profile_adaptive_cost,
 )
-from .truncate import _dcut_truncate
+from .truncate import _dcut_has_prefill, _dcut_truncate
 
 ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
+
+
+def _dcut_execute_with_gdn_prefill_route(
+    runner,
+    execute_model,
+    scheduler_output,
+    intermediate_tensors,
+    has_prefill: bool,
+):
+    """Expose the scheduler's real-prefill decision during model forward."""
+    attr = "_dcut_gdn_scheduler_has_prefill"
+    had_previous = hasattr(runner, attr)
+    previous = getattr(runner, attr, None)
+    setattr(runner, attr, bool(has_prefill))
+    try:
+        return execute_model(
+            runner,
+            scheduler_output,
+            intermediate_tensors,
+        )
+    finally:
+        if had_previous:
+            setattr(runner, attr, previous)
+        elif hasattr(runner, attr):
+            delattr(runner, attr)
 
 
 def _dcut_piecewise_capture_dummy_enabled(
@@ -151,7 +176,16 @@ def _patch_runner() -> None:
         )
         graph_safe = False
         forward_context = get_forward_context()
-        native_gdn_batch = _dcut_gdn_has_prefill(forward_context)
+        scheduler_has_prefill = getattr(
+            self,
+            "_dcut_gdn_scheduler_has_prefill",
+            None,
+        )
+        native_gdn_batch = (
+            _dcut_gdn_has_prefill(forward_context)
+            if scheduler_has_prefill is None
+            else bool(scheduler_has_prefill)
+        )
         if forward_context is not None:
             # The context may be reused across forwards. Never let prepared
             # eager state outlive the metadata values it was derived from.
@@ -297,6 +331,7 @@ def _patch_runner() -> None:
         if os.environ.get(ENV_FULL_DECODE_ONLY):
             return _orig_exec(self, scheduler_output, intermediate_tensors)
 
+        _has_prefill = _dcut_has_prefill(self, scheduler_output)
         _ctrl = getattr(self, "_verify_adaptive_controller", None)
         _has_spec = bool(getattr(scheduler_output, "scheduled_spec_decode_tokens", None))
         debug_stats = bool(os.environ.get(ENV_DEBUG_STATS))
@@ -321,11 +356,21 @@ def _patch_runner() -> None:
                     self._adaptive_probs_pending = False
             _dcut_enable_drafter_probs(self)
             if dcut_enabled:
-                scheduler_output = _dcut_truncate(self, scheduler_output)
+                scheduler_output = _dcut_truncate(
+                    self,
+                    scheduler_output,
+                    has_prefill=_has_prefill,
+                )
             _dcut_prepare_prob_capture(self, scheduler_output)
 
         if not debug_stats:
-            return _orig_exec(self, scheduler_output, intermediate_tensors)
+            return _dcut_execute_with_gdn_prefill_route(
+                self,
+                _orig_exec,
+                scheduler_output,
+                intermediate_tensors,
+                _has_prefill,
+            )
 
         # Optional slow-path debug timing.  Keep it behind an env gate because
         # perf_counter plus per-step Python aggregation is visible at high ITL.
@@ -335,7 +380,13 @@ def _patch_runner() -> None:
             _kept_draft = sum(len(t) for t in _new_spec.values())
         import time as _time
         _t0 = _time.perf_counter()
-        result = _orig_exec(self, scheduler_output, intermediate_tensors)
+        result = _dcut_execute_with_gdn_prefill_route(
+            self,
+            _orig_exec,
+            scheduler_output,
+            intermediate_tensors,
+            _has_prefill,
+        )
         _fwd_ms = (_time.perf_counter() - _t0) * 1000
         if not hasattr(self, "_dcut_fwd_accum"):
             self._dcut_fwd_accum = {"full": 0, "kept": 0, "cut": 0, "fwd_ms": 0.0, "steps": 0, "spec_steps": 0}

@@ -105,7 +105,11 @@ def _dcut_get_target_draft_lens(ctrl, original_spec) -> list[int]:
     return target_draft_lens
 
 
-def _dcut_truncate(self, scheduler_output):
+def _dcut_truncate(
+    self,
+    scheduler_output,
+    has_prefill: bool | None = None,
+):
     """Apply cached per-request draft caps without a GDN state floor.
 
     The D-Cut recurrent and conv1d kernels read the previous accepted state
@@ -120,7 +124,9 @@ def _dcut_truncate(self, scheduler_output):
     )
     if ctrl is None or not scheduled_spec:
         return scheduler_output
-    if _dcut_has_prefill(self, scheduler_output):
+    if has_prefill is None:
+        has_prefill = _dcut_has_prefill(self, scheduler_output)
+    if has_prefill:
         return scheduler_output
 
     original_spec = scheduler_output.scheduled_spec_decode_tokens
