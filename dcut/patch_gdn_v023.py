@@ -17,6 +17,33 @@ _REQUIRED_OPS = (
 )
 
 
+def _dcut_gdn_has_prefill(forward_context, prefix: str | None = None) -> bool:
+    """Return whether the current GDN batch contains prefill work."""
+    if forward_context is None:
+        return False
+    attn_metadata = getattr(forward_context, "attn_metadata", None)
+    if not isinstance(attn_metadata, dict):
+        return False
+    metadata = (
+        attn_metadata.values()
+        if prefix is None
+        else (attn_metadata.get(prefix),)
+    )
+    return any(
+        int(getattr(meta, "num_prefills", 0)) > 0
+        for meta in metadata
+        if meta is not None
+    )
+
+
+def _dcut_gdn_use_native_core(forward_context, prefix: str) -> bool:
+    """Route prefill-containing batches around every D-Cut GDN operator."""
+    return bool(
+        getattr(forward_context, "_dcut_gdn_native_batch", False)
+        or _dcut_gdn_has_prefill(forward_context, prefix)
+    )
+
+
 def _ops_registered() -> bool:
     return all(hasattr(torch.ops._C_ascend, name) for name in _REQUIRED_OPS)
 
@@ -62,13 +89,18 @@ def _load_dcut_torch_ops() -> bool:
 
 
 def _patch_gdn_spec_metadata_builder(gdn_attn_builder) -> None:
-    """Avoid materializing speculative lengths no D-Cut kernel consumes."""
+    """Use compact D-Cut metadata only for decode-only batches."""
     target_class = gdn_attn_builder.AscendGDNAttentionMetadataBuilder
     current = target_class._attach_spec_decode_metadata
     if getattr(current, "_dcut_patched", False):
         return
 
     def _dcut_attach_spec_decode_metadata(self, attn_metadata):
+        # Prefill-containing batches bypass the D-Cut GDN core. Preserve the
+        # native actual_seq_lengths layout consumed by its recurrent kernel.
+        if int(attn_metadata.num_prefills) > 0:
+            return current(self, attn_metadata)
+
         attn_metadata.spec_decode_metadata = None
         if attn_metadata.spec_sequence_masks is None:
             return attn_metadata
@@ -109,6 +141,7 @@ def _patch_gdn_spec_metadata_builder(gdn_attn_builder) -> None:
 def _patch_gdn_dcut() -> bool:
     """Replace ``_forward_core`` while preserving the native custom-op API."""
     try:
+        from vllm.forward_context import get_forward_context
         from vllm_ascend.ops import gdn as ascend_gdn
         from vllm_ascend.ops import gdn_attn_builder
         from vllm_ascend.patch.worker import patch_qwen3_5 as qwen_patch
@@ -132,15 +165,44 @@ def _patch_gdn_dcut() -> bool:
 
     from .gdn_forward_v023 import AscendGatedDeltaNetAttention as DcutGatedDeltaNetAttention
 
+    native_forward_core = target_class._forward_core
     dcut_forward_core = DcutGatedDeltaNetAttention._forward_core
-    dcut_forward_core._dcut_patched = True  # type: ignore[attr-defined]
+
+    def _dcut_forward_core(
+        self,
+        mixed_qkv,
+        b,
+        a,
+        core_attn_out,
+    ):
+        forward_context = get_forward_context()
+        if _dcut_gdn_use_native_core(forward_context, self.prefix):
+            return native_forward_core(
+                self,
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+            )
+        return dcut_forward_core(
+            self,
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+        )
+
+    _dcut_forward_core._dcut_patched = True  # type: ignore[attr-defined]
+    _dcut_forward_core._dcut_native_forward_core = (  # type: ignore[attr-defined]
+        native_forward_core
+    )
 
     # ``forward`` remains the vllm-ascend implementation and still enters
     # torch.ops.vllm.qwen_gdn_attention_core. It remains a PIECEWISE splitting
     # boundary: pure-spec batches replay a local GDN graph there, while
     # prefill/mixed batches execute only that boundary eagerly.
-    ascend_gdn.AscendGatedDeltaNetAttention._forward_core = dcut_forward_core
-    target_class._forward_core = dcut_forward_core
+    ascend_gdn.AscendGatedDeltaNetAttention._forward_core = _dcut_forward_core
+    target_class._forward_core = _dcut_forward_core
     logger.info(
         "D-Cut: enabled independent recurrent/conv state selection for "
         "the vLLM 0.23 GDN core."

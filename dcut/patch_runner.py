@@ -12,6 +12,7 @@ from .gdn_buffers import (
     _dcut_prepare_gdn_piecewise_replay,
 )
 from .globals import ENV_FULL_DECODE_ONLY, logger
+from .patch_gdn_v023 import _dcut_gdn_has_prefill
 from .patch_piecewise import _is_enabled as _gdn_piecewise_graph_enabled
 from .probs import (
     _dcut_prepare_prob_capture,
@@ -150,10 +151,12 @@ def _patch_runner() -> None:
         )
         graph_safe = False
         forward_context = get_forward_context()
+        native_gdn_batch = _dcut_gdn_has_prefill(forward_context)
         if forward_context is not None:
             # The context may be reused across forwards. Never let prepared
             # eager state outlive the metadata values it was derived from.
             forward_context._dcut_gdn_eager_spec_state = None
+            forward_context._dcut_gdn_native_batch = native_gdn_batch
         if self._dcut_gdn_piecewise_enabled:
             from vllm.config import CUDAGraphMode
             if forward_context is not None:
@@ -167,6 +170,7 @@ def _patch_runner() -> None:
                 forward_context._dcut_gdn_local_graph_captured_prefixes = set()
             if (
                 forward_context is not None
+                and not native_gdn_batch
                 and getattr(
                     forward_context, "cudagraph_runtime_mode", None
                 )
@@ -230,7 +234,11 @@ def _patch_runner() -> None:
                     capture_dummy
                 )
 
-        if forward_context is not None and not graph_safe:
+        if (
+            forward_context is not None
+            and not graph_safe
+            and not native_gdn_batch
+        ):
             try:
                 _dcut_prepare_gdn_eager_state(
                     forward_context,
