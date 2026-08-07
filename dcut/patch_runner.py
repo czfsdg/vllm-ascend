@@ -297,6 +297,8 @@ def _patch_runner() -> None:
                 f"{num_tokens_padded}"
             )
 
+        self._dcut_last_num_tokens_padded = num_tokens_padded
+        self._dcut_last_graph_safe = graph_safe
         result = _orig_model_forward(
             self, num_tokens_padded, *args, **kwargs
         )
@@ -340,9 +342,11 @@ def _patch_runner() -> None:
         # reduction inside _dcut_truncate; keeping a second unconditional stats
         # path here adds Python work to every decode iteration.
         _full_draft = 0
+        _batch_size = 0
         if debug_stats and _ctrl is not None and _has_spec:
             _orig_spec = getattr(scheduler_output, "scheduled_spec_decode_tokens", {})
             _full_draft = sum(len(t) for t in _orig_spec.values())
+            _batch_size = len(_orig_spec)
         dcut_enabled = _ctrl is not None and not os.environ.get("VLLM_DCUT_DISABLE")
         if _ctrl is not None:
             if getattr(self, "_adaptive_probs_pending", False):
@@ -364,13 +368,17 @@ def _patch_runner() -> None:
             _dcut_prepare_prob_capture(self, scheduler_output)
 
         if not debug_stats:
-            return _dcut_execute_with_gdn_prefill_route(
+            import torch as _torch_fast
+            _torch_fast.npu.synchronize()
+            result = _dcut_execute_with_gdn_prefill_route(
                 self,
                 _orig_exec,
                 scheduler_output,
                 intermediate_tensors,
                 _has_prefill,
             )
+            _torch_fast.npu.synchronize()
+            return result
 
         # Optional slow-path debug timing.  Keep it behind an env gate because
         # perf_counter plus per-step Python aggregation is visible at high ITL.
@@ -379,6 +387,8 @@ def _patch_runner() -> None:
             _new_spec = getattr(scheduler_output, "scheduled_spec_decode_tokens", {})
             _kept_draft = sum(len(t) for t in _new_spec.values())
         import time as _time
+        import torch as _torch
+        _torch.npu.synchronize()
         _t0 = _time.perf_counter()
         result = _dcut_execute_with_gdn_prefill_route(
             self,
@@ -387,6 +397,7 @@ def _patch_runner() -> None:
             intermediate_tensors,
             _has_prefill,
         )
+        _torch.npu.synchronize()
         _fwd_ms = (_time.perf_counter() - _t0) * 1000
         if not hasattr(self, "_dcut_fwd_accum"):
             self._dcut_fwd_accum = {"full": 0, "kept": 0, "cut": 0, "fwd_ms": 0.0, "steps": 0, "spec_steps": 0}
@@ -408,6 +419,26 @@ def _patch_runner() -> None:
             else:
                 logger.warning(
                     "D-Cut step %d: no spec reqs, avg_fwd=%.1fms", acc["steps"], _avg_fwd)
+        _fwd_stats_out = os.environ.get("VLLM_DCUT_FWD_STATS_OUT")
+        if _fwd_stats_out and _has_spec:
+            import json as _json
+            _num_padded = getattr(self, "_dcut_last_num_tokens_padded", 0)
+            _graph_safe = getattr(self, "_dcut_last_graph_safe", False)
+            _entry = {
+                "step": acc["steps"],
+                "bs": _batch_size,
+                "full_draft": _full_draft,
+                "kept_draft": _kept_draft,
+                "trimmed": _full_draft - _kept_draft,
+                "num_tokens_padded": _num_padded,
+                "graph_safe": _graph_safe,
+                "fwd_ms": round(_fwd_ms, 2),
+            }
+            try:
+                with open(_fwd_stats_out, "a") as _f:
+                    _f.write(_json.dumps(_entry) + chr(10))
+            except Exception:
+                pass
         return result
 
     _orig_sample_tokens = R.sample_tokens
