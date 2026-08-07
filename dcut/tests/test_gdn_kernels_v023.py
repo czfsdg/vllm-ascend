@@ -16,7 +16,9 @@ def test_piecewise_gdn_core_uses_fixed_replay_inputs() -> None:
     core = _read("gdn_forward_v023.py")
     runner = _read("patch_runner.py")
 
-    assert "target_class._forward_core = dcut_forward_core" in patch
+    assert "native_forward_core = target_class._forward_core" in patch
+    assert "target_class._forward_core = _dcut_forward_core" in patch
+    assert "return dcut_forward_core(" in patch
     assert "target_class.forward =" not in patch
     assert "_patch_gdn_spec_metadata_builder" in patch
     assert "actual_seq_lengths=attn_metadata.spec_query_start_loc" in patch
