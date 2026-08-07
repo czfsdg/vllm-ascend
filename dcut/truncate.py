@@ -21,6 +21,9 @@ def _dcut_has_prefill(self, scheduler_output) -> bool:
     batches, so leave all speculative drafts intact whenever prefill work is
     present.
     """
+    if getattr(scheduler_output, "scheduled_new_reqs", None):
+        return True
+
     scheduled_spec = getattr(
         scheduler_output,
         "scheduled_spec_decode_tokens",
@@ -31,14 +34,6 @@ def _dcut_has_prefill(self, scheduler_output) -> bool:
         "num_scheduled_tokens",
         None,
     ) or {}
-
-    scheduled_new = {
-        request.req_id: request
-        for request in (
-            getattr(scheduler_output, "scheduled_new_reqs", None) or ()
-        )
-    }
-    is_kv_consumer = bool(getattr(self, "is_kv_consumer", False))
 
     input_batch = getattr(self, "input_batch", None)
     req_id_to_index = getattr(input_batch, "req_id_to_index", {})
@@ -50,115 +45,26 @@ def _dcut_has_prefill(self, scheduler_output) -> bool:
     num_prompt_tokens = getattr(input_batch, "num_prompt_tokens", None)
 
     for req_id, num_scheduled in num_scheduled_tokens.items():
-        new_request = scheduled_new.get(req_id)
-        if new_request is not None:
-            # A request newly installed on a PD decode worker already has its
-            # prompt KV. NPUModelRunner deliberately treats a speculative entry
-            # for such a request as decode even before the local input-batch
-            # token counters have caught up.
-            if is_kv_consumer and req_id in scheduled_spec:
-                continue
-
-            new_num_computed = getattr(
-                new_request,
-                "num_computed_tokens",
-                None,
-            )
-            prompt_token_ids = getattr(
-                new_request,
-                "prompt_token_ids",
-                None,
-            )
-            # NewRequestData normally supplies both fields. Stay conservative
-            # for compatible scheduler implementations that do not: an unknown
-            # new request must not be truncated as decode.
-            if new_num_computed is None or prompt_token_ids is None:
-                return True
-            # A PD decode worker can also receive the anchor without a draft on
-            # its first local step. GDN treats this one-token row with existing
-            # recurrent state as decode; do not turn it back into prefill here.
-            if (
-                is_kv_consumer
-                and int(num_scheduled) == 1
-                and int(new_num_computed) > 0
-            ):
-                continue
-            if int(new_num_computed) < len(prompt_token_ids):
-                return True
+        if req_id in scheduled_spec:
             continue
 
-        # Existing requests already have authoritative prompt progress in the
-        # input batch. Check it even for speculative entries: guided decoding
-        # can attach draft metadata to a chunked prefill.
+        # Ordinary decode contributes one token. Any larger non-spec query is
+        # prefill (including a continuation chunk).
+        if int(num_scheduled) != 1:
+            return True
+
+        # The final chunk of a prefill can contain exactly one token. Use the
+        # runner's request state to distinguish it from ordinary decode.
         req_idx = req_id_to_index.get(req_id)
-        has_request_state = (
+        if (
             req_idx is not None
             and num_computed_tokens is not None
             and num_prompt_tokens is not None
-        )
-        if has_request_state:
-            if (
-                num_computed_tokens[req_idx]
-                < num_prompt_tokens[req_idx]
-            ):
-                return True
-            continue
-
-        # Without request state, only an ordinary non-spec decode is known to
-        # contribute exactly one token. Larger non-spec queries are prefills.
-        if req_id not in scheduled_spec and int(num_scheduled) != 1:
+            and num_computed_tokens[req_idx] < num_prompt_tokens[req_idx]
+        ):
             return True
 
     return False
-
-
-def _dcut_normalize_decode_only_spec(
-    scheduler_output,
-    *,
-    has_prefill: bool,
-):
-    """Represent mixed speculative/ordinary decode as one pure-spec batch.
-
-    Ascend's GDN metadata builder folds ordinary one-token decode rows into
-    ``num_prefills`` whenever speculative rows are also present. Empty draft
-    entries are already the runner's supported representation for speculative
-    requests with zero verifier tokens. Adding those entries changes neither
-    token counts nor sampling semantics, but prevents decode-only work from
-    being mislabeled as prefill and makes the local PIECEWISE GDN graph eligible.
-    """
-    scheduled_spec = getattr(
-        scheduler_output,
-        "scheduled_spec_decode_tokens",
-        None,
-    )
-    if has_prefill or not scheduled_spec:
-        return scheduler_output
-
-    num_scheduled_tokens = getattr(
-        scheduler_output,
-        "num_scheduled_tokens",
-        None,
-    ) or {}
-    ordinary_decode_ids = []
-    for req_id, num_scheduled in num_scheduled_tokens.items():
-        if req_id in scheduled_spec:
-            continue
-        if int(num_scheduled) != 1:
-            # This should already have been classified as prefill. Preserve the
-            # native mixed path if a scheduler without enough request state
-            # reaches here rather than changing its speculative semantics.
-            return scheduler_output
-        ordinary_decode_ids.append(req_id)
-
-    if not ordinary_decode_ids:
-        return scheduler_output
-
-    normalized_spec = scheduled_spec.copy()
-    normalized_spec.update((req_id, []) for req_id in ordinary_decode_ids)
-    return replace(
-        scheduler_output,
-        scheduled_spec_decode_tokens=normalized_spec,
-    )
 
 
 def _dcut_get_target_draft_lens(ctrl, original_spec) -> list[int]:

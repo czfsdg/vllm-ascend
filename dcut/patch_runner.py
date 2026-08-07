@@ -20,11 +20,7 @@ from .probs import (
     _maybe_process_adaptive_probs,
     profile_adaptive_cost,
 )
-from .truncate import (
-    _dcut_has_prefill,
-    _dcut_normalize_decode_only_spec,
-    _dcut_truncate,
-)
+from .truncate import _dcut_has_prefill, _dcut_truncate
 
 ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
 
@@ -258,11 +254,12 @@ def _patch_runner() -> None:
                     if num_tokens_padded not in missing_sizes:
                         logger.warning(
                             "D-Cut: local GDN token bucket %d was not "
-                            "captured during startup; its first pure-spec "
-                            "runtime use will capture it lazily.",
+                            "captured during startup; only its GDN "
+                            "boundaries use eager.",
                             num_tokens_padded,
                         )
                         missing_sizes.add(num_tokens_padded)
+                    graph_safe = False
 
                 # These attributes are consumed only at the eager GDN splitting
                 # boundary. They never disable the surrounding PIECEWISE graph.
@@ -364,10 +361,6 @@ def _patch_runner() -> None:
                     scheduler_output,
                     has_prefill=_has_prefill,
                 )
-            scheduler_output = _dcut_normalize_decode_only_spec(
-                scheduler_output,
-                has_prefill=_has_prefill,
-            )
             _dcut_prepare_prob_capture(self, scheduler_output)
 
         if not debug_stats:

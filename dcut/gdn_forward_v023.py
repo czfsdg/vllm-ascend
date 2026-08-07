@@ -124,7 +124,7 @@ def _dcut_run_gdn_local_graph(
             False,
         )
     )
-    if graph is None and torch.npu.is_current_stream_capturing():
+    if graph is None and not capture_requested:
         missing_buckets = getattr(
             attention, "_dcut_gdn_local_graph_missing_buckets", None
         )
@@ -135,22 +135,21 @@ def _dcut_run_gdn_local_graph(
             )
         if token_bucket not in missing_buckets:
             logger.warning(
-                "D-Cut: cannot capture an unmatched local GDN graph "
-                "inside an active outer graph prefix=%s token_bucket=%d; "
-                "only this GDN boundary uses eager.",
+                "D-Cut: no local GDN graph matches prefix=%s "
+                "token_bucket=%d; only this GDN boundary uses eager.",
                 attention.prefix,
                 token_bucket,
             )
             missing_buckets.add(token_bucket)
-        if capture_requested:
+        return False
+
+    if graph is None:
+        if torch.npu.is_current_stream_capturing():
             raise RuntimeError(
                 "D-Cut cannot nest the local GDN graph inside an active "
                 "outer ACLGraph capture; qwen_gdn_attention_core must "
                 "remain a PIECEWISE splitting op"
             )
-        return False
-
-    if graph is None:
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(
             graph,
@@ -169,9 +168,8 @@ def _dcut_run_gdn_local_graph(
             forward_context, attention.prefix
         )
         logger.warning(
-            "D-Cut: captured local pure-spec GDN graph during %s "
+            "D-Cut: captured local pure-spec GDN graph "
             "prefix=%s token_bucket=%d.",
-            "startup" if capture_requested else "runtime",
             attention.prefix,
             token_bucket,
         )

@@ -40,25 +40,6 @@ def _load_truncate(target_draft_lens: list[int]):
     return namespace["_dcut_truncate"], trim_records
 
 
-def _load_prefill_helpers():
-    tree = ast.parse(TRUNCATE_PATH.read_text(encoding="utf-8"))
-    names = {
-        "_dcut_has_prefill",
-        "_dcut_normalize_decode_only_spec",
-    }
-    functions = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in names
-    ]
-    assert {node.name for node in functions} == names
-    module = ast.Module(body=functions, type_ignores=[])
-    ast.fix_missing_locations(module)
-    namespace = {"replace": replace}
-    exec(compile(module, str(TRUNCATE_PATH), "exec"), namespace)
-    return namespace
-
-
 def test_mixed_prefill_decode_batch_is_not_truncated() -> None:
     truncate, trim_records = _load_truncate([1])
     original = _SchedulerOutput(
@@ -102,102 +83,6 @@ def test_single_token_prefill_tail_is_not_truncated() -> None:
     assert result is original
     assert result.scheduled_spec_decode_tokens["decode"] == [10, 11, 12]
     assert trim_records == []
-
-
-def test_pd_consumer_new_spec_request_is_decode() -> None:
-    helpers = _load_prefill_helpers()
-    scheduler_output = _SchedulerOutput(
-        scheduled_spec_decode_tokens={"decode": [10, 11, 12]},
-        num_scheduled_tokens={"decode": 4},
-        total_num_scheduled_tokens=4,
-        scheduled_new_reqs=[
-            SimpleNamespace(
-                req_id="decode",
-                num_computed_tokens=0,
-                prompt_token_ids=list(range(32)),
-            )
-        ],
-    )
-    runner = SimpleNamespace(is_kv_consumer=True)
-
-    assert not helpers["_dcut_has_prefill"](runner, scheduler_output)
-
-
-def test_pd_consumer_new_single_token_without_draft_is_decode() -> None:
-    helpers = _load_prefill_helpers()
-    scheduler_output = _SchedulerOutput(
-        scheduled_spec_decode_tokens={"existing": [10, 11]},
-        num_scheduled_tokens={"existing": 3, "new_decode": 1},
-        total_num_scheduled_tokens=4,
-        scheduled_new_reqs=[
-            SimpleNamespace(
-                req_id="new_decode",
-                num_computed_tokens=31,
-                prompt_token_ids=list(range(32)),
-            )
-        ],
-    )
-    runner = SimpleNamespace(is_kv_consumer=True)
-
-    assert not helpers["_dcut_has_prefill"](runner, scheduler_output)
-
-
-def test_new_spec_prefill_is_still_detected_off_decode_worker() -> None:
-    helpers = _load_prefill_helpers()
-    scheduler_output = _SchedulerOutput(
-        scheduled_spec_decode_tokens={"prefill": [10, 11]},
-        num_scheduled_tokens={"prefill": 3},
-        total_num_scheduled_tokens=3,
-        scheduled_new_reqs=[
-            SimpleNamespace(
-                req_id="prefill",
-                num_computed_tokens=8,
-                prompt_token_ids=list(range(32)),
-            )
-        ],
-    )
-    runner = SimpleNamespace(is_kv_consumer=False)
-
-    assert helpers["_dcut_has_prefill"](runner, scheduler_output)
-
-
-def test_decode_only_mixed_spec_batch_is_normalized() -> None:
-    helpers = _load_prefill_helpers()
-    original = _SchedulerOutput(
-        scheduled_spec_decode_tokens={"spec": [10, 11]},
-        num_scheduled_tokens={"spec": 3, "ordinary": 1},
-        total_num_scheduled_tokens=4,
-    )
-
-    result = helpers["_dcut_normalize_decode_only_spec"](
-        original,
-        has_prefill=False,
-    )
-
-    assert result is not original
-    assert result.scheduled_spec_decode_tokens == {
-        "spec": [10, 11],
-        "ordinary": [],
-    }
-    assert result.num_scheduled_tokens == original.num_scheduled_tokens
-    assert result.total_num_scheduled_tokens == 4
-    assert original.scheduled_spec_decode_tokens == {"spec": [10, 11]}
-
-
-def test_real_prefill_batch_is_not_normalized() -> None:
-    helpers = _load_prefill_helpers()
-    original = _SchedulerOutput(
-        scheduled_spec_decode_tokens={"spec": [10, 11]},
-        num_scheduled_tokens={"spec": 3, "prefill": 8},
-        total_num_scheduled_tokens=11,
-    )
-
-    result = helpers["_dcut_normalize_decode_only_spec"](
-        original,
-        has_prefill=True,
-    )
-
-    assert result is original
 
 
 def test_zero_draft_decision_stays_on_spec_path_without_adding_tokens() -> None:
