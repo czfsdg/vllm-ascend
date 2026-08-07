@@ -258,12 +258,11 @@ def _patch_runner() -> None:
                     if num_tokens_padded not in missing_sizes:
                         logger.warning(
                             "D-Cut: local GDN token bucket %d was not "
-                            "captured during startup; only its GDN "
-                            "boundaries use eager.",
+                            "captured during startup; its first pure-spec "
+                            "runtime use will capture it lazily.",
                             num_tokens_padded,
                         )
                         missing_sizes.add(num_tokens_padded)
-                    graph_safe = False
 
                 # These attributes are consumed only at the eager GDN splitting
                 # boundary. They never disable the surrounding PIECEWISE graph.

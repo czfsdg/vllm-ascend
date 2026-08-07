@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 DCUT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = DCUT_ROOT.parent
@@ -8,6 +11,36 @@ REPO_ROOT = DCUT_ROOT.parent
 
 def _read(relative_path: str) -> str:
     return (DCUT_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _load_local_graph_functions(namespace: dict):
+    path = DCUT_ROOT / "gdn_forward_v023.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names = {
+        "_dcut_gdn_local_graph_key",
+        "_dcut_mark_local_graph_captured",
+        "_dcut_run_gdn_local_graph",
+    }
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    assert {node.name for node in functions} == names
+    module = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            *functions,
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace
 
 
 def test_piecewise_switch_is_registered_and_default_off() -> None:
@@ -72,6 +105,79 @@ def test_forward_captures_locally_and_zeroes_padding_in_kernel() -> None:
     assert "id(model_instance)" in buffers
     assert "meta.num_prefills) != 0" in buffers
     assert "meta.num_decodes) != 0" in buffers
+
+
+def test_unmatched_runtime_addresses_are_captured_then_replayed() -> None:
+    class FakeTensor:
+        def __init__(self, address: int):
+            self.shape = (128,)
+            self._address = address
+
+        def data_ptr(self):
+            return self._address
+
+    class FakeGraph:
+        def __init__(self):
+            self.replays = 0
+
+        def replay(self):
+            self.replays += 1
+
+    class FakeNpu:
+        capturing = False
+
+        @classmethod
+        def is_current_stream_capturing(cls):
+            return cls.capturing
+
+        @staticmethod
+        def NPUGraph():
+            return FakeGraph()
+
+        @staticmethod
+        def graph(graph, pool):
+            return nullcontext()
+
+    class FakeCore:
+        calls = 0
+
+        @classmethod
+        def _forward_core_impl(cls, *args):
+            cls.calls += 1
+
+    functions = _load_local_graph_functions(
+        {
+            "torch": SimpleNamespace(npu=FakeNpu),
+            "current_platform": SimpleNamespace(
+                get_global_graph_pool=lambda: object()
+            ),
+            "AscendGatedDeltaNetAttention": FakeCore,
+            "logger": SimpleNamespace(warning=lambda *args: None),
+        }
+    )
+    run_graph = functions["_dcut_run_gdn_local_graph"]
+    attention = SimpleNamespace(prefix="layers.0.mixer")
+    context = SimpleNamespace(
+        _dcut_gdn_local_graph_capture_requested=False,
+        _dcut_gdn_local_graph_captured_prefixes=set(),
+    )
+    tensors = tuple(FakeTensor(address) for address in range(1, 5))
+
+    assert run_graph(attention, *tensors, context, {})
+    graph = next(iter(attention._dcut_gdn_local_graph_entries.values()))
+    assert FakeCore.calls == 1
+    assert graph.replays == 0
+
+    assert run_graph(attention, *tensors, context, {})
+    assert FakeCore.calls == 1
+    assert graph.replays == 1
+
+
+def test_runtime_local_graph_never_nests_inside_outer_capture() -> None:
+    source = _read("gdn_forward_v023.py")
+
+    assert "graph is None and torch.npu.is_current_stream_capturing()" in source
+    assert "if graph is None and not capture_requested" not in source
 
 
 def test_full_attention_remains_an_eager_piecewise_boundary() -> None:
