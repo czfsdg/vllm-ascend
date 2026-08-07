@@ -192,7 +192,11 @@ def test_pending_probs_are_processed_before_truncation() -> None:
 
     process_at = execute_source.index("_maybe_process_adaptive_probs")
     truncate_at = execute_source.index("scheduler_output = _dcut_truncate")
+    normalize_at = execute_source.index(
+        "scheduler_output = _dcut_normalize_decode_only_spec"
+    )
     assert process_at < truncate_at
+    assert truncate_at < normalize_at
 
 
 def test_scheduler_prefill_route_is_scoped_to_execute_model() -> None:

@@ -20,7 +20,11 @@ from .probs import (
     _maybe_process_adaptive_probs,
     profile_adaptive_cost,
 )
-from .truncate import _dcut_has_prefill, _dcut_truncate
+from .truncate import (
+    _dcut_has_prefill,
+    _dcut_normalize_decode_only_spec,
+    _dcut_truncate,
+)
 
 ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
 
@@ -361,6 +365,10 @@ def _patch_runner() -> None:
                     scheduler_output,
                     has_prefill=_has_prefill,
                 )
+            scheduler_output = _dcut_normalize_decode_only_spec(
+                scheduler_output,
+                has_prefill=_has_prefill,
+            )
             _dcut_prepare_prob_capture(self, scheduler_output)
 
         if not debug_stats:
