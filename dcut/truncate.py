@@ -130,6 +130,22 @@ def _dcut_truncate(
         return scheduler_output
 
     original_spec = scheduler_output.scheduled_spec_decode_tokens
+    matches_request_set = getattr(
+        ctrl,
+        "matches_adaptive_request_set",
+        None,
+    )
+    if (
+        matches_request_set is not None
+        and not matches_request_set(original_spec.keys())
+    ):
+        # The probabilities are produced one runner iteration before their
+        # verifier batch. Requests can finish, enter decode after prefill, or
+        # be replaced during that gap. Never combine caps optimized for the
+        # old set with full-length defaults for new requests: that creates
+        # intermediate totals such as kept=111 that pad to a larger graph
+        # bucket without using its available verifier capacity.
+        return scheduler_output
     full_draft = sum(len(tokens) for tokens in original_spec.values())
     num_spec_requests = len(original_spec)
     new_spec = original_spec.copy()

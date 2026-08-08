@@ -155,6 +155,8 @@ class VerifyAdaptiveController:
 
         # req_id → recommended draft_len for the next verifier step
         self._adaptive_draft_lens: dict[str, int] = {}
+        self._adaptive_decision_req_ids: frozenset[str] = frozenset()
+        self._adaptive_decision_batch_size = 0
         self._decision_step = 0
 
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
@@ -327,7 +329,13 @@ class VerifyAdaptiveController:
     ) -> None:
         """Compute and cache adaptive draft_lens from this step's drafter probs."""
         if not self.config.enabled or not active_draft_req_ids:
+            self.clear_adaptive_decision()
             return
+
+        # A decision is valid only as one coherent request-set snapshot. Clear
+        # the previous one before any mode or cost-table lookup so an early
+        # return can never reuse stale per-request caps.
+        self.clear_adaptive_decision()
 
         # Random cut mode: assign random draft_lens (must be BEFORE _sorted_bs
         # check because random cut skips profiling -> _sorted_bs is empty)
@@ -335,8 +343,16 @@ class VerifyAdaptiveController:
             max_draft_len = self.max_query_len_per_req - 1
             n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
             active_req_ids = [req_ids[i] for i in range(n_rows) if req_ids[i] in active_draft_req_ids]
+            draft_lens = []
             for req_id in active_req_ids:
-                self._adaptive_draft_lens[req_id] = np.random.randint(2, max_draft_len + 1)
+                draft_lens.append(
+                    int(np.random.randint(2, max_draft_len + 1))
+                )
+            self.set_adaptive_decision(
+                active_req_ids,
+                draft_lens,
+                batch_size,
+            )
             _dbg = getattr(self, "_dcut_rand_dbg_cnt", 0)
             if _dbg < 20:
                 self._dcut_rand_dbg_cnt = _dbg + 1
@@ -392,8 +408,11 @@ class VerifyAdaptiveController:
         )
 
         draft_lens = result["draft_lens"]
-        for req_id, draft_len in zip(active_req_ids, draft_lens):
-            self._adaptive_draft_lens[req_id] = draft_len
+        self.set_adaptive_decision(
+            active_req_ids,
+            draft_lens,
+            batch_size,
+        )
 
         self._dump_decision_if_requested(
             decision_dump_path,
@@ -413,6 +432,36 @@ class VerifyAdaptiveController:
     def get_adaptive_draft_len(self, req_id: str) -> int | None:
         """Cached draft_len for *req_id*, or None (→ use full spec tokens)."""
         return self._adaptive_draft_lens.get(req_id)
+
+    def set_adaptive_decision(
+        self,
+        req_ids: list[str],
+        draft_lens: list[int],
+        batch_size: int,
+    ) -> None:
+        """Atomically replace the per-request caps and their source batch."""
+        if len(req_ids) != len(draft_lens):
+            raise ValueError(
+                "D-Cut decision length mismatch: "
+                f"req_ids={len(req_ids)} draft_lens={len(draft_lens)}"
+            )
+        self._adaptive_draft_lens = dict(zip(req_ids, draft_lens))
+        self._adaptive_decision_req_ids = frozenset(req_ids)
+        self._adaptive_decision_batch_size = int(batch_size)
+
+    def clear_adaptive_decision(self) -> None:
+        """Invalidate the complete cached decision snapshot."""
+        self._adaptive_draft_lens.clear()
+        self._adaptive_decision_req_ids = frozenset()
+        self._adaptive_decision_batch_size = 0
+
+    def matches_adaptive_request_set(self, req_ids) -> bool:
+        """Whether cached caps were optimized for exactly this spec batch."""
+        current_req_ids = frozenset(req_ids)
+        return (
+            len(current_req_ids) == self._adaptive_decision_batch_size
+            and current_req_ids == self._adaptive_decision_req_ids
+        )
 
     def invalidate(self, req_id: str) -> None:
         """Drop cached state for a completed or evicted request."""

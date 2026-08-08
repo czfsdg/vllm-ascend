@@ -85,6 +85,65 @@ def test_single_token_prefill_tail_is_not_truncated() -> None:
     assert trim_records == []
 
 
+def test_request_set_change_skips_stale_partial_truncation() -> None:
+    truncate, trim_records = _load_truncate([1, 1])
+
+    class Controller:
+        def matches_adaptive_request_set(self, req_ids):
+            return frozenset(req_ids) == frozenset({"old-0", "old-1"})
+
+    original = _SchedulerOutput(
+        scheduled_spec_decode_tokens={
+            "old-0": [10, 11, 12],
+            "new-from-prefill": [20, 21, 22],
+        },
+        num_scheduled_tokens={"old-0": 4, "new-from-prefill": 4},
+        total_num_scheduled_tokens=8,
+    )
+
+    result = truncate(
+        SimpleNamespace(_verify_adaptive_controller=Controller()),
+        original,
+    )
+
+    assert result is original
+    assert result.scheduled_spec_decode_tokens == {
+        "old-0": [10, 11, 12],
+        "new-from-prefill": [20, 21, 22],
+    }
+    assert trim_records == []
+
+
+def test_matching_request_set_applies_one_coherent_decision() -> None:
+    truncate, trim_records = _load_truncate([1, 2])
+
+    class Controller:
+        def matches_adaptive_request_set(self, req_ids):
+            return frozenset(req_ids) == frozenset({"request-0", "request-1"})
+
+    original = _SchedulerOutput(
+        scheduled_spec_decode_tokens={
+            "request-0": [10, 11, 12],
+            "request-1": [20, 21, 22],
+        },
+        num_scheduled_tokens={"request-0": 4, "request-1": 4},
+        total_num_scheduled_tokens=8,
+    )
+
+    result = truncate(
+        SimpleNamespace(_verify_adaptive_controller=Controller()),
+        original,
+    )
+
+    assert result.scheduled_spec_decode_tokens == {
+        "request-0": [10],
+        "request-1": [20, 21],
+    }
+    assert result.num_scheduled_tokens == {"request-0": 2, "request-1": 3}
+    assert result.total_num_scheduled_tokens == 5
+    assert trim_records == [(6, 3, 2)]
+
+
 def test_zero_draft_decision_stays_on_spec_path_without_adding_tokens() -> None:
     truncate, trim_records = _load_truncate([0, 2])
     original = _SchedulerOutput(

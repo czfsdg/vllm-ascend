@@ -24,6 +24,22 @@ def _dcut_prepare_prob_capture(self, scheduler_output) -> None:
         # shape instead of accidentally reusing the final startup-capture bucket.
         drafter._dcut_last_logits_for_probs = None
 
+
+def _dcut_probability_req_ids(self, num_reqs: int) -> list[str]:
+    """Return the request IDs aligned with the captured draft-prob rows.
+
+    ``_copy_draft_token_ids_to_cpu`` snapshots ``_draft_token_req_ids`` at
+    proposal time. Use that same snapshot instead of re-classifying rows from
+    ``num_computed_tokens_cpu``: a request that just finished prefill already
+    has valid next-step draft tokens, while its computed-token bookkeeping can
+    still look like prefill until the following runner iteration.
+    """
+    draft_req_ids = getattr(self, "_draft_token_req_ids", None)
+    if draft_req_ids is None:
+        draft_req_ids = self.input_batch.req_ids
+    return list(draft_req_ids[:num_reqs])
+
+
 def _dcut_queue_probs(self, zeros_only: bool) -> None:
     """Queue this step's selected_probs D2H (non-blocking) for next-step use.
 
@@ -127,17 +143,22 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
                 num_spec,
             )
             return
+    prob_req_ids = _dcut_probability_req_ids(self, num_reqs)
+    if len(prob_req_ids) != num_reqs:
+        logger.warning(
+            "D-Cut: draft probability request IDs are misaligned: "
+            "got=%s expected=%s",
+            len(prob_req_ids),
+            num_reqs,
+        )
+        return
     self._adaptive_probs_pending = True
     self._adaptive_num_reqs = num_reqs
-    self._adaptive_req_ids = self.input_batch.req_ids.copy()
-    self._adaptive_active = {
-        self.input_batch.req_ids[i]
-        for i in range(num_reqs)
-        if (
-            self.input_batch.num_computed_tokens_cpu[i]
-            >= self.input_batch.num_prompt_tokens[i]
-        )
-    }
+    self._adaptive_req_ids = prob_req_ids
+    # Every probability row came from this proposal output. In particular,
+    # include a request that completed prefill in this iteration; the scheduler
+    # can place its freshly proposed tokens in the very next spec batch.
+    self._adaptive_active = set(prob_req_ids)
     # Non-blocking D2H on the default stream (the drafter runs there too). The
     # next execute_model consumes it immediately before truncation, allowing
     # this copy to overlap the remainder of the current scheduler step.
@@ -174,14 +195,17 @@ def _maybe_process_adaptive_probs(
             ]
         )
         active = active & current_req_ids
-    if active and self._verify_adaptive_controller is not None:
+    controller = self._verify_adaptive_controller
+    if active and controller is not None:
         assert self._adaptive_probs_pinned is not None
-        self._verify_adaptive_controller.process_draft_output(
+        controller.process_draft_output(
             selected_probs=self._adaptive_probs_pinned[:num_reqs],
             req_ids=self._adaptive_req_ids,
             active_draft_req_ids=active,
             batch_size=num_reqs,
         )
+    elif controller is not None:
+        controller.clear_adaptive_decision()
 
 
 def profile_adaptive_cost(self) -> None:

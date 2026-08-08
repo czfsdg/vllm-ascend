@@ -58,6 +58,28 @@ def _load_utils():
     )
 
 
+def _load_controller_methods(names: set[str]):
+    path = DCUT_DIR / "verify_adaptive_controller.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    controller = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "VerifyAdaptiveController"
+    )
+    methods = [
+        node
+        for node in controller.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    assert {node.name for node in methods} == names
+    module = ast.Module(body=methods, type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace
+
+
 def test_deferred_processing_and_argmax_reuse_defaults(monkeypatch) -> None:
     utils = _load_utils()
     monkeypatch.delenv("VLLM_DCUT_PROCESS_PROBS_STAGE", raising=False)
@@ -153,6 +175,106 @@ def test_eager_draft_does_not_reuse_graph_selected_probs() -> None:
     )
 
     assert actual is None
+
+
+def test_probability_rows_include_request_that_just_finished_prefill() -> None:
+    functions = _load_functions(
+        DCUT_DIR / "probs.py",
+        {"_dcut_probability_req_ids", "_dcut_queue_probs"},
+        {
+            "_dcut_enable_drafter_probs": lambda runner: None,
+            "_dcut_selected_probs_from_graph": lambda *args: None,
+            "_dcut_selected_probs_from_reused_logits": lambda *args: None,
+            "logger": SimpleNamespace(
+                info=lambda *args: None,
+                warning=lambda *args: None,
+            ),
+        },
+    )
+
+    class Event:
+        recorded = 0
+
+        def record(self):
+            self.recorded += 1
+
+    selected_probs = torch.tensor(
+        [[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]],
+        dtype=torch.float32,
+    )
+    drafter = SimpleNamespace(
+        _dcut_last_draft_ran_python=True,
+        take_last_selected_probs=lambda: selected_probs,
+    )
+    event = Event()
+    runner = SimpleNamespace(
+        drafter=drafter,
+        _draft_token_ids=torch.zeros((2, 3), dtype=torch.int64),
+        _draft_token_req_ids=["decode", "just-finished-prefill"],
+        _adaptive_probs_pending=False,
+        _adaptive_probs_pinned=torch.zeros((2, 3)),
+        _adaptive_probs_event=event,
+        num_spec_tokens=3,
+        input_batch=SimpleNamespace(
+            num_reqs=2,
+            req_ids=["decode", "just-finished-prefill"],
+            num_computed_tokens_cpu=[10, 9],
+            num_prompt_tokens=[10, 10],
+        ),
+    )
+
+    functions["_dcut_queue_probs"](runner, zeros_only=False)
+
+    assert runner._adaptive_req_ids == [
+        "decode",
+        "just-finished-prefill",
+    ]
+    assert runner._adaptive_active == {
+        "decode",
+        "just-finished-prefill",
+    }
+    torch.testing.assert_close(runner._adaptive_probs_pinned, selected_probs)
+    assert event.recorded == 1
+
+
+def test_adaptive_decision_signature_is_atomic() -> None:
+    methods = _load_controller_methods({
+        "set_adaptive_decision",
+        "clear_adaptive_decision",
+        "matches_adaptive_request_set",
+    })
+    controller = SimpleNamespace(
+        _adaptive_draft_lens={"stale": 15},
+        _adaptive_decision_req_ids=frozenset({"stale"}),
+        _adaptive_decision_batch_size=1,
+    )
+
+    methods["set_adaptive_decision"](
+        controller,
+        ["request-0", "request-1"],
+        [2, 3],
+        2,
+    )
+
+    assert controller._adaptive_draft_lens == {
+        "request-0": 2,
+        "request-1": 3,
+    }
+    assert methods["matches_adaptive_request_set"](
+        controller,
+        ["request-1", "request-0"],
+    )
+    assert not methods["matches_adaptive_request_set"](
+        controller,
+        ["request-0", "new-request"],
+    )
+
+    methods["clear_adaptive_decision"](controller)
+    assert controller._adaptive_draft_lens == {}
+    assert not methods["matches_adaptive_request_set"](
+        controller,
+        ["request-0", "request-1"],
+    )
 
 
 def test_pre_truncate_waits_once_and_filters_finished_requests() -> None:
