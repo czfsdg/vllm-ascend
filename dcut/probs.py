@@ -11,6 +11,33 @@ from .utils import (
 )
 
 
+def _dcut_bypass_prob_capture_for_prefill(self) -> None:
+    """Disable all D-Cut probability work for a real-prefill batch.
+
+    Prefill-containing batches are never truncated and run through the
+    native eager model path. Keeping ``needs_draft_probs`` enabled in that
+    path still makes the drafter reduce the full vocabulary, retain selected
+    probabilities, and queue a D2H copy whose result cannot be used for the
+    current batch. Drop the stale decision and leave probability capture
+    disabled until the next decode-only iteration re-enables it.
+    """
+    drafter = getattr(self, "drafter", None)
+    if drafter is not None:
+        if hasattr(drafter, "needs_draft_probs"):
+            drafter.needs_draft_probs = False
+        drafter._dcut_last_draft_ran_python = False
+        drafter._dcut_last_logits_for_probs = None
+        drafter._last_selected_probs = None
+
+    self._adaptive_probs_pending = False
+    self._adaptive_num_reqs = 0
+    self._adaptive_req_ids = []
+    self._adaptive_active = set()
+    controller = getattr(self, "_verify_adaptive_controller", None)
+    if controller is not None:
+        controller.clear_adaptive_decision()
+
+
 def _dcut_prepare_prob_capture(self, scheduler_output) -> None:
     """Reset per-step execution state before the drafter runs or replays."""
     drafter = getattr(self, "drafter", None)

@@ -17,6 +17,7 @@ from .globals import ENV_FULL_DECODE_ONLY, logger
 from .patch_gdn_v023 import _dcut_gdn_has_prefill
 from .patch_piecewise import _is_enabled as _gdn_piecewise_graph_enabled
 from .probs import (
+    _dcut_bypass_prob_capture_for_prefill,
     _dcut_prepare_prob_capture,
     _dcut_queue_probs,
     _maybe_process_adaptive_probs,
@@ -446,13 +447,26 @@ def _patch_runner() -> None:
                 getattr(scheduler_output, "total_num_scheduled_tokens", 0)
             )
         dcut_enabled = _ctrl is not None and not os.environ.get("VLLM_DCUT_DISABLE")
+        self._dcut_skip_current_prob_capture = bool(
+            _ctrl is not None and _has_prefill
+        )
         if debug_stats:
             _classify_ms = (_time.perf_counter() - _t_entry) * 1000
             _adaptive_probs_process_ms = 0.0
             _drafter_enable_ms = 0.0
             _truncate_ms = 0.0
+            _prob_capture_bypass_ms = 0.0
             _prob_capture_reset_ms = 0.0
-        if _ctrl is not None:
+        if _ctrl is not None and _has_prefill:
+            if debug_stats:
+                _t_component = _time.perf_counter()
+            _dcut_bypass_prob_capture_for_prefill(self)
+            if debug_stats:
+                _prob_capture_bypass_ms = (
+                    _time.perf_counter() - _t_component
+                ) * 1000
+
+        if _ctrl is not None and not _has_prefill:
             if getattr(self, "_adaptive_probs_pending", False):
                 if debug_stats:
                     _t_component = _time.perf_counter()
@@ -529,6 +543,7 @@ def _patch_runner() -> None:
             - _adaptive_probs_process_ms
             - _drafter_enable_ms
             - _truncate_ms
+            - _prob_capture_bypass_ms
             - _prob_capture_reset_ms,
         )
         _torch.npu.synchronize()
@@ -633,6 +648,30 @@ def _patch_runner() -> None:
                 "pure_prefill": _has_prefill and not _has_spec,
                 "decode_only": not _has_prefill,
                 "dcut_enabled": dcut_enabled,
+                "prob_capture_enabled": (
+                    _ctrl is not None
+                    and not self._dcut_skip_current_prob_capture
+                ),
+                "drafter_needs_draft_probs": bool(
+                    getattr(
+                        getattr(self, "drafter", None),
+                        "needs_draft_probs",
+                        False,
+                    )
+                ),
+                "draft_ran_python": bool(
+                    getattr(
+                        getattr(self, "drafter", None),
+                        "_dcut_last_draft_ran_python",
+                        False,
+                    )
+                ),
+                "adaptive_probs_pending_after_step": bool(
+                    getattr(self, "_adaptive_probs_pending", False)
+                ),
+                "prob_capture_skipped_for_prefill": (
+                    self._dcut_skip_current_prob_capture
+                ),
                 "full_draft": _full_draft,
                 "kept_draft": _kept_draft,
                 "trimmed": _full_draft - _kept_draft,
@@ -660,6 +699,10 @@ def _patch_runner() -> None:
                 ),
                 "drafter_enable_ms": round(_drafter_enable_ms, 3),
                 "truncate_ms": round(_truncate_ms, 3),
+                "prob_capture_bypass_ms": round(
+                    _prob_capture_bypass_ms,
+                    3,
+                ),
                 "prob_capture_reset_ms": round(
                     _prob_capture_reset_ms,
                     3,
@@ -693,7 +736,10 @@ def _patch_runner() -> None:
 
     def sample_tokens(self, *a, **k):
         out = _orig_sample_tokens(self, *a, **k)
-        if os.environ.get(ENV_FULL_DECODE_ONLY):
+        if (
+            os.environ.get(ENV_FULL_DECODE_ONLY)
+            or getattr(self, "_dcut_skip_current_prob_capture", False)
+        ):
             return out
         if (
             getattr(self, "_adaptive_probs_pending", False)
@@ -716,7 +762,10 @@ def _patch_runner() -> None:
 
     def _copy_draft_token_ids_to_cpu(self, scheduler_output, zeros_only=False):
         _orig_copy(self, scheduler_output, zeros_only)
-        if os.environ.get(ENV_FULL_DECODE_ONLY):
+        if (
+            os.environ.get(ENV_FULL_DECODE_ONLY)
+            or getattr(self, "_dcut_skip_current_prob_capture", False)
+        ):
             return
         if getattr(self, "_verify_adaptive_controller", None) is not None:
             try:
