@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from .controller import _dcut_enable_drafter_probs
 from .globals import logger
-from .utils import _dcut_selected_probs_from_reused_logits
+from .utils import (
+    _dcut_selected_probs_from_graph,
+    _dcut_selected_probs_from_reused_logits,
+)
 
 
 def _dcut_prepare_prob_capture(self, scheduler_output) -> None:
@@ -13,6 +16,10 @@ def _dcut_prepare_prob_capture(self, scheduler_output) -> None:
     drafter = getattr(self, "drafter", None)
     if drafter is not None:
         drafter._dcut_last_draft_ran_python = False
+        # Graph replay updates the fixed-address tensor retained per bucket;
+        # it does not reassign this Python attribute. Clear it so a replay can
+        # never consume the final bucket captured during startup by accident.
+        drafter._last_selected_probs = None
         # Force graph replay to select its retained logits by current output
         # shape instead of accidentally reusing the final startup-capture bucket.
         drafter._dcut_last_logits_for_probs = None
@@ -42,12 +49,46 @@ def _dcut_queue_probs(self, zeros_only: bool) -> None:
                 cnt,
             )
         return
-    probs = drafter.take_last_selected_probs()
+    draft_token_ids = getattr(self, "_draft_token_ids", None)
+    ran_python = getattr(drafter, "_dcut_last_draft_ran_python", False)
+    if ran_python:
+        probs = drafter.take_last_selected_probs()
+    else:
+        probs = _dcut_selected_probs_from_graph(
+            drafter,
+            draft_token_ids,
+        )
+        if (
+            probs is not None
+            and not getattr(
+                self,
+                "_dcut_logged_graph_selected_probs",
+                False,
+            )
+        ):
+            logger.info(
+                "D-Cut: using selected probabilities produced by the "
+                "replayed draft graph."
+            )
+            self._dcut_logged_graph_selected_probs = True
     if probs is None:
+        if (
+            not ran_python
+            and not getattr(
+                self,
+                "_dcut_logged_graph_probs_fallback",
+                False,
+            )
+        ):
+            logger.warning(
+                "D-Cut: replayed draft graph has no matching selected-prob "
+                "buffer; falling back to a graph-logits reduction."
+            )
+            self._dcut_logged_graph_probs_fallback = True
         try:
             probs = _dcut_selected_probs_from_reused_logits(
                 drafter,
-                getattr(self, "_draft_token_ids", None),
+                draft_token_ids,
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(

@@ -131,6 +131,61 @@ def _dcut_selected_probs_from_reused_logits(
     return selected_probs.float().contiguous()
 
 
+def _dcut_selected_probs_from_graph(
+    drafter,
+    draft_token_ids: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Return the selected-prob tensor produced by the replayed draft graph.
+
+    The merged draft function is captured once per output bucket. Python
+    instance attributes are not reassigned during graph replay, so a single
+    last-selected-probs pointer can silently refer to the final bucket captured
+    at startup. Keep fixed-address graph outputs by shape and select the
+    matching tensor for the current draft output instead.
+    """
+    if (
+        draft_token_ids is None
+        or not torch.is_tensor(draft_token_ids)
+        or getattr(drafter, "_dcut_last_draft_ran_python", False)
+        or not getattr(
+            drafter,
+            "_dcut_graph_selected_probs_ready",
+            False,
+        )
+    ):
+        return None
+
+    shape_key = tuple(draft_token_ids.shape)
+    by_output_ptr = getattr(
+        drafter,
+        "_dcut_graph_selected_probs_by_output_ptr",
+        {},
+    )
+    by_shape = getattr(
+        drafter,
+        "_dcut_graph_selected_probs_by_shape",
+        {},
+    )
+    by_numel = getattr(
+        drafter,
+        "_dcut_graph_selected_probs_by_numel",
+        {},
+    )
+    selected_probs = by_output_ptr.get(int(draft_token_ids.data_ptr()))
+    if selected_probs is None:
+        selected_probs = by_shape.get(shape_key)
+    if selected_probs is None:
+        selected_probs = by_numel.get(int(draft_token_ids.numel()))
+    if selected_probs is None:
+        return None
+
+    flat_probs = selected_probs.reshape(-1)
+    num_tokens = int(draft_token_ids.numel())
+    if num_tokens <= 0 or flat_probs.numel() < num_tokens:
+        return None
+    return flat_probs[:num_tokens].view(draft_token_ids.shape)
+
+
 def _npu_event(enable_timing: bool = False):
     """torch.npu.Event, mirroring torch.cuda.Event on the CUDA plugin."""
     return torch.npu.Event(enable_timing=enable_timing)

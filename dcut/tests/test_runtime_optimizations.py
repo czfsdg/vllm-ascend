@@ -43,6 +43,7 @@ def _load_utils():
         "_dcut_reuse_argmax_enabled",
         "_dcut_selected_token_probs",
         "_dcut_can_reuse_argmax_for_probs",
+        "_dcut_selected_probs_from_graph",
         "_dcut_selected_probs_from_reused_logits",
     }
     return _load_functions(
@@ -101,6 +102,59 @@ def test_reused_logits_match_selected_softmax_probability(monkeypatch) -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_graph_selected_probs_are_selected_by_output_bucket() -> None:
+    utils = _load_utils()
+    small = torch.tensor([[0.8, 0.6]], dtype=torch.float32)
+    large = torch.tensor(
+        [[0.9, 0.7], [0.5, 0.3]],
+        dtype=torch.float32,
+    )
+    draft_token_ids = torch.zeros((1, 2), dtype=torch.int64)
+    drafter = SimpleNamespace(
+        _dcut_last_draft_ran_python=False,
+        _dcut_graph_selected_probs_ready=True,
+        _dcut_graph_selected_probs_by_output_ptr={
+            int(draft_token_ids.data_ptr()): small,
+        },
+        # Deliberately point the same-shape fallback at another bucket. The
+        # fixed output address must win when multiple graphs share a shape.
+        _dcut_graph_selected_probs_by_shape={
+            (1, 2): large,
+        },
+        _dcut_graph_selected_probs_by_numel={
+            2: large,
+        },
+    )
+
+    actual = utils["_dcut_selected_probs_from_graph"](
+        drafter,
+        draft_token_ids,
+    )
+
+    assert actual is not None
+    torch.testing.assert_close(actual, small)
+
+
+def test_eager_draft_does_not_reuse_graph_selected_probs() -> None:
+    utils = _load_utils()
+    drafter = SimpleNamespace(
+        _dcut_last_draft_ran_python=True,
+        _dcut_graph_selected_probs_ready=True,
+        _dcut_graph_selected_probs_by_output_ptr={},
+        _dcut_graph_selected_probs_by_shape={
+            (1, 2): torch.ones((1, 2)),
+        },
+        _dcut_graph_selected_probs_by_numel={},
+    )
+
+    actual = utils["_dcut_selected_probs_from_graph"](
+        drafter,
+        torch.zeros((1, 2), dtype=torch.int64),
+    )
+
+    assert actual is None
+
+
 def test_pre_truncate_waits_once_and_filters_finished_requests() -> None:
     process = _load_functions(
         DCUT_DIR / "probs.py",
@@ -157,6 +211,7 @@ def test_prepare_clears_transient_graph_logits_pointer() -> None:
     drafter = SimpleNamespace(
         _dcut_last_draft_ran_python=True,
         _dcut_last_logits_for_probs=object(),
+        _last_selected_probs=object(),
     )
     runner = SimpleNamespace(drafter=drafter)
 
@@ -164,6 +219,7 @@ def test_prepare_clears_transient_graph_logits_pointer() -> None:
 
     assert drafter._dcut_last_draft_ran_python is False
     assert drafter._dcut_last_logits_for_probs is None
+    assert drafter._last_selected_probs is None
 
 def test_no_low_batch_or_eager_fallback_was_migrated() -> None:
     sources = "\n".join(

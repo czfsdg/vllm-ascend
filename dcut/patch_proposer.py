@@ -150,31 +150,66 @@ def _patch_proposer() -> None:
                 if not type(self)._should_collect_draft_probs(self):
                     return out
 
+                selected_probs = getattr(self, "_last_selected_probs", None)
                 logits = getattr(self, "_dcut_last_logits_for_probs", None)
-                if logits is None:
-                    return out
                 if in_graph_capture:
-                    # Keep fixed-address graph tensors by output shape. Replay
-                    # updates these tensors even though this Python wrapper does
-                    # not execute again.
-                    self._dcut_graph_logits_for_probs_by_shape = getattr(
-                        self,
-                        "_dcut_graph_logits_for_probs_by_shape",
-                        {},
-                    )
-                    self._dcut_graph_logits_for_probs_by_numel = getattr(
-                        self,
-                        "_dcut_graph_logits_for_probs_by_numel",
-                        {},
-                    )
-                    self._dcut_graph_logits_for_probs_by_shape[
-                        tuple(out.shape)
-                    ] = logits
-                    self._dcut_graph_logits_for_probs_by_numel[
-                        int(out.numel())
-                    ] = logits
-                    self._dcut_graph_logits_for_probs = logits
-                    self._dcut_graph_logits_for_probs_ready = True
+                    # Keep every fixed-address graph output by draft shape.
+                    # Replay updates these tensors without running this Python
+                    # wrapper again. Prefer the already-captured probabilities
+                    # so runtime does not scan the full vocabulary a second
+                    # time merely to recover selected-token confidence.
+                    if selected_probs is not None:
+                        self._dcut_graph_selected_probs_by_output_ptr = getattr(
+                            self,
+                            "_dcut_graph_selected_probs_by_output_ptr",
+                            {},
+                        )
+                        self._dcut_graph_selected_probs_by_shape = getattr(
+                            self,
+                            "_dcut_graph_selected_probs_by_shape",
+                            {},
+                        )
+                        self._dcut_graph_selected_probs_by_numel = getattr(
+                            self,
+                            "_dcut_graph_selected_probs_by_numel",
+                            {},
+                        )
+                        self._dcut_graph_selected_probs_by_output_ptr[
+                            int(out.data_ptr())
+                        ] = selected_probs
+                        self._dcut_graph_selected_probs_by_shape[
+                            tuple(out.shape)
+                        ] = selected_probs
+                        self._dcut_graph_selected_probs_by_numel[
+                            int(out.numel())
+                        ] = selected_probs
+                        self._dcut_graph_selected_probs_ready = True
+
+                    # Retain logits only as a compatibility fallback for a
+                    # proposer path that could not produce probabilities while
+                    # being captured.
+                    if logits is not None:
+                        self._dcut_graph_logits_for_probs_by_shape = getattr(
+                            self,
+                            "_dcut_graph_logits_for_probs_by_shape",
+                            {},
+                        )
+                        self._dcut_graph_logits_for_probs_by_numel = getattr(
+                            self,
+                            "_dcut_graph_logits_for_probs_by_numel",
+                            {},
+                        )
+                        self._dcut_graph_logits_for_probs_by_shape[
+                            tuple(out.shape)
+                        ] = logits
+                        self._dcut_graph_logits_for_probs_by_numel[
+                            int(out.numel())
+                        ] = logits
+                        self._dcut_graph_logits_for_probs = logits
+                        self._dcut_graph_logits_for_probs_ready = True
+                    return out
+
+                if selected_probs is not None or logits is None:
                     return out
 
                 try:
