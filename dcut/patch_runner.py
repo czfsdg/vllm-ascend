@@ -369,6 +369,8 @@ def _patch_runner() -> None:
         return result
 
     def execute_model(self, scheduler_output, intermediate_tensors=None):
+        import time as _time_entry
+        _t_entry = _time_entry.perf_counter()
         if os.environ.get(ENV_FULL_DECODE_ONLY):
             return _orig_exec(self, scheduler_output, intermediate_tensors)
 
@@ -427,8 +429,12 @@ def _patch_runner() -> None:
             _kept_draft = sum(len(t) for t in _new_spec.values())
         import time as _time
         import torch as _torch
+        _gap_ms = 0.0
+        if hasattr(self, "_dcut_last_t_end"):
+            _gap_ms = (_t_entry - self._dcut_last_t_end) * 1000
         _torch.npu.synchronize()
         _t0 = _time.perf_counter()
+        _pre_ms = (_t0 - _t_entry) * 1000
         result = _dcut_execute_with_gdn_prefill_route(
             self,
             _orig_exec,
@@ -437,12 +443,14 @@ def _patch_runner() -> None:
             _has_prefill,
         )
         _torch.npu.synchronize()
-        _fwd_ms = (_time.perf_counter() - _t0) * 1000
+        _t1 = _time.perf_counter()
+        _fwd_ms = (_t1 - _t0) * 1000
         if not hasattr(self, "_dcut_fwd_accum"):
-            self._dcut_fwd_accum = {"full": 0, "kept": 0, "cut": 0, "fwd_ms": 0.0, "steps": 0, "spec_steps": 0}
+            self._dcut_fwd_accum = {"full": 0, "kept": 0, "cut": 0, "fwd_ms": 0.0, "gap_ms": 0.0, "steps": 0, "spec_steps": 0}
         acc = self._dcut_fwd_accum
         acc["steps"] += 1
         acc["fwd_ms"] += _fwd_ms
+        acc["gap_ms"] += _gap_ms
         if _has_spec:
             acc["spec_steps"] += 1
             acc["full"] += _full_draft
@@ -450,14 +458,15 @@ def _patch_runner() -> None:
             acc["cut"] += (_full_draft - _kept_draft)
         if acc["steps"] % 50 == 0:
             _avg_fwd = acc["fwd_ms"] / acc["steps"]
+            _avg_gap = acc["gap_ms"] / acc["steps"]
             if acc["full"] > 0:
                 _cut_pct = 100.0 * acc["cut"] / acc["full"]
                 logger.warning(
-                    "D-Cut step %d: full_draft=%d cut=%d (%.1f%%) kept=%d avg_fwd=%.1fms",
-                    acc["steps"], acc["full"], acc["cut"], _cut_pct, acc["kept"], _avg_fwd)
+                    "D-Cut step %d: full_draft=%d cut=%d (%.1f%%) kept=%d avg_fwd=%.1fms avg_gap=%.1fms",
+                    acc["steps"], acc["full"], acc["cut"], _cut_pct, acc["kept"], _avg_fwd, _avg_gap)
             else:
                 logger.warning(
-                    "D-Cut step %d: no spec reqs, avg_fwd=%.1fms", acc["steps"], _avg_fwd)
+                    "D-Cut step %d: no spec reqs, avg_fwd=%.1fms avg_gap=%.1fms", acc["steps"], _avg_fwd, _avg_gap)
         _fwd_stats_out = os.environ.get("VLLM_DCUT_FWD_STATS_OUT")
         if _fwd_stats_out and _has_spec:
             import json as _json
@@ -471,13 +480,17 @@ def _patch_runner() -> None:
                 "trimmed": _full_draft - _kept_draft,
                 "num_tokens_padded": _num_padded,
                 "graph_safe": _graph_safe,
+                "gap_ms": round(_gap_ms, 2),
+                "pre_ms": round(_pre_ms, 2),
                 "fwd_ms": round(_fwd_ms, 2),
+                "post_ms": round((_time.perf_counter() - _t1) * 1000, 2),
             }
             try:
                 with open(_fwd_stats_out, "a") as _f:
                     _f.write(_json.dumps(_entry) + chr(10))
             except Exception:
                 pass
+        self._dcut_last_t_end = _time.perf_counter()
         return result
 
     _orig_sample_tokens = R.sample_tokens
