@@ -26,7 +26,6 @@ from .probs import (
 from .truncate import _dcut_has_prefill, _dcut_truncate
 
 ENV_DEBUG_STATS = "VLLM_DCUT_DEBUG_STATS"
-_FORCE_EAGER_ARG_POSITION = 6
 
 
 def _dcut_debug_rank_info() -> dict[str, int | bool]:
@@ -48,7 +47,7 @@ def _dcut_execute_with_gdn_prefill_route(
     intermediate_tensors,
     has_prefill: bool,
 ):
-    """Expose the scheduler's real-prefill decision during model forward."""
+    """Expose real prefill to GDN without overriding the outer graph mode."""
     attr = "_dcut_gdn_scheduler_has_prefill"
     had_previous = hasattr(runner, attr)
     previous = getattr(runner, attr, None)
@@ -64,33 +63,6 @@ def _dcut_execute_with_gdn_prefill_route(
             setattr(runner, attr, previous)
         elif hasattr(runner, attr):
             delattr(runner, attr)
-
-
-def _dcut_force_prefill_eager(
-    runner,
-    determine_batch_execution_and_padding,
-    *args,
-    **kwargs,
-):
-    """Force real-prefill batches through the runner's eager path."""
-    if not bool(
-        getattr(runner, "_dcut_gdn_scheduler_has_prefill", False)
-    ):
-        return determine_batch_execution_and_padding(
-            runner, *args, **kwargs
-        )
-
-    if len(args) > _FORCE_EAGER_ARG_POSITION:
-        args = list(args)
-        args[_FORCE_EAGER_ARG_POSITION] = True
-        args = tuple(args)
-        if "force_eager" in kwargs:
-            kwargs = dict(kwargs)
-            kwargs.pop("force_eager")
-    else:
-        kwargs = dict(kwargs)
-        kwargs["force_eager"] = True
-    return determine_batch_execution_and_padding(runner, *args, **kwargs)
 
 
 def _dcut_piecewise_capture_dummy_enabled(
@@ -147,17 +119,6 @@ def _patch_runner() -> None:
     _orig_model_forward = R._model_forward
     _orig_dummy_run = R._dummy_run
     _orig_should_build_dummy = R._should_build_dummy_attn_metadata
-    _orig_determine_batch_execution_and_padding = (
-        R._determine_batch_execution_and_padding
-    )
-
-    def _determine_batch_execution_and_padding(self, *args, **kwargs):
-        return _dcut_force_prefill_eager(
-            self,
-            _orig_determine_batch_execution_and_padding,
-            *args,
-            **kwargs,
-        )
 
     def _dummy_run(self, num_tokens, *args, **kwargs):
         cudagraph_runtime_mode = kwargs.get("cudagraph_runtime_mode")
@@ -629,7 +590,7 @@ def _patch_runner() -> None:
                 "_dcut_last_runtime_mode",
                 "UNKNOWN",
             )
-            _is_eager = _has_prefill or _runtime_mode in {
+            _is_eager = _runtime_mode in {
                 "NONE",
                 "EAGER",
             }
@@ -681,6 +642,7 @@ def _patch_runner() -> None:
                 "num_tokens_padded": _num_padded,
                 "runtime_mode": _runtime_mode,
                 "is_eager": _is_eager,
+                "gdn_native_path": _has_prefill,
                 "gdn_graph_safe": _graph_safe,
                 "prev_step": _prev_step,
                 "gap_sample_valid": _has_gap_sample,
@@ -788,9 +750,6 @@ def _patch_runner() -> None:
     R._dummy_run = _dummy_run
     R._should_build_dummy_attn_metadata = _should_build_dummy_attn_metadata
     R.execute_model = execute_model
-    R._determine_batch_execution_and_padding = (
-        _determine_batch_execution_and_padding
-    )
     R.sample_tokens = sample_tokens
     R._copy_draft_token_ids_to_cpu = _copy_draft_token_ids_to_cpu
     R._update_states = _update_states

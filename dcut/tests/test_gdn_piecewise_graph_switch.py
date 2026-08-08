@@ -36,6 +36,8 @@ def test_runner_keeps_outer_piecewise_and_routes_gdn_locally() -> None:
     assert "CUDAGraphMode.NONE" not in runner
     assert "runtime_mode_overridden" not in runner
     assert "forward_context.cudagraph_runtime_mode = (" not in runner
+    assert "_dcut_force_prefill_eager" not in runner
+    assert "R._determine_batch_execution_and_padding" not in runner
     assert "_dcut_gdn_local_graph_safe" in runner
     assert "_dcut_gdn_local_graph_capture_requested" in runner
     assert "only GDN boundaries use eager" in runner
