@@ -17,6 +17,6 @@ def test_piecewise_gdn_does_not_nest_a_local_npugraph() -> None:
     assert "graph.replay()" not in core
     assert "_dcut_gdn_local_graph" not in core
     assert "_dcut_gdn_local_graph" not in runner
-    assert "forward_with_recurrent_boundary" in core
+    assert "forward_with_graphable_recurrent" in core
     assert "torch.ops.vllm.dcut_gdn_recurrent" in core
     assert "_dcut_gdn_recurrent_piecewise_safe" in runner

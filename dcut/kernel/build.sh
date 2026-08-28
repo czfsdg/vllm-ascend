@@ -8,6 +8,7 @@ SOC="${SOC_VERSION:-ascend910b}"
 BUILD_TORCH=1
 TORCH_ONLY=0
 JOBS="${MAX_JOBS:-8}"
+CUSTOM_OP_INSTALL_DIR="${KERNEL_DIR}/build/custom_ops"
 
 usage() {
     cat <<'EOF'
@@ -71,6 +72,23 @@ if [[ "${TORCH_ONLY}" == "0" ]]; then
         cd "${REPO_ROOT}/csrc"
         bash build.sh --pkg --vendor_name=dcut --ops="${OPS}" --soc="${SOC}"
     )
+
+    shopt -s nullglob
+    installers=("${REPO_ROOT}"/csrc/build/cann-ops-transformer*.run)
+    shopt -u nullglob
+    if [[ "${#installers[@]}" -ne 1 ]]; then
+        echo "Expected one custom-op installer, found ${#installers[@]}" >&2
+        exit 1
+    fi
+    mkdir -p "${CUSTOM_OP_INSTALL_DIR}"
+    chmod +x "${installers[0]}" || true
+    "${installers[0]}" --install-path="${CUSTOM_OP_INSTALL_DIR}"
+    if [[ ! -d "${CUSTOM_OP_INSTALL_DIR}/vendors/dcut" ]]; then
+        echo "D-Cut custom-op vendor installation is missing" >&2
+        exit 1
+    fi
+    echo "Custom-op vendor path: ${CUSTOM_OP_INSTALL_DIR}/vendors/dcut"
+
     cleanup
     OVERLAYS=()
 fi

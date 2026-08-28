@@ -45,7 +45,7 @@ def test_piecewise_gdn_core_uses_recurrent_boundary_inputs() -> None:
     assert 'op_name="dcut_gdn_recurrent"' in core
     assert 'mutates_args=["state"]' in core
     assert "ssm_state_indices=spec_state_indices_tensor.flatten()" not in core
-    assert "if use_recurrent_boundary" in core
+    assert "if use_graphable_recurrent" in core
     assert "else torch.ops._C_ascend.npu_dcut_recurrent_gated_delta_rule" in core
     assert 'eager_spec_state["query_start_loc"]' in core
     assert 'piecewise_spec_bufs["qsl"]' in core
@@ -127,6 +127,32 @@ def test_torch_registration_has_graph_metadata() -> None:
     assert "Tensor? query_start_loc=None" in binding
     assert "Tensor? num_accepted_tokens=None" in binding
     assert "bool zero_padded_output=False" in binding
+
+
+def test_torch_extension_uses_the_configured_repo_root() -> None:
+    cmake = _read("kernel/torch_extension/CMakeLists.txt")
+
+    assert '"${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUBridge.cpp"' in cmake
+    assert '"${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUStorageImpl.cpp"' in cmake
+    assert '"${REPO_ROOT}/csrc"' in cmake
+    assert "/vllm-workspace/vllm-ascend" not in cmake
+
+
+def test_kernel_build_installs_and_bootstraps_the_local_opp() -> None:
+    build = _read("kernel/build.sh")
+    install = _read("install.py")
+    patch = _read("patch_gdn_v023.py")
+
+    assert '--install-path="${CUSTOM_OP_INSTALL_DIR}"' in build
+    assert '"${CUSTOM_OP_INSTALL_DIR}/vendors/dcut"' in build
+    assert "bootstrap_dcut_custom_op_env()" in install
+    assert install.index("bootstrap_dcut_custom_op_env()") < install.index(
+        "from .globals import ENV_CONFIG, logger"
+    )
+    assert "bootstrap_dcut_custom_op_env()" in patch
+    assert patch.index("bootstrap_dcut_custom_op_env()") < patch.index(
+        "torch.ops.load_library"
+    )
 
 
 def test_truncation_has_no_previous_acceptance_floor() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from functools import wraps
 
 import torch
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
@@ -11,8 +12,8 @@ from .globals import ENV_CONFIG, logger
 from .utils import (
     _dcut_greedy_sample_with_selected_probs,
     _dcut_in_graph_capture,
-    _dcut_should_collect_draft_probs,
     _dcut_selected_token_probs,
+    _dcut_should_collect_draft_probs,
 )
 
 # ---------------------------------------------------------------------------
@@ -188,9 +189,73 @@ def _dcut_prepare_dflash_graph_context(
     return restore_context
 
 
+def _dcut_patch_dflash_dummy_context(proposer_cls) -> None:
+    """Teach the stock v0.23 DFlash dummy run its real context length.
+
+    ``AscendDflashProposer.dummy_run`` accepts unknown keyword arguments but
+    otherwise derives context length from the graph-padded query size. D-Cut
+    profiling passes ``context_num_tokens`` separately; intercept the runnable
+    call after the stock method has synchronized its input size, then restore
+    the live proposer state when the profiling call finishes.
+    """
+    if getattr(proposer_cls, "_dcut_dummy_context_patched", False):
+        return
+
+    original_dummy_run = proposer_cls.dummy_run
+    missing = object()
+
+    @wraps(original_dummy_run)
+    def dummy_run(self, *args, context_num_tokens=None, **kwargs):
+        if context_num_tokens is None:
+            return original_dummy_run(self, *args, **kwargs)
+
+        context_num_tokens = int(context_num_tokens)
+        if context_num_tokens < 0:
+            raise ValueError(
+                "D-Cut DFlash context_num_tokens must be non-negative: "
+                f"{context_num_tokens}"
+            )
+
+        original_runnable = getattr(self, "_runnable", None)
+        if original_runnable is None:
+            raise RuntimeError("D-Cut DFlash proposer has no runnable")
+        previous_context = getattr(self, "_dflash_num_context", missing)
+
+        def _run_with_context(*run_args, **run_kwargs):
+            synchronized_tokens = run_kwargs.get("num_input_tokens")
+            if synchronized_tokens is None:
+                raise RuntimeError(
+                    "D-Cut DFlash runnable did not receive num_input_tokens"
+                )
+            synchronized_tokens = int(synchronized_tokens)
+            if context_num_tokens > synchronized_tokens:
+                raise ValueError(
+                    "D-Cut DFlash context exceeds synchronized dummy input: "
+                    f"context={context_num_tokens}, "
+                    f"input={synchronized_tokens}"
+                )
+            self._dflash_num_context = context_num_tokens
+            return original_runnable(*run_args, **run_kwargs)
+
+        self._runnable = _run_with_context
+        try:
+            return original_dummy_run(self, *args, **kwargs)
+        finally:
+            self._runnable = original_runnable
+            if previous_context is missing:
+                if hasattr(self, "_dflash_num_context"):
+                    del self._dflash_num_context
+            else:
+                self._dflash_num_context = previous_context
+
+    proposer_cls.dummy_run = dummy_run
+    proposer_cls._dcut_dummy_context_patched = True
+
+
 def _patch_aclgraph_descriptor_tracking() -> None:
     """Expose the exact draft ``BatchDescriptor`` selected for replay."""
     from vllm.forward_context import get_forward_context
+
     from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 
     if getattr(ACLGraphWrapper, "_dcut_descriptor_tracking_patched", False):
@@ -309,6 +374,8 @@ def _patch_proposer() -> None:
     proposer_classes = []
     try:
         from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+
+        _dcut_patch_dflash_dummy_context(AscendDflashProposer)
         proposer_classes.append(AscendDflashProposer)
     except Exception as e:  # pragma: no cover
         logger.warning("D-Cut: could not import AscendDflashProposer: %s", e)

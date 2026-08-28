@@ -13,8 +13,8 @@ import os
 _WHOLE_GDN_OP = "vllm::qwen_gdn_attention_core"
 _RECURRENT_OP = "vllm::dcut_gdn_recurrent"
 ENV_DCUT_CONFIG = "VLLM_DCUT_CONFIG"
-ENV_GDN_PIECEWISE = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"
-LEGACY_ENV_GDN_PIECEWISE = "VLLM_DCUT_GDN_PIECEWISE"
+ENV_GDN_PIECEWISE = "VLLM_DCUT_GDN_PIECEWISE"
+ENV_GDN_PIECEWISE_COMPAT = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"
 
 
 def _ensure_gdn_splitting_ops(ops):
@@ -35,23 +35,17 @@ def _env_flag(value: str) -> bool:
 def _is_enabled() -> bool:
     """Return whether GDN may be captured by PIECEWISE ACLGraph.
 
-    The registered vllm-ascend variable is authoritative. The earlier
-    D-Cut-only spelling remains accepted so existing launch scripts do not
-    silently lose the optimization.
+    Keep this lookup plugin-local so D-Cut does not require changes outside
+    its package. The earlier vLLM-Ascend spelling remains accepted as a
+    compatibility alias for existing launch scripts.
     """
     if not os.environ.get(ENV_DCUT_CONFIG):
         return False
 
-    legacy = os.environ.get(LEGACY_ENV_GDN_PIECEWISE)
-    if legacy is not None:
-        return _env_flag(legacy)
-
-    try:
-        from vllm_ascend import envs
-
-        return bool(envs.VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE)
-    except (AttributeError, ImportError, ValueError):
-        return _env_flag(os.environ.get(ENV_GDN_PIECEWISE, "0"))
+    configured = os.environ.get(ENV_GDN_PIECEWISE)
+    if configured is None:
+        configured = os.environ.get(ENV_GDN_PIECEWISE_COMPAT, "0")
+    return _env_flag(configured)
 
 
 def _arm_gdn_piecewise_splitting_patch():
@@ -75,7 +69,7 @@ def _arm_gdn_piecewise_splitting_patch():
         return
 
     try:
-        from vllm.config import CUDAGraphMode, CompilationConfig
+        from vllm.config import CompilationConfig, CUDAGraphMode
     except Exception as exc:  # pragma: no cover - vLLM not installed
         print(
             f"[D-Cut] cannot import CompilationConfig, "

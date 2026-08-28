@@ -40,15 +40,15 @@ endif()
 
 add_library(dcut_torch_ops SHARED
     dcut_torch_binding.cpp
-    /vllm-workspace/vllm-ascend/csrc/aclnn_torch_adapter/NPUBridge.cpp
-    /vllm-workspace/vllm-ascend/csrc/aclnn_torch_adapter/NPUStorageImpl.cpp
+    "${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUBridge.cpp"
+    "${REPO_ROOT}/csrc/aclnn_torch_adapter/NPUStorageImpl.cpp"
 )
 set_target_properties(dcut_torch_ops PROPERTIES PREFIX "" OUTPUT_NAME "dcut_torch_ops")
 target_include_directories(dcut_torch_ops PRIVATE
     ${TORCH_INCLUDE_DIRS}
     "${TORCH_NPU_PATH}/include"
     "${ASCEND_HOME_PATH}/include"
-    "/vllm-workspace/vllm-ascend/csrc"
+    "${REPO_ROOT}/csrc"
 )
 target_link_directories(dcut_torch_ops PRIVATE
     ${TORCH_LIBRARY_DIRS}

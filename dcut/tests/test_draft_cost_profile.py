@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
 PROFILE_PATH = Path(__file__).resolve().parents[1] / "draft_profile.py"
-DFLASH_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "vllm_ascend"
-    / "spec_decode"
-    / "dflash_proposer.py"
+PATCH_PROPOSER_PATH = (
+    Path(__file__).resolve().parents[1] / "patch_proposer.py"
 )
 
 
@@ -97,6 +95,21 @@ def _load_profile_function():
     return namespace["_adaptive_profile_draft_run"]
 
 
+def _load_dummy_context_patcher():
+    tree = ast.parse(PATCH_PROPOSER_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_dcut_patch_dflash_dummy_context"
+    )
+    module = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"wraps": wraps}
+    exec(compile(module, str(PATCH_PROPOSER_PATH), "exec"), namespace)
+    return namespace["_dcut_patch_dflash_dummy_context"]
+
+
 def test_draft_profile_keeps_full_query_shape_and_separate_context_q() -> None:
     profile = _load_profile_function()
     runner = _Runner()
@@ -120,8 +133,74 @@ def test_draft_profile_keeps_full_query_shape_and_separate_context_q() -> None:
         assert call["context_num_tokens"] == 6
 
 
-def test_dflash_dummy_uses_separate_context_length() -> None:
-    source = DFLASH_PATH.read_text(encoding="utf-8")
-    assert "context_num_tokens: int | None = None" in source
-    assert "self._dflash_num_context = num_context_tokens" in source
-    assert "self._context_positions_buffer[:num_context_tokens]" in source
+def test_dflash_dummy_patch_uses_separate_context_length() -> None:
+    class StockDflashProposer:
+        def __init__(self) -> None:
+            self._dflash_num_context = 9
+            self.runnable_contexts = []
+            self.dummy_kwargs = []
+            self._runnable = self._run
+
+        def _run(self, *, num_input_tokens):
+            self.runnable_contexts.append(
+                (self._dflash_num_context, num_input_tokens)
+            )
+
+        def dummy_run(self, *, num_tokens, **kwargs):
+            self.dummy_kwargs.append(kwargs)
+            self._dflash_num_context = num_tokens
+            return self._runnable(num_input_tokens=num_tokens)
+
+    patch_dummy_context = _load_dummy_context_patcher()
+    patch_dummy_context(StockDflashProposer)
+    patched_dummy_run = StockDflashProposer.dummy_run
+    patch_dummy_context(StockDflashProposer)
+    assert StockDflashProposer.dummy_run is patched_dummy_run
+    assert (
+        "_dcut_patch_dflash_dummy_context(AscendDflashProposer)"
+        in PATCH_PROPOSER_PATH.read_text(encoding="utf-8")
+    )
+    drafter = StockDflashProposer()
+    original_runnable = drafter._runnable
+
+    drafter.dummy_run(num_tokens=64, context_num_tokens=6)
+
+    assert drafter.runnable_contexts == [(6, 64)]
+    assert drafter.dummy_kwargs == [{}]
+    assert drafter._runnable is original_runnable
+    assert drafter._dflash_num_context == 9
+
+
+def test_dflash_dummy_patch_delegates_and_restores_on_invalid_context() -> None:
+    class StockDflashProposer:
+        def __init__(self) -> None:
+            self._dflash_num_context = 7
+            self.runnable_contexts = []
+            self._runnable = self._run
+
+        def _run(self, *, num_input_tokens):
+            self.runnable_contexts.append(
+                (self._dflash_num_context, num_input_tokens)
+            )
+
+        def dummy_run(self, *, num_tokens, **kwargs):
+            self._dflash_num_context = num_tokens
+            return self._runnable(num_input_tokens=num_tokens)
+
+    patch_dummy_context = _load_dummy_context_patcher()
+    patch_dummy_context(StockDflashProposer)
+    drafter = StockDflashProposer()
+    original_runnable = drafter._runnable
+
+    drafter.dummy_run(num_tokens=32)
+    assert drafter.runnable_contexts == [(32, 32)]
+
+    try:
+        drafter.dummy_run(num_tokens=32, context_num_tokens=33)
+    except ValueError as error:
+        assert "exceeds synchronized dummy input" in str(error)
+    else:
+        raise AssertionError("oversized DFlash context should fail")
+
+    assert drafter._runnable is original_runnable
+    assert drafter._dflash_num_context == 32

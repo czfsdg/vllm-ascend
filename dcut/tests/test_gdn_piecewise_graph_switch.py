@@ -4,7 +4,6 @@ import ast
 from pathlib import Path
 
 DCUT_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = DCUT_ROOT.parent
 
 
 def _read(relative_path: str) -> str:
@@ -76,24 +75,37 @@ def test_piecewise_capture_qsl_supports_ragged_token_buckets() -> None:
     assert build_qsl(1537, 16, 96) == ()
 
 
-def test_piecewise_switch_is_registered_and_default_off() -> None:
-    envs = (REPO_ROOT / "vllm_ascend" / "envs.py").read_text(
-        encoding="utf-8"
-    )
+def test_piecewise_switch_is_plugin_local_and_default_off(monkeypatch) -> None:
     piecewise = _read("patch_piecewise.py")
+    helpers = _load_piecewise_helpers()
 
-    assert '"VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE": lambda: bool(' in envs
-    assert (
-        'os.getenv("VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE", "0")'
-        in envs
-    )
     assert 'ENV_DCUT_CONFIG = "VLLM_DCUT_CONFIG"' in piecewise
+    assert 'ENV_GDN_PIECEWISE = "VLLM_DCUT_GDN_PIECEWISE"' in piecewise
     assert (
-        'ENV_GDN_PIECEWISE = "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"'
-        in piecewise
+        'ENV_GDN_PIECEWISE_COMPAT = '
+        '"VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE"' in piecewise
     )
+    assert "from vllm_ascend import envs" not in piecewise
     assert "if not _is_enabled():" in piecewise
     assert "self.cudagraph_mode != CUDAGraphMode.PIECEWISE" in piecewise
+
+    monkeypatch.delenv("VLLM_DCUT_CONFIG", raising=False)
+    monkeypatch.delenv(
+        "VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE", raising=False
+    )
+    monkeypatch.delenv("VLLM_DCUT_GDN_PIECEWISE", raising=False)
+    assert not helpers["_is_enabled"]()
+
+    monkeypatch.setenv("VLLM_DCUT_CONFIG", "/tmp/dcut.json")
+    assert not helpers["_is_enabled"]()
+    monkeypatch.setenv("VLLM_DCUT_GDN_PIECEWISE", "1")
+    assert helpers["_is_enabled"]()
+
+    monkeypatch.setenv("VLLM_DCUT_GDN_PIECEWISE", "0")
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE", "1")
+    assert not helpers["_is_enabled"]()
+    monkeypatch.delenv("VLLM_DCUT_GDN_PIECEWISE")
+    assert helpers["_is_enabled"]()
 
 
 def test_enabled_switch_keeps_native_boundary_and_captures_recurrent(

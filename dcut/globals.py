@@ -101,8 +101,8 @@ ENV_SKIP_UNREADY_PROBS = "VLLM_DCUT_SKIP_UNREADY_PROBS"
 ENV_REUSE_ARGMAX = "VLLM_DCUT_REUSE_ARGMAX"
 
 # Compatibility flag used only by the retired patch_gdn.py path. The active
-# v0.23 path is controlled by the registered
-# VLLM_ASCEND_ENABLE_DCUT_GDN_PIECEWISE variable in vllm_ascend/envs.py.
+# v0.23 path is controlled by the plugin-local VLLM_DCUT_GDN_PIECEWISE switch
+# in patch_piecewise.py.
 ENABLE_GDN_MAIN_PIECEWISE_GRAPH = False
 
 # Fixed-address GDN metadata buffers. The active v0.23 graph keys isolate

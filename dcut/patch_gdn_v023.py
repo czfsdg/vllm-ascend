@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 
 from .globals import logger
+from .kernel_runtime import bootstrap_dcut_custom_op_env
 
 ENV_TORCH_OP_LIBRARY = "VLLM_DCUT_TORCH_OP_LIBRARY"
 _REQUIRED_OPS = (
@@ -75,6 +76,7 @@ def _ops_registered() -> bool:
 
 def _load_dcut_torch_ops() -> bool:
     """Load the D-Cut-only Torch registration library before graph capture."""
+    bootstrap_dcut_custom_op_env()
     if _ops_registered():
         return True
 
@@ -250,6 +252,7 @@ def _patch_gdn_dcut() -> bool:
     """Patch GDN routing and expose the graphable pure-spec PIECEWISE path."""
     try:
         from vllm.forward_context import get_forward_context
+
         from vllm_ascend.ops import gdn as ascend_gdn
         from vllm_ascend.ops import gdn_attn_builder
         from vllm_ascend.patch.worker import patch_qwen3_5 as qwen_patch

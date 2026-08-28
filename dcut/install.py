@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402, I001
 """D-Cut patch application + vLLM general-plugin entrypoint."""
 
 from __future__ import annotations
@@ -13,6 +14,12 @@ print(
     "(GDN PIECEWISE graph switch is evaluated during config creation).",
     flush=True,
 )
+
+from .kernel_runtime import bootstrap_dcut_custom_op_env
+
+# The Torch adapter snapshots ASCEND_CUSTOM_OPP_PATH when its shared library
+# is loaded, so expose the repository-local OPP as early as plugin import.
+bootstrap_dcut_custom_op_env()
 
 from .globals import ENV_CONFIG, logger
 from .patch_attention import _patch_attention
